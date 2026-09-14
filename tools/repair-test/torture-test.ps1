@@ -219,10 +219,20 @@ foreach ($r in $recipes) {
     $historyRow = $recent | Where-Object { (Split-Path $_.Path -Leaf) -eq $r.n } | Select-Object -First 1
     $action = if ($historyRow) { $historyRow.Action } else { '(no history row)' }
 
+    # A "same basename, different extension" file counts as a valid rename outcome.
+    # The plugin's container-extension-mismatch fixer renames files whose extension
+    # disagrees with their actual container (e.g. 11-wrong-ext.mkv → 11-wrong-ext.mp4).
+    $variantsDir = Split-Path $originalPath -Parent
+    $renameMatch = Get-ChildItem -LiteralPath $variantsDir -File -EA 0 |
+        Where-Object { [IO.Path]::GetFileNameWithoutExtension($_.Name) -eq $baseName -and $_.Name -ne $r.n } |
+        Select-Object -First 1
+
     $outcome = ''; $status = ''
     if (-not $entry.scannerBroken) {
-        # Variant did not trip the scanner. Should remain untouched.
+        # Variant did not trip the decode-check. Either left untouched, or the plugin
+        # renamed it to fix a container/extension mismatch — both are valid outcomes.
         if ($sameNameExists -and -not $inBin) { $outcome = 'untouched (scanner passed)'; $status = 'PASS' }
+        elseif ($renameMatch -and -not $inBin) { $outcome = "renamed (extension mismatch) -> $($renameMatch.Name) plays"; $status = 'PASS' }
         else { $outcome = 'scanner did not flag but file moved/gone'; $status = 'FAIL' }
     }
     elseif ($chosen) {

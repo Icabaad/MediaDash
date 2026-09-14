@@ -81,6 +81,13 @@ public sealed class PlayabilityFixer : IFixer
             return FixResult.Fail("The file plays fine now — nothing was removed. Re-scan to clear this issue.");
         }
 
+        // Container-extension mismatch is a hygiene issue — rename the file, no repair, no delete.
+        // Split out from the repair ladder because these files ARE playable, just misnamed.
+        if (string.Equals(TryGetReason(issue.DetailsJson), "container-extension-mismatch", StringComparison.Ordinal))
+        {
+            return await RenameForMismatchAsync(issue).ConfigureAwait(false);
+        }
+
         // Repair ladder — try to salvage before deleting. Skips out to today's delete path on
         // pre-flight fail, all-rungs-disabled, or all-rungs-fail. Dry-run also skips: there's no
         // way to preview a "the file WOULD have been repaired" outcome accurately.
@@ -603,6 +610,28 @@ public sealed class PlayabilityFixer : IFixer
                 var decodeError = await _ffprobe.DecodeCheckAsync(issue.Path, duration, cancellationToken).ConfigureAwait(false);
                 return decodeError is not null;
 
+            case "container-extension-mismatch":
+                // Extension mismatch is broken until the file's actual extension matches its
+                // container. Re-derive both from the fresh probe; if they overlap now, the user
+                // (or another tool) already renamed it and the issue is stale.
+                {
+                    var ext = Path.GetExtension(issue.Path).ToLowerInvariant().TrimStart('.');
+                    var formatName = probe.Format?.FormatName?.ToLowerInvariant();
+                    if (string.IsNullOrEmpty(ext) || string.IsNullOrEmpty(formatName))
+                    {
+                        return false;
+                    }
+
+                    var demuxers = formatName.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                    var extAliases = ExtensionAliasesFor(ext);
+                    if (extAliases.Length == 0)
+                    {
+                        return false;
+                    }
+
+                    return !extAliases.Any(a => demuxers.Contains(a));
+                }
+
             case "unreadable":
             case "book-or-comic-corrupt":
                 // Reached only if the probe now returns streams — the file is readable, no longer broken.
@@ -619,6 +648,97 @@ public sealed class PlayabilityFixer : IFixer
                 return !TryGetDuration(probe, out var legacyDuration) || legacyDuration <= 0;
         }
     }
+
+    private Task<FixResult> RenameForMismatchAsync(Issue issue) => Task.FromResult(RenameForMismatch(issue));
+
+    private FixResult RenameForMismatch(Issue issue)
+    {
+        var config = Plugin.Instance!.Configuration;
+        var targetExt = TryGetString(issue.DetailsJson, "rename_to_ext");
+        if (string.IsNullOrWhiteSpace(targetExt))
+        {
+            return FixResult.Fail("Scanner didn't record a target extension for the rename. Re-scan to refresh the issue.");
+        }
+
+        var srcPath = issue.Path;
+        var srcName = Path.GetFileName(srcPath);
+        var targetPath = Path.ChangeExtension(srcPath, "." + targetExt);
+        var targetName = Path.GetFileName(targetPath);
+
+        if (string.Equals(srcPath, targetPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return FixResult.Fail("Source and target names are identical — nothing to rename.");
+        }
+
+        var actionText = string.Format(
+            CultureInfo.InvariantCulture,
+            "renamed {0} to {1} (container was {2})",
+            srcName,
+            targetName,
+            targetExt);
+
+        if (config.DryRun)
+        {
+            return FixResult.DryRun(actionText, 0);
+        }
+
+        if (File.Exists(targetPath))
+        {
+            return FixResult.Fail(string.Format(
+                CultureInfo.InvariantCulture,
+                "Can't rename {0} to {1} — a file already exists at that name. Resolve the collision manually and re-scan.",
+                srcName,
+                targetName));
+        }
+
+        try
+        {
+            _libraryMonitor.ReportFileSystemChangeBeginning(srcPath);
+            _libraryMonitor.ReportFileSystemChangeBeginning(targetPath);
+            File.Move(srcPath, targetPath);
+            _libraryMonitor.ReportFileSystemChanged(srcPath);
+            _libraryMonitor.ReportFileSystemChanged(targetPath);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return FixResult.Fail("Rename failed: " + ex.Message);
+        }
+        finally
+        {
+            _libraryMonitor.ReportFileSystemChangeComplete(srcPath, refreshPath: false);
+            _libraryMonitor.ReportFileSystemChangeComplete(targetPath, refreshPath: true);
+        }
+
+        _logger.LogInformation("Playability fix (rename): {Action}", actionText);
+        return new FixResult
+        {
+            Success = true,
+            Message = actionText,
+            BytesFreed = 0,
+            RecyclePath = null
+        };
+    }
+
+    private static string[] ExtensionAliasesFor(string ext) => ext switch
+    {
+        "mkv" or "webm" => new[] { "matroska", "webm" },
+        "mp4" or "m4v" or "m4a" or "mov" or "3gp" or "3g2" => new[] { "mp4", "mov", "m4a", "3gp", "3g2", "mj2" },
+        "avi" => new[] { "avi" },
+        "wmv" or "asf" => new[] { "asf" },
+        "flv" => new[] { "flv" },
+        "ts" or "mts" or "m2ts" => new[] { "mpegts" },
+        "mpg" or "mpeg" or "vob" => new[] { "mpeg", "mpegvideo", "mpegps" },
+        "ogv" or "ogg" or "ogm" or "opus" => new[] { "ogg" },
+        "mp3" => new[] { "mp3" },
+        "aac" => new[] { "aac" },
+        "flac" => new[] { "flac" },
+        "wav" => new[] { "wav" },
+        "ac3" => new[] { "ac3" },
+        "dts" => new[] { "dts" },
+        "wma" => new[] { "asf" },
+        "aif" or "aiff" => new[] { "aiff" },
+        _ => Array.Empty<string>()
+    };
 
     private static string? TryGetReason(string detailsJson) => TryGetString(detailsJson, "reason");
 

@@ -145,19 +145,15 @@ public sealed class PlayabilityScanner : ProbingScannerBase
             return null;
         }
 
+        string? renameToExt = null;
         if (probe.Error is not null || probe.Streams is null || probe.Streams.Count == 0)
         {
             reason = "unreadable";
             detail = "The file could not be read as a media file.";
             technical = probe.Error?.Message;
         }
-        else if (IsContainerExtensionMismatch(path, probe, out var mismatchDetail))
+        else if (IsContainerExtensionMismatch(path, probe, out var mismatchDetail, out renameToExt))
         {
-            // F-213: ffmpeg happily demuxes any container regardless of the file extension.
-            // Users rename files (or downloads arrive with the wrong extension) and end up
-            // with `.mp3` files that are actually MKVs — Jellyfin then routes them to the
-            // audio pipeline where they may or may not play. Flag the mismatch so the user
-            // can rename to the correct extension.
             reason = "container-extension-mismatch";
             detail = mismatchDetail;
         }
@@ -211,10 +207,20 @@ public sealed class PlayabilityScanner : ProbingScannerBase
         {
         }
 
+        // Extension mismatch is a hygiene issue, not a "won't play" case — the file plays fine.
+        // Use a rename-focused suggested-fix and stash the target extension so the fixer can act
+        // without re-probing.
+        var isMismatch = reason == "container-extension-mismatch";
+        var detailsJson = isMismatch
+            ? JsonSerializer.Serialize(new { reason, detail, technical, rename_to_ext = renameToExt })
+            : JsonSerializer.Serialize(new { reason, detail, technical });
+        var suggestedFix = isMismatch
+            ? "The file plays but its extension doesn't match its container. Approve to rename it to a matching extension — the file is not moved and is not deleted."
+            : "This file can't be played. Approve to try repair — if repair fails the file is removed (recycle bin unless you chose permanent delete).";
         return new Issue
         {
-            DetailsJson = JsonSerializer.Serialize(new { reason, detail, technical }),
-            SuggestedFix = "This file can't be played. Approve to try repair — if repair fails the file is removed (recycle bin unless you chose permanent delete).",
+            DetailsJson = detailsJson,
+            SuggestedFix = suggestedFix,
             SizeSavings = size
         };
     }
@@ -230,43 +236,90 @@ public sealed class PlayabilityScanner : ProbingScannerBase
     }
 
     /// <summary>
-    /// F-213: flags the specific mismatch that actually breaks Jellyfin routing — an
-    /// audio-only file extension (`.mp3`, `.aac`, `.flac`, ...) on a file that actually
-    /// contains video. Jellyfin routes by extension, so a mislabeled MKV-as-`.mp3` lands
-    /// in the audio pipeline and plays badly. Video-container mismatches (an MKV / HEVC
-    /// stream in a `.mp4` wrapper — common with release-scene rips like "YIFY x264 -.mp4"
-    /// which are actually HEVC-in-MKV) don't cause routing problems: Jellyfin's video
-    /// pipeline demuxes any container Jellyfin's ffmpeg understands. Narrowed
-    /// 2026-09-14 after false positives on Rage / Severance / Landman / Outlander rips.
+    /// F-213: flags files whose extension disagrees with their actual container. The file
+    /// plays fine in Jellyfin's video pipeline either way — this is a hygiene issue and the
+    /// fixer resolves it by renaming the file to a matching extension. Fires on:
+    ///   - Any audio-only extension (.mp3, .aac, .flac, etc.) with a video stream (real
+    ///     routing bug: Jellyfin sends it to the audio pipeline).
+    ///   - Video extensions whose container doesn't match (e.g., YIFY-style
+    ///     "x264 -YTS.mp4" that's actually HEVC-in-MKV — cosmetic, but the rename is
+    ///     what the user asked for so future clients that ARE strict about container/
+    ///     extension pairing don't get confused).
+    /// The scanner emits a distinct <c>rename_to_ext</c> field in DetailsJson so the fixer
+    /// knows the target extension without re-probing.
     /// </summary>
-    private static bool IsContainerExtensionMismatch(string path, FfprobeData probe, out string detail)
+    private static bool IsContainerExtensionMismatch(string path, FfprobeData probe, out string detail, out string? renameToExt)
     {
         detail = string.Empty;
+        renameToExt = null;
+
         var ext = System.IO.Path.GetExtension(path).ToLowerInvariant().TrimStart('.');
-        if (string.IsNullOrEmpty(ext))
+        var formatName = probe.Format?.FormatName?.ToLowerInvariant();
+        if (string.IsNullOrEmpty(ext) || string.IsNullOrEmpty(formatName))
         {
             return false;
         }
 
-        var isAudioOnlyExtension = ext is "mp3" or "aac" or "flac" or "wav" or "ac3" or "dts" or "wma" or "aif" or "aiff" or "m4a" or "opus";
-        if (!isAudioOnlyExtension)
+        var demuxers = formatName.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var extensionAliases = ext switch
+        {
+            "mkv" or "webm" => new[] { "matroska", "webm" },
+            "mp4" or "m4v" or "m4a" or "mov" or "3gp" or "3g2" => new[] { "mp4", "mov", "m4a", "3gp", "3g2", "mj2" },
+            "avi" => new[] { "avi" },
+            "wmv" or "asf" => new[] { "asf" },
+            "flv" => new[] { "flv" },
+            "ts" or "mts" or "m2ts" => new[] { "mpegts" },
+            "mpg" or "mpeg" or "vob" => new[] { "mpeg", "mpegvideo", "mpegps" },
+            "ogv" or "ogg" or "ogm" or "opus" => new[] { "ogg" },
+            "mp3" => new[] { "mp3" },
+            "aac" => new[] { "aac" },
+            "flac" => new[] { "flac" },
+            "wav" => new[] { "wav" },
+            "ac3" => new[] { "ac3" },
+            "dts" => new[] { "dts" },
+            "wma" => new[] { "asf" },
+            "aif" or "aiff" => new[] { "aiff" },
+            _ => Array.Empty<string>()
+        };
+
+        if (extensionAliases.Length == 0 || extensionAliases.Any(alias => demuxers.Contains(alias)))
         {
             return false;
         }
 
-        // Audio-only extension carrying a video stream: real routing problem, flag it.
-        var hasVideo = probe.Streams?.Any(s => string.Equals(s.CodecType, "video", StringComparison.OrdinalIgnoreCase)) == true;
-        if (!hasVideo)
+        // Map the first demuxer back to a canonical file extension so the fixer knows what to
+        // rename to. Covers everything the extensionAliases map supports plus the audio ones.
+        var canonicalExt = demuxers[0] switch
+        {
+            "matroska" or "webm" => "mkv",
+            "mov" or "mp4" or "m4a" or "3gp" or "3g2" or "mj2" => "mp4",
+            "avi" => "avi",
+            "asf" => "wmv",
+            "flv" => "flv",
+            "mpegts" => "ts",
+            "mpeg" or "mpegvideo" or "mpegps" => "mpg",
+            "ogg" => "ogg",
+            "mp3" => "mp3",
+            "aac" => "aac",
+            "flac" => "flac",
+            "wav" => "wav",
+            "ac3" => "ac3",
+            "dts" => "dts",
+            "aiff" => "aiff",
+            _ => null
+        };
+        if (canonicalExt is null || string.Equals(canonicalExt, ext, StringComparison.OrdinalIgnoreCase))
         {
             return false;
         }
 
-        var formatName = probe.Format?.FormatName?.ToLowerInvariant() ?? "unknown";
+        renameToExt = canonicalExt;
         detail = string.Format(
             CultureInfo.InvariantCulture,
-            "The file's extension is '.{0}' (audio-only) but the file contains a video stream in container '{1}'. Jellyfin will route it to the audio pipeline and playback will be wrong. Rename to a matching video extension (.mkv or .mp4) or re-encode into an actual .{0} container.",
+            "The file's extension is '.{0}' but its container is '{1}'. MediaDash can rename it to '.{2}' — approve to fix, or Ignore this if the current name is intentional.",
             ext,
-            formatName);
+            formatName,
+            canonicalExt);
         return true;
     }
 }
