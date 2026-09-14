@@ -27,8 +27,18 @@
     },
     {
       "id": "v-1-0-7-6",
-      "name": "1.0.7.6",
+      "name": "1.0.7.6 (released 2026-09-14)",
       "order": 6
+    },
+    {
+      "id": "v-1-0-7-7",
+      "name": "1.0.7.7 - hotfix (released 2026-09-14)",
+      "order": 7
+    },
+    {
+      "id": "v-1-0-7-8",
+      "name": "1.0.7.8 - hotfix (awaiting approval)",
+      "order": 8
     }
   ],
   "items": [
@@ -500,6 +510,112 @@
       "versionId": "backlog",
       "createdAt": "2026-09-11T06:03:48.588Z",
       "updatedAt": "2026-09-11T06:04:35.436Z"
+    },
+    {
+      "id": "2b49df88-33ba-48eb-b679-aee2e0b04e8b",
+      "title": "recycle bin and history need a search box",
+      "notes": "",
+      "kind": "feature",
+      "versionId": "backlog",
+      "createdAt": "2026-09-14T05:09:32.344Z",
+      "updatedAt": "2026-09-14T05:09:32.344Z"
+    },
+    {
+      "id": "3f821f32-bb56-4708-9ba9-fbb7e6906c35",
+      "title": "progress bar 'per task' in fixer mode",
+      "notes": "",
+      "kind": "feature",
+      "versionId": "backlog",
+      "createdAt": "2026-09-14T05:51:31.819Z",
+      "updatedAt": "2026-09-14T05:51:31.819Z"
+    },
+    {
+      "id": "7a56b13a-16c1-485a-b57e-88b943516c85",
+      "title": "if no music library disable cover art by default",
+      "notes": "",
+      "kind": "feature",
+      "versionId": "backlog",
+      "createdAt": "2026-09-14T06:06:20.003Z",
+      "updatedAt": "2026-09-14T06:06:20.003Z"
+    },
+    {
+      "id": "42e1a420-9951-4268-ac3b-4371e12fbf88",
+      "title": "add tooltips to mdSetTitle to explain what each scanner / fixer does",
+      "notes": "",
+      "kind": "feature",
+      "versionId": "backlog",
+      "createdAt": "2026-09-14T06:08:34.686Z",
+      "updatedAt": "2026-09-14T06:08:34.686Z"
+    },
+    {
+      "id": "i-176-errors-tab-bucketing",
+      "title": "Errors tab bucketing: FixTask.NoRunnable / SomeSkipped / MediaDashDb.MalformedItemId no longer render as 'Fix run failed'",
+      "notes": "Pre-push sweep for 1.0.7.6 caught the ERROR_META catch-all at configPage.html:8889 swallowing informational FixTask.SomeSkipped (\"7 approved issue(s) will not run because their type is set to 'Off'\") and FixTask.NoRunnable diagnostics and labelling them as 'Fix run failed — the fix pipeline threw an unexpected error' with a Report-an-issue prompt. Added specific ERROR_META entries before the FixTask catch-all + a MediaDashDb.MalformedItemId bucket that was previously rendering as a bare source code. CHANGELOG:24 bullet had already promised this fix for the pause cases; this commit completes what shipped. Commit 9c44c25.",
+      "kind": "bug",
+      "versionId": "v-1-0-7-6",
+      "createdAt": "2026-09-14T13:30:00Z",
+      "updatedAt": "2026-09-14T13:30:00Z",
+      "completedAt": "2026-09-14T13:30:00Z"
+    },
+    {
+      "id": "i-176-manifest-version-crash",
+      "title": "manifest.json versions[].version must be 4-part max — 5-part crashes Jellyfin's catalog",
+      "notes": "1.0.7.6 was released with manifest.json entries using '1.0.7.6.0' (5-part). Jellyfin's plugin catalog parses versions[].version via System.Version which accepts at most 4 parts (major.minor.build.revision); a 5-part string throws FormatException and the whole catalog page fails to render. Fixed in commit e685200 by changing to '1.0.7.6' (4-part) matching the DLL's AssemblyVersion. Memory note added at feedback_mediadash_manifest_version_format.md so this doesn't recur — mimic prior entries (1.0.7.5, 1.0.7.4, ...) instead of interpreting the release-recipe wording.",
+      "kind": "bug",
+      "versionId": "v-1-0-7-6",
+      "createdAt": "2026-09-14T14:00:00Z",
+      "updatedAt": "2026-09-14T14:00:00Z",
+      "completedAt": "2026-09-14T14:00:00Z"
+    },
+    {
+      "id": "i-177-size-truncated-removal",
+      "title": "Playability scanner removed the bitrate-vs-size pre-filter that false-flagged efficient x264 rips",
+      "notes": "User's library had 22 unplayable-flagged files that played fine — Rage / Severance / Landman / Outlander rips at 400 MB – 2.4 GB. Root cause: PlayabilityScanner.EvaluateAsync's bitrate-vs-size pre-filter compared Format.BitRate × duration / 8 against actual file size and flagged anything under 60% of expected as size-truncated. Efficient x264 encodes have real content bitrates 2×+ under the container-declared bitrate — they're not truncated, just efficient — and were being mis-flagged. Removed the branch entirely; the decode-check that runs next already catches genuine tail-truncation via its decoded-time shortfall heuristic (all 15 torture-test variants still pass, including the three MP4 tail-truncated ones the removed branch used to catch first). Commit aecfaf0.",
+      "kind": "bug",
+      "versionId": "v-1-0-7-7",
+      "createdAt": "2026-09-14T14:10:00Z",
+      "updatedAt": "2026-09-14T14:10:00Z",
+      "completedAt": "2026-09-14T14:10:00Z"
+    },
+    {
+      "id": "i-177-drm-skip",
+      "title": "Playability scanner skips DRM-protected files instead of mis-flagging + attempting repair",
+      "notes": "No DRM detection existed in the plugin. Encrypted MP4 / M4V / M4A / MOV (iTunes Fairplay, Widevine, PlayReady) tripped the decode-error branch and the new 1.0.7.6 repair ladder tried every rung (all failed) then recycled the file. Now checks each stream's codec_tag_string for 'encv' (encrypted video) or 'enca' (encrypted audio) — ISO base media file format markers for encrypted sample entries — and returns null (skip) if any match. Added CodecTagString field to FfprobeStreamInfo. Commit aecfaf0.",
+      "kind": "bug",
+      "versionId": "v-1-0-7-7",
+      "createdAt": "2026-09-14T14:10:00Z",
+      "updatedAt": "2026-09-14T14:10:00Z",
+      "completedAt": "2026-09-14T14:10:00Z"
+    },
+    {
+      "id": "i-177-folder-based-items",
+      "title": "Playability scanner no longer reports folder-based library items (BDMV / VIDEO_TS / mounted-ISO) as missing files",
+      "notes": "Blu-ray 'BDRemux' folder layouts (Indiana Jones example: /mnt/media/Complete/Movies/Indiana...HDTracker with no file extension — Jellyfin's Path pointed at a directory) tripped !File.Exists and produced 'The file is gone but Jellyfin still lists it. Run a Jellyfin library scan to remove the dead entry' on every scan. The file exists (Jellyfin plays it, or in the DRM case, correctly refuses to). Now falls back to Directory.Exists — if the path is a directory, skip playability checks entirely rather than emit a false missing-file flag. Commit aecfaf0.",
+      "kind": "bug",
+      "versionId": "v-1-0-7-7",
+      "createdAt": "2026-09-14T14:10:00Z",
+      "updatedAt": "2026-09-14T14:10:00Z",
+      "completedAt": "2026-09-14T14:10:00Z"
+    },
+    {
+      "id": "i-178-drm-notification",
+      "title": "DRM detection: informational-only Issue entry (no repair, no delete, no silent skip)",
+      "notes": "1.0.7.7's DRM handling was `return null` — no Issue created, no notification. User has a DRM file, Jellyfin refuses to play it, MediaDash silently ignores it. Reworked so codec_tag_string=encv/enca now emits an informational Issue with reason=drm-protected and a dedicated SuggestedFix message ('This file is DRM-protected — MediaDash cannot repair it. Ignore this to hide the notification, or remove the file manually.'). PlayabilityFixer refuses cleanly on Approve (returns FixResult.Fail with the same message, no ffmpeg, no filesystem touch) and the DRM branch is hoisted above IsStillBrokenAsync so the default probe-check doesn't preempt it. User sees the DRM finding, can Ignore or manually remove, cannot accidentally trigger a recycle. Awaiting user approval before ship in 1.0.7.8.",
+      "kind": "feature",
+      "versionId": "v-1-0-7-8",
+      "createdAt": "2026-09-14T17:35:00Z",
+      "updatedAt": "2026-09-14T17:35:00Z",
+      "completedAt": "2026-09-14T17:35:00Z"
+    },
+    {
+      "id": "i-178-mismatch-rename",
+      "title": "Container-extension mismatch fires with a rename-fix action instead of the repair-or-delete ladder",
+      "notes": "Third false-positive class after 1.0.7.7 shipped. Release-scene rips named .mp4 that are actually MKV inside (Rage (2014) 1080p BRRip x264 -YTS.mp4 → HEVC in matroska,webm container) tripped the F-213 container-extension mismatch check, got labelled 'This file can't be played', and the 1.0.7.6 repair ladder tried to salvage or recycle them. User asked for a different treatment: tell the user the extension is wrong and offer to rename. Now: (1) IsContainerExtensionMismatch computes canonical target extension (matroska→mkv, mp4-family→mp4, avi→avi, mpegts→ts, etc.) and stashes rename_to_ext in DetailsJson; (2) SuggestedFix text switches to 'The file plays but its extension doesn't match its container. Approve to rename it to a matching extension — the file is not moved and is not deleted.'; (3) PlayabilityFixer short-circuits before the repair ladder when reason=container-extension-mismatch and does an atomic File.Move — refuses on collision, notifies Jellyfin's library monitor, logs a history row. Verified end-to-end on the user's actual Rage file: scanned, flagged with the new message, approved, renamed to .mkv, byte-identical MD5, ffprobe/ffmpeg -xerror both pass on the renamed file. Torture-test 15/15 (variant 11-wrong-ext.mkv now correctly renamed to 11-wrong-ext.mp4). Commits ccf9759 (superseded narrowing) + 05327d2 (final rename-fix). Local only — awaiting explicit user approval before push + 1.0.7.8 release.",
+      "kind": "feature",
+      "versionId": "v-1-0-7-8",
+      "createdAt": "2026-09-14T15:00:00Z",
+      "updatedAt": "2026-09-14T17:15:00Z",
+      "completedAt": "2026-09-14T17:15:00Z"
     }
   ]
 }

@@ -136,13 +136,32 @@ public sealed class PlayabilityScanner : ProbingScannerBase
 
         // DRM-protected files (iTunes Fairplay, Widevine, PlayReady) surface encrypted sample
         // entries as codec_tag_string="encv" (encrypted video) or "enca" (encrypted audio) under
-        // ISO base media file format. They aren't broken and the repair ladder can never fix them
-        // — every rung will fail and the file gets recycled. Skip playability checks entirely.
+        // ISO base media file format. The repair ladder can never decrypt them, so route them to
+        // an informational-only Issue instead of the standard "can't play, will repair" flow:
+        // the user should know MediaDash saw the file, but Approve does nothing destructive.
         if (probe.Streams is not null && probe.Streams.Any(s =>
                 string.Equals(s.CodecTagString, "encv", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(s.CodecTagString, "enca", StringComparison.OrdinalIgnoreCase)))
         {
-            return null;
+            long drmSize = 0;
+            try
+            {
+                drmSize = new System.IO.FileInfo(path).Length;
+            }
+            catch (System.IO.IOException)
+            {
+            }
+
+            return new Issue
+            {
+                DetailsJson = JsonSerializer.Serialize(new
+                {
+                    reason = "drm-protected",
+                    detail = "The file's video or audio streams are DRM-encrypted (iTunes Fairplay, Widevine, PlayReady or similar). MediaDash cannot decrypt or repair DRM."
+                }),
+                SuggestedFix = "This file is DRM-protected — MediaDash cannot repair it. Ignore this to hide the notification, or remove the file manually.",
+                SizeSavings = drmSize
+            };
         }
 
         string? renameToExt = null;

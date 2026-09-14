@@ -75,6 +75,17 @@ public sealed class PlayabilityFixer : IFixer
             return FixResult.Fail("The file is outside your library folders; MediaDash will not touch it.");
         }
 
+        var fixReason = TryGetReason(issue.DetailsJson);
+
+        // DRM-protected files: no repair path can succeed and we don't want to recycle a file
+        // the user still values. Refuse cleanly BEFORE IsStillBrokenAsync — the default probe
+        // check finds a video stream + duration on a DRM file and would return "not broken",
+        // which would incorrectly mask this branch.
+        if (string.Equals(fixReason, "drm-protected", StringComparison.Ordinal))
+        {
+            return FixResult.Fail("This file is DRM-protected — MediaDash cannot decrypt or repair it. Use the Ignore action to hide the notification, or remove the file manually.");
+        }
+
         var stillBroken = await IsStillBrokenAsync(issue, cancellationToken).ConfigureAwait(false);
         if (!stillBroken)
         {
@@ -83,7 +94,7 @@ public sealed class PlayabilityFixer : IFixer
 
         // Container-extension mismatch is a hygiene issue — rename the file, no repair, no delete.
         // Split out from the repair ladder because these files ARE playable, just misnamed.
-        if (string.Equals(TryGetReason(issue.DetailsJson), "container-extension-mismatch", StringComparison.Ordinal))
+        if (string.Equals(fixReason, "container-extension-mismatch", StringComparison.Ordinal))
         {
             return await RenameForMismatchAsync(issue).ConfigureAwait(false);
         }
