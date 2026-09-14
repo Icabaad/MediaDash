@@ -230,62 +230,41 @@ public sealed class PlayabilityScanner : ProbingScannerBase
     }
 
     /// <summary>
-    /// F-213: cross-checks ffprobe's reported container against the file extension. ffmpeg
-    /// silently demuxes any container regardless of extension, so a renamed / mis-arrived
-    /// `.mp3` that's actually an MKV gets routed to Jellyfin's audio pipeline and behaves
-    /// oddly. Flag mismatches so the user can rename to something honest.
+    /// F-213: flags the specific mismatch that actually breaks Jellyfin routing — an
+    /// audio-only file extension (`.mp3`, `.aac`, `.flac`, ...) on a file that actually
+    /// contains video. Jellyfin routes by extension, so a mislabeled MKV-as-`.mp3` lands
+    /// in the audio pipeline and plays badly. Video-container mismatches (an MKV / HEVC
+    /// stream in a `.mp4` wrapper — common with release-scene rips like "YIFY x264 -.mp4"
+    /// which are actually HEVC-in-MKV) don't cause routing problems: Jellyfin's video
+    /// pipeline demuxes any container Jellyfin's ffmpeg understands. Narrowed
+    /// 2026-09-14 after false positives on Rage / Severance / Landman / Outlander rips.
     /// </summary>
     private static bool IsContainerExtensionMismatch(string path, FfprobeData probe, out string detail)
     {
         detail = string.Empty;
         var ext = System.IO.Path.GetExtension(path).ToLowerInvariant().TrimStart('.');
-        var formatName = probe.Format?.FormatName?.ToLowerInvariant();
-        if (string.IsNullOrEmpty(ext) || string.IsNullOrEmpty(formatName))
+        if (string.IsNullOrEmpty(ext))
         {
             return false;
         }
 
-        // ffprobe reports format_name as a comma-separated list of matching demuxers
-        // (e.g. "matroska,webm", "mp4,mov,m4a,3gp,3g2,mj2", "mp3"). Any overlap between
-        // the extension and the reported list means we're fine.
-        var demuxers = formatName.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        var extensionAliases = ext switch
-        {
-            "mkv" or "webm" => new[] { "matroska", "webm" },
-            "mp4" or "m4v" or "m4a" or "mov" or "3gp" or "3g2" => new[] { "mp4", "mov", "m4a", "3gp", "3g2", "mj2" },
-            "avi" => new[] { "avi" },
-            "wmv" or "asf" => new[] { "asf" },
-            "flv" => new[] { "flv" },
-            "ts" or "mts" or "m2ts" => new[] { "mpegts" },
-            "mpg" or "mpeg" or "vob" => new[] { "mpeg", "mpegvideo", "mpegps" },
-            "ogv" or "ogg" or "ogm" or "opus" => new[] { "ogg" },
-            "mp3" => new[] { "mp3" },
-            "aac" => new[] { "aac" },
-            "flac" => new[] { "flac" },
-            "wav" => new[] { "wav" },
-            "ac3" => new[] { "ac3" },
-            "dts" => new[] { "dts" },
-            "wma" => new[] { "asf" },
-            "aif" or "aiff" => new[] { "aiff" },
-            _ => Array.Empty<string>()
-        };
-
-        if (extensionAliases.Length == 0)
-        {
-            // Unknown extension — don't flag. Let the item pass; other detectors will catch
-            // truly broken files.
-            return false;
-        }
-
-        var overlap = extensionAliases.Any(alias => demuxers.Contains(alias));
-        if (overlap)
+        var isAudioOnlyExtension = ext is "mp3" or "aac" or "flac" or "wav" or "ac3" or "dts" or "wma" or "aif" or "aiff" or "m4a" or "opus";
+        if (!isAudioOnlyExtension)
         {
             return false;
         }
 
+        // Audio-only extension carrying a video stream: real routing problem, flag it.
+        var hasVideo = probe.Streams?.Any(s => string.Equals(s.CodecType, "video", StringComparison.OrdinalIgnoreCase)) == true;
+        if (!hasVideo)
+        {
+            return false;
+        }
+
+        var formatName = probe.Format?.FormatName?.ToLowerInvariant() ?? "unknown";
         detail = string.Format(
             CultureInfo.InvariantCulture,
-            "The file's extension is '.{0}' but its container is '{1}'. Playback may fail on strict clients. Rename to a matching extension (or re-encode into an actual .{0} container) to make the extension honest.",
+            "The file's extension is '.{0}' (audio-only) but the file contains a video stream in container '{1}'. Jellyfin will route it to the audio pipeline and playback will be wrong. Rename to a matching video extension (.mkv or .mp4) or re-encode into an actual .{0} container.",
             ext,
             formatName);
         return true;
