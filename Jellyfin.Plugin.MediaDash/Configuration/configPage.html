@@ -9004,6 +9004,14 @@
                             }
                         }
 
+                        // Since 1.0.7.6 messages are plain-language (raw ffmpeg / stderr dumps are truncated
+                        // into a separate technical field). Render the message inline above the hint so users
+                        // can see the actionable body at a glance — the specific library names in an overlap
+                        // warning, the file path in a permission error, etc. Fall back to the source slug in
+                        // the collapsed <details> for filing bug reports.
+                        var messageBlock = e.Message
+                            ? '<div style="margin-top:.5em;font-size:.9em;white-space:pre-wrap;word-break:break-word;">' + esc(e.Message) + '</div>'
+                            : '';
                         return '<div class="mdCard mdFade" style="margin:.5em 0;border-left:4px solid #ef4444;">' +
                             '<div style="display:flex;justify-content:space-between;gap:1em;flex-wrap:wrap;align-items:flex-start;">' +
                             '<span style="font-weight:600;flex:1;min-width:0;"><span class="material-icons" style="font-size:1.1em;vertical-align:-3px;color:#ef4444;margin-right:.3em;">' + meta.icon + '</span>' + esc(meta.title) + countBadge + '</span>' +
@@ -9013,6 +9021,7 @@
                             '<span class="fieldDescription mdErrorAdoptMsg" style="font-size:.8em;"></span>' +
                             '</div>' +
                             '</div>' +
+                            messageBlock +
                             hintBlock +
                             '<details style="margin-top:.5em;">' +
                             '<summary class="fieldDescription" style="cursor:pointer;font-size:.85em;user-select:none;">Technical detail (source: <code>' + esc(e.Source || 'unknown') + '</code>)</summary>' +
