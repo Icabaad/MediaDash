@@ -505,11 +505,12 @@
     {
       "id": "05cd2490-137f-4f0f-9eff-4aa210ba75c8",
       "title": "Warn user if libraries contain the same folders",
-      "notes": "if a user has multiple libraries that cover the same folders i.e Media which has \\media\\ and movies that has \\media\\movies\\ and tv that has \\media\\tv\\",
+      "notes": "if a user has multiple libraries that cover the same folders i.e Media which has \\media\\ and movies that has \\media\\movies\\ and tv that has \\media\\tv\\\n\nShipped as i-178-library-overlap-warning in 1.0.7.8 (awaiting approval).",
       "kind": "feature",
-      "versionId": "backlog",
+      "versionId": "v-1-0-7-8",
       "createdAt": "2026-09-11T06:03:48.588Z",
-      "updatedAt": "2026-09-11T06:04:35.436Z"
+      "updatedAt": "2026-09-14T17:20:00Z",
+      "completedAt": "2026-09-14T17:20:00Z"
     },
     {
       "id": "2b49df88-33ba-48eb-b679-aee2e0b04e8b",
@@ -532,11 +533,12 @@
     {
       "id": "7a56b13a-16c1-485a-b57e-88b943516c85",
       "title": "if no music library disable cover art by default",
-      "notes": "",
+      "notes": "Shipped as part of i-178-content-aware-defaults in 1.0.7.8 (awaiting approval) — expanded to the full content-type mapping (audio → EmbeddedCoverArt; video → Quality, SubtitleLanguage, AudioLanguage, MissingSubtitles, SubtitleFonts, LargeTrickplay, HeavyTranscode, FailedTranscode, Ungrouped) rather than just cover art.",
       "kind": "feature",
-      "versionId": "backlog",
+      "versionId": "v-1-0-7-8",
       "createdAt": "2026-09-14T06:06:20.003Z",
-      "updatedAt": "2026-09-14T06:06:20.003Z"
+      "updatedAt": "2026-09-14T17:45:00Z",
+      "completedAt": "2026-09-14T17:45:00Z"
     },
     {
       "id": "42e1a420-9951-4268-ac3b-4371e12fbf88",
@@ -596,6 +598,26 @@
       "createdAt": "2026-09-14T14:10:00Z",
       "updatedAt": "2026-09-14T14:10:00Z",
       "completedAt": "2026-09-14T14:10:00Z"
+    },
+    {
+      "id": "i-178-content-aware-defaults",
+      "title": "One-time content-aware defaults sweep: silence scanners whose content type isn't present",
+      "notes": "Quick-win pair (asks 7a56b13a + expanded scope). ScanTask first run computes hasAudio / hasVideo from the item list; for each scanner whose FixMode is still the untouched DetectOnly AND whose content isn't present, sets FixMode = Off. Mapping: no audio → EmbeddedCoverArt; no video → Quality, SubtitleLanguage, AudioLanguage, MissingSubtitles, SubtitleFonts, LargeTrickplay, HeavyTranscode, FailedTranscode, Ungrouped. Gate stored in plugin_state (ContentAwareDefaultsChecked) so it only fires once per install/upgrade. Users who add new content later can re-enable in Settings. Verified live against localhost:8099 — Test Music present so EmbeddedCoverArt stayed on, gate key set, torture-test 15/15 unaffected. Awaiting user approval for 1.0.7.8.",
+      "kind": "feature",
+      "versionId": "v-1-0-7-8",
+      "createdAt": "2026-09-14T17:45:00Z",
+      "updatedAt": "2026-09-14T17:45:00Z",
+      "completedAt": "2026-09-14T17:45:00Z"
+    },
+    {
+      "id": "i-178-library-overlap-warning",
+      "title": "Warn when Jellyfin libraries contain overlapping folders",
+      "notes": "Quick-win (ask 05cd2490). ScanTask.ExecuteAsync now walks ILibraryManager.GetVirtualFolders() and records LibraryOverlap.Detected diagnostics per overlapping pair (path A is under path B). Dedup'd via the existing FNV-1a hash so repeat scans don't inflate the count. ERROR_META bucket added to configPage.html so the Errors tab renders with a clear 'Overlapping library folders' title + actionable hint pointing at Dashboard → Libraries. Verified live: 5 real overlap pairs found in the dev library set (Fixtures + Test Music/Comics/Books/Audiobooks/TV Scratch all under C:\\dev\\mediadash-fixtures\\). Awaiting user approval for 1.0.7.8.",
+      "kind": "feature",
+      "versionId": "v-1-0-7-8",
+      "createdAt": "2026-09-14T17:20:00Z",
+      "updatedAt": "2026-09-14T17:20:00Z",
+      "completedAt": "2026-09-14T17:20:00Z"
     },
     {
       "id": "i-178-drm-notification",

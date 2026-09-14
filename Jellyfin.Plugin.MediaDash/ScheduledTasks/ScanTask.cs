@@ -111,6 +111,105 @@ public sealed class ScanTask : IScheduledTask
         // duplicates, no "unplayable" — so drop them before the scanners see them.
         items = items.Where(i => !i.IsThemeMedia).ToList();
 
+        // One-time content-aware defaults sweep: for each scanner whose content type isn't present
+        // in the user's libraries AND whose FixMode is still the untouched default (DetectOnly),
+        // silence the scanner (Off). Stops empty scanner cycles and de-clutters the Settings UI.
+        // Gated by a plugin_state key so it only ever runs once per install/upgrade — a user who
+        // adds new content types later can re-enable the scanners in Settings.
+        if (_db.GetState("ContentAwareDefaultsChecked") is null)
+        {
+            var hasVideo = items.Any(i => i.GetBaseItemKind() is BaseItemKind.Movie or BaseItemKind.Episode or BaseItemKind.MusicVideo);
+            var hasAudio = items.Any(i => i.GetBaseItemKind() is BaseItemKind.Audio or BaseItemKind.AudioBook);
+            var scanConfig = Plugin.Instance!.Configuration;
+            var silenced = new List<string>();
+
+            // Audio-only defaults.
+            if (!hasAudio && scanConfig.EmbeddedCoverFixMode == Configuration.FixMode.DetectOnly)
+            {
+                scanConfig.EmbeddedCoverFixMode = Configuration.FixMode.Off;
+                silenced.Add("EmbeddedCoverArt");
+            }
+
+            // Video-only defaults — every scanner in this block operates on video streams,
+            // subtitle sidecars for video, video-transcode logs, or trickplay sprites Jellyfin
+            // only generates for video items. Books and audio have their own pipelines.
+            if (!hasVideo)
+            {
+                void Silence(Func<Configuration.FixMode> get, Action<Configuration.FixMode> set, string label)
+                {
+                    if (get() == Configuration.FixMode.DetectOnly)
+                    {
+                        set(Configuration.FixMode.Off);
+                        silenced.Add(label);
+                    }
+                }
+
+                Silence(() => scanConfig.TranscodeFixMode, v => scanConfig.TranscodeFixMode = v, "Quality");
+                Silence(() => scanConfig.SubtitleFixMode, v => scanConfig.SubtitleFixMode = v, "SubtitleLanguage");
+                Silence(() => scanConfig.AudioFixMode, v => scanConfig.AudioFixMode = v, "AudioLanguage");
+                Silence(() => scanConfig.MissingSubtitlesFixMode, v => scanConfig.MissingSubtitlesFixMode = v, "MissingSubtitles");
+                Silence(() => scanConfig.SubtitleFontFixMode, v => scanConfig.SubtitleFontFixMode = v, "SubtitleFonts");
+                Silence(() => scanConfig.TrickplayFixMode, v => scanConfig.TrickplayFixMode = v, "LargeTrickplay");
+                Silence(() => scanConfig.HeavyTranscodeFixMode, v => scanConfig.HeavyTranscodeFixMode = v, "HeavyTranscode");
+                Silence(() => scanConfig.FailedTranscodeFixMode, v => scanConfig.FailedTranscodeFixMode = v, "FailedTranscode");
+                Silence(() => scanConfig.UngroupedFixMode, v => scanConfig.UngroupedFixMode = v, "Ungrouped");
+            }
+
+            if (silenced.Count > 0)
+            {
+                Plugin.Instance!.SaveConfiguration();
+                _logger.LogInformation(
+                    "Content-aware defaults sweep: silenced {Count} scanner(s) whose content type isn't present in this library (hasVideo={HasVideo}, hasAudio={HasAudio}): {Silenced}. Re-enable in Settings if you add the relevant content later.",
+                    silenced.Count,
+                    hasVideo,
+                    hasAudio,
+                    string.Join(", ", silenced));
+            }
+
+            _db.SetState("ContentAwareDefaultsChecked", DateTime.UtcNow.ToString("O", System.Globalization.CultureInfo.InvariantCulture));
+        }
+
+        // Overlapping-library warning: users with a "Media" library covering /media plus separate
+        // "Movies" (/media/movies) and "TV" (/media/tv) libraries produce duplicate metadata,
+        // double-counted stats, and phantom Ungrouped / Misplaced findings that Jellyfin's own scans
+        // trigger against overlapping trees. Emit a single dedup'd diagnostic per pair so the user
+        // sees the collision. Cheap: N is small (~a dozen libraries at the extreme).
+        var virtualFolders = _libraryManager.GetVirtualFolders();
+        for (var i = 0; i < virtualFolders.Count; i++)
+        {
+            var outer = virtualFolders[i];
+            foreach (var outerPath in outer.Locations ?? Array.Empty<string>())
+            {
+                var outerNormalised = System.IO.Path.TrimEndingDirectorySeparator(outerPath) + System.IO.Path.DirectorySeparatorChar;
+                for (var j = 0; j < virtualFolders.Count; j++)
+                {
+                    if (j == i)
+                    {
+                        continue;
+                    }
+
+                    var inner = virtualFolders[j];
+                    foreach (var innerPath in inner.Locations ?? Array.Empty<string>())
+                    {
+                        var innerNormalised = System.IO.Path.TrimEndingDirectorySeparator(innerPath) + System.IO.Path.DirectorySeparatorChar;
+                        if (innerNormalised.StartsWith(outerNormalised, StringComparison.OrdinalIgnoreCase)
+                            && !string.Equals(innerNormalised, outerNormalised, StringComparison.OrdinalIgnoreCase))
+                        {
+                            Api.Diagnostics.Record(
+                                "LibraryOverlap.Detected",
+                                string.Format(
+                                    System.Globalization.CultureInfo.InvariantCulture,
+                                    "Library '{0}' path '{1}' is inside library '{2}' path '{3}'. Overlapping libraries produce duplicate metadata, double-counted stats, and phantom Ungrouped / Misplaced findings. Split the parent library, narrow it, or remove one of the two in Dashboard → Libraries.",
+                                    inner.Name,
+                                    innerPath,
+                                    outer.Name,
+                                    outerPath));
+                        }
+                    }
+                }
+            }
+        }
+
         var scanIsScoped = false;
         var enabledLibraries = Plugin.Instance!.Configuration.EnabledLibraries;
         if (enabledLibraries.Length > 0)
