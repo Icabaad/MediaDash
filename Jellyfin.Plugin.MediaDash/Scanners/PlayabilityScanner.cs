@@ -120,6 +120,43 @@ public sealed class PlayabilityScanner : ProbingScannerBase
             {
             }
 
+            // Reason-prefix routing (ebook-comic-quirks-audit Q4/Q5/Q19/Q20/Q22):
+            //   drm:<message>                   → informational-only Issue, no repair, no delete
+            //   mismatch:<ext>:<message>        → rename fix (same shape as F-213 for video)
+            //   anything else                   → today's book-or-comic-corrupt repair-or-delete flow
+            if (probeReason is not null && probeReason.StartsWith("drm:", StringComparison.Ordinal))
+            {
+                return new Issue
+                {
+                    DetailsJson = JsonSerializer.Serialize(new
+                    {
+                        reason = "drm-protected",
+                        detail = probeReason.Substring("drm:".Length)
+                    }),
+                    SuggestedFix = "This file is DRM-protected — MediaDash cannot repair it. Ignore this to hide the notification, or remove the file manually.",
+                    SizeSavings = bookSize
+                };
+            }
+
+            if (probeReason is not null && probeReason.StartsWith("mismatch:", StringComparison.Ordinal))
+            {
+                var parts = probeReason.Split(':', 3);
+                if (parts.Length == 3)
+                {
+                    return new Issue
+                    {
+                        DetailsJson = JsonSerializer.Serialize(new
+                        {
+                            reason = "container-extension-mismatch",
+                            detail = parts[2],
+                            rename_to_ext = parts[1]
+                        }),
+                        SuggestedFix = "The file plays but its extension doesn't match its container. Approve to rename it to a matching extension — the file is not moved and is not deleted.",
+                        SizeSavings = bookSize
+                    };
+                }
+            }
+
             return new Issue
             {
                 DetailsJson = JsonSerializer.Serialize(new { reason = "book-or-comic-corrupt", detail = probeReason }),
