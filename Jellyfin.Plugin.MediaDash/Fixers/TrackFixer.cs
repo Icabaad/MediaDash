@@ -286,6 +286,17 @@ public sealed class TrackFixer : IFixer
                 args.Add(string.Format(CultureInfo.InvariantCulture, "-0:{0}", index));
             }
 
+            // Encoder-quirks audit Q16: DaVinci Resolve MP4/MOV exports carry a codec_type=data
+            // codec_tag=tmcd timecode track. Under -map 0 -c copy some ipod/mp4 muxer combos
+            // abort with "Could not find tag for codec bin_data in stream #0:N". MKV and MPEG-TS
+            // muxers accept the data stream fine — restrict the negative-map to MP4-family
+            // targets so we don't strip timecodes users might want on other containers.
+            if (Mp4FamilyExtensions.Contains(ext))
+            {
+                args.Add("-map");
+                args.Add("-0:d");
+            }
+
             args.AddRange(["-c", "copy", "-avoid_negative_ts", "make_zero", tempPath]);
 
             var originalDisposed = false;

@@ -87,6 +87,16 @@ public sealed class FfprobeStreamInfo
     [JsonIgnore]
     public bool IsHearingImpaired => Disposition is not null && Disposition.TryGetValue("hearing_impaired", out var v) && v != 0;
 
+    /// <summary>
+    /// Gets a value indicating whether the stream is an attached picture (embedded cover art, thumbnail).
+    /// yt-dlp <c>--embed-thumbnail</c> muxes an MJPEG stream with this disposition into the MKV alongside
+    /// the real video — and that thumbnail can end up as stream 0. Consumers of "the video stream"
+    /// (<see cref="Scanners.QualityScanner"/>, <see cref="Fixers.TranscodeFixer"/>) must exclude these so
+    /// they don't try to re-encode a still frame as the movie (encoder-quirks audit Q14).
+    /// </summary>
+    [JsonIgnore]
+    public bool IsAttachedPicture => Disposition is not null && Disposition.TryGetValue("attached_pic", out var v) && v != 0;
+
     /// <summary>Gets or sets the color primaries (e.g., "bt709" for SDR, "bt2020" for HDR).</summary>
     [JsonPropertyName("color_primaries")]
     public string? ColorPrimaries { get; set; }

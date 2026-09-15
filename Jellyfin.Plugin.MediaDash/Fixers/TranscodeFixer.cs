@@ -109,7 +109,9 @@ public sealed class TranscodeFixer : IFixer
         }
 
         var probe = await _ffprobe.ProbeAsync(issue.Path, cancellationToken).ConfigureAwait(false);
-        var video = probe?.Streams?.FirstOrDefault(s => string.Equals(s.CodecType, "video", StringComparison.OrdinalIgnoreCase));
+        // Encoder-quirks audit Q14: skip attached-pic streams so a yt-dlp thumbnail at
+        // stream 0 doesn't get selected and re-encoded as the movie.
+        var video = probe?.Streams?.FirstOrDefault(s => string.Equals(s.CodecType, "video", StringComparison.OrdinalIgnoreCase) && !s.IsAttachedPicture);
         if (probe is null || probe.Error is not null || video is null)
         {
             return FixResult.Fail("The file could not be analyzed; it may be broken.");

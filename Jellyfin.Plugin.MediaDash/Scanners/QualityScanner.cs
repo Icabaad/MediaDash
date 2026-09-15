@@ -86,8 +86,25 @@ public sealed class QualityScanner : ProbingScannerBase
             return Task.FromResult<Issue?>(null);
         }
 
-        var video = probe?.Streams?.FirstOrDefault(s => string.Equals(s.CodecType, "video", StringComparison.OrdinalIgnoreCase));
+        // Encoder-quirks audit Q14: yt-dlp --embed-thumbnail muxes an MJPEG attached_pic
+        // stream that can land as stream 0 in an .mkv. A naive FirstOrDefault(video) would
+        // pick that thumbnail and TranscodeFixer would re-encode a JPEG as the "movie".
+        // Excluding attached-pic streams picks the real video every time.
+        var video = probe?.Streams?.FirstOrDefault(s => string.Equals(s.CodecType, "video", StringComparison.OrdinalIgnoreCase) && !s.IsAttachedPicture);
         if (probe is null || video is null || video.Height is not > 0 || video.Width is not > 0)
+        {
+            return Task.FromResult<Issue?>(null);
+        }
+
+        // Encoder-quirks audit Q13: Dolby Vision Profile 7 files carry TWO codec_type=video
+        // codec_name=hevc streams — the base layer and the enhancement layer. Any transcode
+        // that isn't DoVi-aware silently drops the EL and downgrades the file to plain HDR10
+        // (or worse, SDR). Skip these entirely until we have a DoVi-aware re-encode path.
+        // Detection via stream count is deterministic across encoders (MakeMKV, DVDFab, any
+        // ripper preserving DoVi P7) — no codec_tag_string dependency, no format tags to read.
+        if (probe.Streams!.Count(s => string.Equals(s.CodecType, "video", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(s.CodecName, "hevc", StringComparison.OrdinalIgnoreCase)
+                && !s.IsAttachedPicture) >= 2)
         {
             return Task.FromResult<Issue?>(null);
         }
