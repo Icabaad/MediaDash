@@ -16,16 +16,6 @@
       "order": 3
     },
     {
-      "id": "v-1-0-8-1",
-      "name": "1.0.8.2",
-      "order": 4
-    },
-    {
-      "id": "v-1-0-8-2",
-      "name": "1.0.9.0",
-      "order": 5
-    },
-    {
       "id": "v-1-0-7-6",
       "name": "1.0.7.6 (released 2026-09-14)",
       "order": 6
@@ -247,9 +237,9 @@
       "title": "Extend HW-decode whitelist for legacy codecs (mpeg2, vc1)",
       "notes": "Deferred from HW-decode fix. Legacy codecs are rare in oversized library files (they're already small). Add if a user's library has legacy content that would benefit.",
       "kind": "feature",
-      "versionId": "v-1-0-8-1",
+      "versionId": "backlog",
       "createdAt": "2026-09-05T13:00:00Z",
-      "updatedAt": "2026-09-05T14:12:47.243Z",
+      "updatedAt": "2026-09-14T12:39:07.732Z",
       "completedAt": null
     },
     {
@@ -317,9 +307,9 @@
       "title": "Seperate Re-encode resolutions for Different libraries\r\n #30",
       "notes": "",
       "kind": "feature",
-      "versionId": "v-1-0-8-2",
+      "versionId": "backlog",
       "createdAt": "2026-09-05T12:52:45.214Z",
-      "updatedAt": "2026-09-05T14:13:43.323Z",
+      "updatedAt": "2026-09-14T12:39:21.181Z",
       "completedAt": null
     },
     {
@@ -337,9 +327,9 @@
       "title": "User Setting, Purge all audio tracks except the main on and then remove all subtitles except the selected language.",
       "notes": "",
       "kind": "feature",
-      "versionId": "v-1-0-8-2",
+      "versionId": "backlog",
       "createdAt": "2026-09-05T13:38:19.622Z",
-      "updatedAt": "2026-09-05T14:13:59.151Z",
+      "updatedAt": "2026-09-14T12:39:22.813Z",
       "completedAt": null
     },
     {
@@ -347,9 +337,9 @@
       "title": "Re enable auto mode for duplicate file finder - may need rework and extensive testing.",
       "notes": "",
       "kind": "feature",
-      "versionId": "v-1-0-8-1",
+      "versionId": "backlog",
       "createdAt": "2026-09-05T13:39:06.896Z",
-      "updatedAt": "2026-09-05T13:39:06.896Z",
+      "updatedAt": "2026-09-14T12:39:09.382Z",
       "completedAt": null
     },
     {
@@ -407,9 +397,9 @@
       "title": "Auto delete feature for stale content",
       "notes": "Big user warnings",
       "kind": "feature",
-      "versionId": "v-1-0-8-2",
+      "versionId": "backlog",
       "createdAt": "2026-09-06T07:12:14.617Z",
-      "updatedAt": "2026-09-06T07:12:23.858Z",
+      "updatedAt": "2026-09-14T12:39:24.999Z",
       "completedAt": null
     },
     {
@@ -477,9 +467,9 @@
       "title": "Space-cliff warning: banner when a library drive approaches its performance cliff",
       "notes": "Early-warning banner (Overview + Maintenance) when a library drive crosses its filesystem-specific performance cliff. Users usually don't notice until fixes start failing with ENOSPC or playback stutters. Complements the existing recycle-bin cap (which only pauses fixes) with a proactive read that fires BEFORE anything breaks.\n\nThresholds:\n(a) NTFS: warn at 90% used. Free space fragmentation on NTFS gets sharply worse past ~90%, and Windows' MFT reservation can starve at ~95%.\n(b) ext4 / XFS: warn at 90%. Ext4 reserves 5% for root by default; past ~90% used the remaining free extents fragment fast.\n(c) ZFS / btrfs: warn at 85%. CoW allocators need copious free extents to avoid write amplification; performance degrades sharply beyond 80–85%.\n(d) exFAT / FAT32 (rare in library folders): warn at 90%. No reserved area, but write throughput collapses when free extents shrink.\n\nDetect filesystem via DriveInfo.DriveFormat + Linux /proc/mounts. Reuse RecycleBin.FindDriveForPath as the drive resolver so it lines up with the recycle-bin pause math. One banner per drive per threshold crossing; dismissible for 7 days per drive so it doesn't nag while a user is intentionally close to the cap. Never block fixes; the recycle-bin cap already owns the hard stop.",
       "kind": "feature",
-      "versionId": "v-1-0-8-1",
+      "versionId": "backlog",
       "createdAt": "2026-09-08T03:05:00Z",
-      "updatedAt": "2026-09-08T14:53:50.705Z",
+      "updatedAt": "2026-09-14T12:39:13.219Z",
       "completedAt": null
     },
     {
@@ -487,9 +477,9 @@
       "title": "Plugin-data volume protection: history retention, cache TTLs, VACUUM, and free-space floor for the DB drive",
       "notes": "Long-term operational health for users whose Jellyfin data volume is small (Docker containers with 32 GB mounts, home installs on the C: system SSD, cheap VPS deployments). Right now MediaDash protects the recycle-bin volume with a 3 GB free-space floor (FixTask.BinVolumeMinFreeBytes) and auto-purges the bin after RecycleBinRetentionDays. It does NOT protect the plugin-data volume — which is where mediadash.db + all the caches live — and several DB tables grow unbounded. Real-world worst case: 200 K-item library + 3 years of usage → ~1 GB DB, plus orphan rows for every file ever renamed/moved/deleted. On a small drive this contributes to Jellyfin OOM-style failures when the volume fills.\n\nCurrent state (checked against MediaDashDb.cs on main):\n(a) `history` — one row per fix action, ~265 bytes/row, NO pruning anywhere. Users running weekly fixes on a big library accumulate hundreds of K rows over years.\n(b) `probe_cache` + `format_probe_cache` — one row per file scanned, ~4.4 KB/row (full ffprobe JSON). Cleared only by the manual 'Reset scan state' button. Orphan rows accumulate every time a user renames/moves/deletes a library file.\n(c) `decode_cache` — one row per file that ran thorough playability. ~1 KB/row. Same orphan problem.\n(d) `file_hashes` — one row per file with a hash computed. Same orphan problem.\n(e) `restored_paths` — grows only on manual restore, tiny in practice.\n(f) `diagnostics` — ALREADY trimmed to maxRows on every insert (MediaDashDb.cs:1494). Reference implementation to mirror.\n(g) No `VACUUM` anywhere in the codebase. SQLite doesn't reclaim space on `DELETE` — even if pruning existed, the .db file wouldn't shrink.\n\nScope:\n\n(1) history retention. New config `HistoryRetentionDays` (default 90) + `HistoryMaxRows` (default 10 000, whichever cap hits first). Prune runs in FixTask's post-run maintenance pass alongside `_recycleBin.Purge`. Deleted rows dereference recycle-bin entries — must NOT delete a history row that still points at a bin entry that hasn't been purged (otherwise the bin listing shows 'no history' and Restore breaks). Order matters: bin purge first (drops files + history rows for expired retention), then history prune (drops rows older than HistoryRetentionDays where restore is impossible), then VACUUM.\n\n(2) probe / format-probe / decode / file-hash cache orphan sweep. During the FixTask post-run maintenance pass, for each cache table run `DELETE FROM <table> WHERE path NOT IN (SELECT path FROM issues) AND NOT EXISTS (a quick File.Exists check via a batched IN clause)`. Rationale: File.Exists is per-row expensive; better to enumerate all cache paths, batch-check existence in C#, and issue one `DELETE ... WHERE path IN (...)` with the missing paths. Cap the sweep at N ms per maintenance run so it stays bounded on huge caches.\n\n(3) Cache TTL. Even for files that still exist, probe cache rows > 6 months old are near-worthless (metadata refresh happens naturally on the next probe when size/mtime changes). New config `ProbeCacheRetentionDays` (default 180, 0 = disabled). Also pruned in the post-run maintenance pass.\n\n(4) Periodic VACUUM. Run once per maintenance pass if the DB has grown > 2× since last VACUUM, tracked via a new `plugin_state` row (`last_vacuum_at_utc`, `last_vacuum_size_bytes`). VACUUM holds a write lock and can take seconds on a large DB — must run inside the same fix-window + IdleCheck gates that the fixers use so it can't stall a busy server. Guard with an explicit timeout so a corrupt DB doesn't hang the maintenance pass forever.\n\n(5) Plugin-data volume free-space floor. Mirror `IsBinVolumeCriticallyFull` but for the DB's drive. Same 3 GB threshold, applied to `_db.DataPath`'s drive. When it trips: pause scans + fixes with the same PauseReason machinery. This is the direct answer to 'can the DB crash Jellyfin' — even if history + caches grew unboundedly, the floor catches it before Jellyfin runs out of headroom.\n\n(6) Overview surface. Extend the existing Overview 'Recycle bin' + 'Storage' cards to show the plugin-data-volume free space, the DB file size, and last-VACUUM info. Users on small drives get one glance instead of digging into `%LOCALAPPDATA%\\jellyfin\\data\\mediadash\\`. When the retention prune or orphan sweep runs, surface a single-line 'Maintenance: pruned N history rows, N orphan cache rows, VACUUM reclaimed N MB' on the Overview activity ticker so users see it's working (silent maintenance is invisible until it isn't).\n\nMigration:\n- No schema changes for existing tables (all writes use `IF NOT EXISTS` on the columns being added — none here since pruning uses existing columns).\n- Add `plugin_state` rows for the retention/VACUUM bookkeeping. Empty on upgrade — first maintenance pass populates.\n- First run after upgrade WILL prune years of accumulated history / orphan rows on affected installs. Emit a single info-level log + a one-shot Overview toast so users understand why their DB just dropped from 1 GB to 100 MB.\n\nTests:\n- Unit: history prune preserves rows still linked to bin entries; orphan sweep drops only non-existent paths; VACUUM triggers on 2× growth; free-space floor pauses scans + fixes when tripped.\n- Integration: full 200 K-row synthetic DB, run the maintenance pass, assert final row counts + DB size are within expected bounds.\n- Real-world: run once on a real user's several-years-old DB (once someone volunteers) — measure before/after size + startup time.\n\nNon-goals (kept out on purpose):\n- No user-facing 'delete all history' button beyond the retention setting. Users who want a hard reset can hit 'Reset scan state' (already exists) or delete `mediadash.db` while the plugin is stopped.\n- No per-item history archival to a separate file — nice for auditors, over-engineered for the primary use case.\n- Don't prune diagnostics further — the existing maxRows trim already handles it.",
       "kind": "feature",
-      "versionId": "v-1-0-8-1",
+      "versionId": "backlog",
       "createdAt": "2026-09-11T02:35:00Z",
-      "updatedAt": "2026-09-11T02:35:00Z",
+      "updatedAt": "2026-09-14T12:39:11.624Z",
       "completedAt": null
     },
     {
@@ -497,9 +487,9 @@
       "title": "Explore: monthly drive-health maintenance for library drives",
       "notes": "Explore idea. Scheduled monthly maintenance pass on each library drive to prevent long-term slowdown / bit-rot. Not just defrag — a bundle of preventive actions picked per drive type:\n\n(1) HDD defrag — Windows defrag.exe / Optimize-Volume, Linux ext4 e4defrag (marginal on modern filesystems; XFS/btrfs handle themselves).\n(2) SSD TRIM — Optimize-Volume on Windows, fstrim on Linux. This is what SSDs actually need; defrag on SSD is HARMFUL.\n(3) Stale-content refresh — force-rewrite files untouched for N months (default 12+) to refresh flash cells (SSD bit-rot mitigation) / spinning-disk sectors before they degrade. Read into RAM, verify hash, rewrite in place. Skip if a cached hash already matches this month's read.\n(4) SMART preemptive scan — reuse the existing SmartHealth reader to flag drives approaching reallocated-sector / pending-sector thresholds BEFORE they fail. Surface as a Maintenance card banner.\n(5) Read-verify sweep (optional, slow) — sequentially read every library file, log any files where read errors surface (bad sectors that reallocation hasn't caught yet). Complements the hash cache used elsewhere in the plugin.\n(6) NTFS-specific: chkdsk /scan (read-only, no lock) once a year to surface metadata corruption early.\n\nPrerequisites to scope before building:\n(a) Detect drive type (SSD vs HDD) — drive.MediaType / smartctl / MSFT_PhysicalDisk. Wrong action on wrong drive = harm.\n(b) MUST respect fix window + Low system impact mode + IdleCheck. Every action is disk-bound for hours.\n(c) Cancellable and resumable; a fix run must never block on maintenance.\n(d) Opt-in ONLY, per-drive toggle, per-action toggle. Never touch a drive silently.\n(e) Report last-run + estimated benefit per action, like the trickplay optimizer does.\n(f) Stale-rewrite has data-safety risk — must write to sibling temp + verify + atomic rename, same pattern as TranscodeFixer's swap. A bad rewrite that overwrites in place would irreversibly damage the file.\n(g) Stale-rewrite MUST preserve every piece of metadata on the file: CreationTimeUtc + LastWriteTimeUtc (same fix as i-175-08 — Jellyfin's Recently Added reads mtime, so a refreshed file inheriting Now() would surface as brand-new and pollute the user's home page), POSIX permissions + owner/group on Linux, NTFS ACLs on Windows, and any xattrs (macOS Finder tags, Linux extended attrs used by some tagging tools). Otherwise a benign maintenance pass silently mutates the library's metadata surface.\n\nOpen questions: is defrag ever worth it on a library of mostly-sequential large files? SSD bit-rot on write-once media libraries — is 12 months the right cadence, or is that data already fresh enough from monthly SMART scrubs on the ZFS/btrfs side? Real signal probably needs a fragmentation-delta + stale-file-age measurement on real user drives before committing to build the whole thing.",
       "kind": "feature",
-      "versionId": "v-1-0-8-1",
+      "versionId": "backlog",
       "createdAt": "2026-09-08T02:45:00Z",
-      "updatedAt": "2026-09-08T14:53:49.098Z",
+      "updatedAt": "2026-09-14T12:39:14.828Z",
       "completedAt": null
     },
     {
@@ -519,7 +509,8 @@
       "kind": "feature",
       "versionId": "backlog",
       "createdAt": "2026-09-14T05:09:32.344Z",
-      "updatedAt": "2026-09-14T05:09:32.344Z"
+      "updatedAt": "2026-09-14T05:09:32.344Z",
+      "completedAt": null
     },
     {
       "id": "3f821f32-bb56-4708-9ba9-fbb7e6906c35",
@@ -528,7 +519,8 @@
       "kind": "feature",
       "versionId": "backlog",
       "createdAt": "2026-09-14T05:51:31.819Z",
-      "updatedAt": "2026-09-14T05:51:31.819Z"
+      "updatedAt": "2026-09-14T05:51:31.819Z",
+      "completedAt": null
     },
     {
       "id": "7a56b13a-16c1-485a-b57e-88b943516c85",
@@ -547,7 +539,8 @@
       "kind": "feature",
       "versionId": "backlog",
       "createdAt": "2026-09-14T06:08:34.686Z",
-      "updatedAt": "2026-09-14T06:08:34.686Z"
+      "updatedAt": "2026-09-14T06:08:34.686Z",
+      "completedAt": null
     },
     {
       "id": "i-176-errors-tab-bucketing",
@@ -618,6 +611,26 @@
       "createdAt": "2026-09-14T17:20:00Z",
       "updatedAt": "2026-09-14T17:20:00Z",
       "completedAt": "2026-09-14T17:20:00Z"
+    },
+    {
+      "id": "i-178-handbrake-mp4-vobsub-whitelist",
+      "title": "Fix GitHub #56 (fadern retry): mp4/ipod subtitle classifier flipped from blacklist to whitelist, catches HandBrake + all encoder aliases",
+      "notes": "GitHub #56 fadern retry on 1.0.7.7 still failed with `[ipod @ ...] Tag text incompatible with output codec id '98314'`. The 1.0.7.6 fold-in in TrackFixer.ComputeMuxerIncompatibleSubtitleStreams used an exact-string HashSet blacklist of `dvd_subtitle`, `hdmv_pgs_subtitle`, `dvb_subtitle` — which missed ffprobe's older aliases (`dvdsub`, `pgssub`, `dvbsub`), missed HandBrake-produced .m4v files whose sub stream reports an empty codec_name and an all-zero codec_tag_string (from the error output: `([0][0][0][0])`), and would keep missing every future encoder alias we don't yet know about.\n\nRoot cause: the exact-string blacklist is fragile. Sample-shape variance across ffmpeg versions and encoder outputs means we cannot enumerate every incompatible codec_name — the miss will always favour data loss (user's remux errors out).\n\nFix: flipped to a whitelist of the three subtitle codecs the mp4/ipod muxer accepts under -c copy (mov_text, tx3g, webvtt). Everything else — including empty and null codec_name, every alias, and any codec we've never seen — folds into the negative-map list at remux time. Ipod muxer never sees a subtitle codec it can't tag.\n\nCovers HandBrake (VobSub-in-.m4v the reported bug), MakeMKV (PGS-in-.m4v edge case), Radarr/Sonarr Blu-ray remuxers copying subs into .m4v containers, yt-dlp .m4a outputs with embedded subs (rare but valid), and any future encoder we haven't tested.\n\n12 new [Theory] test cases pin every variant. Also added positive assertions that mov_text / tx3g / webvtt stay kept and MKV outputs never drop any subtitle regardless of codec_name.\n\nAwaiting user approval before ship in 1.0.7.8.",
+      "kind": "bug",
+      "versionId": "v-1-0-7-8",
+      "createdAt": "2026-09-15T04:30:00Z",
+      "updatedAt": "2026-09-15T04:30:00Z",
+      "completedAt": "2026-09-15T04:30:00Z"
+    },
+    {
+      "id": "i-bl-17-expanded-error-reporting",
+      "title": "Expanded error reporting: attach full ffprobe reproduction bundle to every file-scoped diagnostic",
+      "notes": "Motivating incident (2026-09-15): GitHub #56 fadern retry on 1.0.7.7 still fails with 'Tag text incompatible with output codec id 98314' (dvd_subtitle in an ipod-muxed .m4v). The 1.0.7.6 fold-in (commit 4da24b9) missed his file because TrackFixer.Mp4IncompatibleSubtitleCodecs is an exact-string HashSet ({dvd_subtitle, hdmv_pgs_subtitle, dvb_subtitle}) and his HandBrake .m4v's sub stream is likely reported by ffprobe with an alias (dvdsub, pgssub, or with an empty codec_tag_string). We can't confirm the exact shape without asking fadern to run ffprobe manually — and we can't build a synthetic torture-test fixture that would have caught this class of bug in advance. Every future bug report on a specific file has the same wall: ask the user for their file OR guess.\n\nFeature: whenever the plugin emits a file-scoped diagnostic (Errors tab row) or a FixResult.Fail for a specific file, automatically capture and persist a full reproduction bundle from ffprobe so support triage can build a synthetic reproducer without ever needing the original file. Include the bundle in Report-an-issue by default (with a Copy button so users can paste into GitHub).\n\nBundle contents (structured JSON, one snapshot per file):\n(a) full ffprobe -show_format -show_streams -show_chapters output (the canonical dump)\n(b) codec_tag as BOTH the raw four-byte value and the FourCC string, per stream — the case that misled 1.0.7.6 fold-in (ffprobe emits codec_tag_string but not the numeric codec_id, and codec_tag can be empty even when codec_id is set)\n(c) per-stream disposition map (default, forced, hearing_impaired, dub, ...) — needed to reproduce audio/subtitle-language edge cases\n(d) container-level format_tags (encoder identity: HandBrake / MakeMKV / Sonarr-remux, encoder_version, ISO base media brand — HandBrake .m4v's `mp4s-E0` VobSub-in-STSD quirk is deterministic per encoder)\n(e) chapter markers (Menu track in fadern's MediaInfo — chapter offsets matter for some remux edge cases)\n(f) HasTruncationMarker probe outcome, DecodeCheckAsync exit code + first-30s decoded-time (reproduce Playability false-positives without re-scanning)\n(g) the exact ffmpeg command line that failed + stderr tail (already captured in FixResult; move into the bundle as a first-class field)\n(h) file identity: SHA256 of the first 4 KB + last 4 KB (unique fingerprint that isn't the whole file — same-encoder-pass produces identical head/tail, enough to identify 'same file class' without shipping the media)\n(i) filesystem shape: extension, size, mtime, drive filesystem (NTFS/ext4/SMB/NFS — matters for i-175-08 timestamp bugs and #59 utimensat failures)\n\nPrivacy (opt-in-by-default per install):\n- Path & filename redaction: replace with `<library-root>/<hash>/<hash>.<ext>` on capture. Users who WANT to include paths tick a Settings toggle. Default: redact.\n- Content: no sample frames, no keyframes, no audio samples ever captured. Metadata only.\n- One-shot 'clear all reproduction bundles' button in Settings for users who want to purge before a support export.\n\nStorage:\n- New `reproduction_bundles` table keyed by (source, path_hash). Each row = one JSON snapshot. Cap: 500 rows LRU-evicted; per-bundle size cap 32 KB (ffprobe JSON is typically 4-8 KB even for weird files).\n- Cleared when the source diagnostic is cleared, so the two lifecycles match.\n- Same VACUUM / prune infrastructure as i-bl-16 (plugin data volume protection) — plumb through when that lands.\n\nSurface points:\n(1) Errors tab row: add a 'Copy reproduction data' button next to the Technical detail expander when a bundle exists. Puts pretty-printed JSON on the clipboard, opens a template GitHub issue with it pasted into a ```json``` fence.\n(2) Report an issue button: automatically include ALL bundles for the last 24h of errors. User can uncheck individual entries before send.\n(3) New Errors-tab filter chip 'has reproduction data' so triage can jump to reproducible errors first.\n\nImplementation notes:\n- FfprobeService already runs -show_format -show_streams via ProbeAsync. Add a ProbeReproductionBundleAsync that also passes -show_chapters -show_program_version -show_format_tags and adds codec_tag as an integer to the emitted JSON via -analyzeduration/-probesize hints.\n- Diagnostics.Record and FixResult.Fail become async and take an optional path parameter. When path is present, kick off a background probe + bundle-write (fire-and-forget, no user-facing latency).\n- Rollback story: bundle capture is a NO-OP addon to existing error paths. If ffprobe is missing / slow / cancelled, log at Debug and continue; the diagnostic still writes without the bundle.\n\nTests:\n- Unit: bundle serializer covers every ffprobe field we care about; a torture-fixture file produces a bundle that a) round-trips through the JSON, b) is small enough (<32 KB), c) redacts the path when the toggle is off.\n- Integration: run a failing fix in dry-run, assert a bundle row lands in reproduction_bundles with the file's codec_tag + disposition captured.\n- Real-world: on the next fadern-style report, copy the JSON bundle from the issue reply, feed to `tools/repair-test/reproduce-from-bundle.ps1` (also new — reads bundle, builds a synthetic file with matching codec_tags, runs the fix), and confirm it reproduces the failure before shipping any patch.\n\nBackward compatibility:\n- Existing installs: reproduction_bundles table created on first upgrade. No migration of existing errors — bundles only capture on NEW diagnostics from that point forward.\n- 'Report an issue' template: fall back to today's flat text when no bundles exist.",
+      "kind": "feature",
+      "versionId": "backlog",
+      "createdAt": "2026-09-15T04:00:00Z",
+      "updatedAt": "2026-09-15T04:00:00Z",
+      "completedAt": null
     },
     {
       "id": "i-178-drm-notification",

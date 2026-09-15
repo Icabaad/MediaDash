@@ -41,11 +41,22 @@ public sealed class TrackFixer : IFixer
         "mp4", "m4v", "m4a", "mov"
     };
 
-    // Bitmap subtitle codec names ffmpeg emits for the streams mp4/ipod cannot hold under -c copy.
-    // VobSub (dvd_subtitle, codec_id 98314 in ffmpeg), PGS (Blu-ray), DVB.
-    private static readonly HashSet<string> Mp4IncompatibleSubtitleCodecs = new(StringComparer.OrdinalIgnoreCase)
+    // Subtitle codecs the mp4/ipod muxer accepts under -c copy. Whitelist rather than blacklist:
+    // a blacklist misses aliases (dvdsub for dvd_subtitle, pgssub for hdmv_pgs_subtitle) and
+    // never-heard-of encoder outputs, which caused GitHub #56 to resurface on 1.0.7.7. HandBrake
+    // .m4v with a VobSub track can report the sub as codec_name=dvdsub or with an empty
+    // codec_tag_string (fadern's file: [0][0][0][0]) — the whitelist catches both by leaving
+    // them out of the allowed set. Only text-shaped subtitles fit MP4/ipod natively:
+    //   * mov_text — the native MP4 timed-text codec (tag 'text' in the STSD box)
+    //   * tx3g — 3GPP timed text (older MP4 variant, still valid)
+    //   * webvtt — supported on some ffmpeg builds with the right movflags
+    // Everything else — dvd_subtitle, hdmv_pgs_subtitle, dvb_subtitle, dvdsub, pgssub, dvbsub,
+    // xsub, subrip/srt (needs -c:s mov_text conversion), ass, ssa — is dropped on remux so the
+    // ipod muxer never sees a codec it can't tag. Empty / null codec_name also drops (safer to
+    // remove an unclassifiable stream than to let ffmpeg refuse the whole file).
+    private static readonly HashSet<string> Mp4CompatibleSubtitleCodecs = new(StringComparer.OrdinalIgnoreCase)
     {
-        "dvd_subtitle", "hdmv_pgs_subtitle", "dvb_subtitle"
+        "mov_text", "tx3g", "webvtt"
     };
 
     private readonly FfprobeService _ffprobe;
@@ -524,8 +535,7 @@ public sealed class TrackFixer : IFixer
 
         return probe.Streams
             .Where(s => string.Equals(s.CodecType, "subtitle", StringComparison.OrdinalIgnoreCase)
-                && s.CodecName is not null
-                && Mp4IncompatibleSubtitleCodecs.Contains(s.CodecName))
+                && !Mp4CompatibleSubtitleCodecs.Contains(s.CodecName ?? string.Empty))
             .ToList();
     }
 
