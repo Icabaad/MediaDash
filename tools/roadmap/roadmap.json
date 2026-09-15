@@ -505,12 +505,12 @@
     {
       "id": "2b49df88-33ba-48eb-b679-aee2e0b04e8b",
       "title": "recycle bin and history need a search box",
-      "notes": "",
+      "notes": "Shipped as part of the 1.0.7.8 quick-wins bundle. Client-side text filter above each list; MutationObserver keeps the filter applied across loadHistory / loadBinContents refreshes. ~30 LOC of JS, one input on each tab.",
       "kind": "feature",
-      "versionId": "backlog",
+      "versionId": "v-1-0-7-8",
       "createdAt": "2026-09-14T05:09:32.344Z",
-      "updatedAt": "2026-09-14T05:09:32.344Z",
-      "completedAt": null
+      "updatedAt": "2026-09-15T06:30:00Z",
+      "completedAt": "2026-09-15T06:30:00Z"
     },
     {
       "id": "3f821f32-bb56-4708-9ba9-fbb7e6906c35",
@@ -535,12 +535,12 @@
     {
       "id": "42e1a420-9951-4268-ac3b-4371e12fbf88",
       "title": "add tooltips to mdSetTitle to explain what each scanner / fixer does",
-      "notes": "",
+      "notes": "Shipped as part of the 1.0.7.8 quick-wins bundle. New TASK_TOOLTIPS map in configPage.html with a 2-3 sentence explanation per scanner (what it detects + what the fixer does); wired into buildTaskCard via a native HTML title= attribute on the card header so browsers render the hover tooltip natively. English-only for now; i18n catches up when the strings settle.",
       "kind": "feature",
-      "versionId": "backlog",
+      "versionId": "v-1-0-7-8",
       "createdAt": "2026-09-14T06:08:34.686Z",
-      "updatedAt": "2026-09-14T06:08:34.686Z",
-      "completedAt": null
+      "updatedAt": "2026-09-15T06:30:00Z",
+      "completedAt": "2026-09-15T06:30:00Z"
     },
     {
       "id": "i-176-errors-tab-bucketing",

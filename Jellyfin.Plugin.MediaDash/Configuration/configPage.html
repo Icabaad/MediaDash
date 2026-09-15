@@ -3452,6 +3452,7 @@
                         <button is="emby-button" type="button" class="raised mdHistFilter" data-filter="dryrun" style="font-size:80%;" title="Dry-run entries that only logged what they would have done"><span class="material-icons" style="font-size:1.1em;vertical-align:-3px;color:#94a3b8;">preview</span> <span>Dry run</span> <span class="mdHistCount" style="opacity:.7;"></span></button>
                         <select is="emby-select" id="mdHistoryFailReason" class="emby-select-withcolor emby-select" style="display:none;flex:0 0 auto;min-width:16em;font-size:.85em;" title="Narrow the failed list to a specific reason"></select>
                         <span style="flex:1;"></span>
+                        <input type="search" id="mdHistorySearch" placeholder="Search filename or path…" style="flex:0 0 auto;min-width:14em;font-size:.85em;padding:.35em .55em;background:rgba(255,255,255,.06);color:inherit;border:1px solid rgba(255,255,255,.15);border-radius:4px;" title="Client-side filter — matches any visible text in the row (filename, path, action, reason).">
                         <button is="emby-button" type="button" id="mdHistoryClear" class="raised" style="font-size:80%;background:#7f1d1d;color:#fff;" title="Hide every current history row from this list. The rows stay in the database, so the per-library chart and 'Reclaimed since install' totals are untouched."><span class="material-icons" style="font-size:1.1em;vertical-align:-3px;margin-right:.3em;">delete_sweep</span><span>Clear history log</span></button>
                     </div>
                     <div id="mdHistoryList"></div>
@@ -3528,6 +3529,9 @@
                         <div class="mdRecycleHint">Click Restore on any row to put that file back at its original location. Files without a "no history" tag can also be restored from the History tab.</div>
                     </div>
                     <div id="mdBinConsolidateBanner" style="display:none;"></div>
+                    <div style="display:flex;justify-content:flex-end;margin:0 0 .5em;">
+                        <input type="search" id="mdBinSearch" placeholder="Search filename or path…" style="min-width:14em;font-size:.85em;padding:.35em .55em;background:rgba(255,255,255,.06);color:inherit;border:1px solid rgba(255,255,255,.15);border-radius:4px;" title="Client-side filter — matches any visible text in a bin row (filename, original path, reason).">
+                    </div>
                     <div class="mdCard mdBinListCard">
                         <div class="mdBinHeader">
                             <div class="mdBinHeadFile">File</div>
@@ -5979,6 +5983,32 @@
                 EmbeddedCoverArt: 'rgba(168,85,247,.28)'
             };
 
+            // Explanation string shown as a hover tooltip on each scanner-card title. The one-line
+            // meta.hint is the *summary* under the title; this is the "what does this scanner
+            // actually do?" tooltip for users who need more context before picking a mode
+            // (Automatic / Ask me first / Off). Keep each entry to 2-3 sentences: what the scanner
+            // detects, then what the fixer does with matches. English-only for now — i18n can catch
+            // up when the strings settle. Roadmap item 42e1a420.
+            var TASK_TOOLTIPS = {
+                Duplicate: 'Finds movies, episodes or tracks that exist as more than one file (byte-identical, provider-ID match, or heuristic title match). The fixer keeps the highest-quality copy and moves the rest to the recycle bin so restore is always possible.',
+                Playability: 'Files ffprobe / ffmpeg cannot decode end-to-end — broken container, truncated download, corrupt codec, DRM. The fixer runs a 4-step repair ladder (quick remux → drop broken streams → coerce container → re-encode); if every rung fails the file is recycled.',
+                Quality: 'Files bigger than your chosen quality ceiling (resolution + bitrate). The fixer re-encodes to the target profile using your GPU when available; the pre-encode original goes to the recycle bin as a safety net.',
+                HeavyTranscode: 'Files that keep transcoding on-the-fly on your clients instead of direct-playing. The fixer re-encodes to a more client-compatible profile so future playbacks skip the transcode.',
+                FailedTranscode: 'Recent Jellyfin transcode attempts that exited with an error (non-zero ffmpeg exit or a "Conversion failed" tail in the log). The fixer re-encodes with a stricter / safer profile.',
+                SubtitleLanguage: 'Embedded subtitle tracks whose language is NOT in your allowed-languages list. The fixer remuxes the file without them (one ffmpeg pass, original recycled) and can also trim unused embedded fonts from .ass sidecars.',
+                AudioLanguage: 'Embedded audio tracks whose language is NOT in your allowed-languages list. The fixer remuxes the file without them (one ffmpeg pass, original recycled).',
+                Stale: 'Content nobody has played in your configured threshold days (default 365). Detect-only by default; no automatic deletion — this scanner is here to surface what you might want to prune, not to prune it.',
+                Misplaced: 'A movie sitting in a TV library folder, or a TV episode sitting in a Movies library folder. The fixer moves the file to the correct library, preserving timestamps so Recently Added stays honest.',
+                Ungrouped: 'Loose media files or oddly-named folders that should sit under a per-title (or per-franchise) parent folder. The fixer creates the correct folder and moves files in — handles year-suffixed reboots and franchise disambiguation.',
+                MissingSubtitles: 'Files with no subtitle track in any of your kept languages. The fixer downloads a matching subtitle via the subtitle providers configured in Jellyfin.',
+                MalwareRisk: 'Executable files (.exe / .bat / .sh / .cmd / .ps1 / .scr / .msi) sitting in a media folder — almost always malware from a pirated release. The fixer quarantines them to the recycle bin.',
+                LargeTrickplay: 'Scrub-bar preview thumbnails Jellyfin generated as raw JPG. The fixer re-encodes to WebP, typically halving the disk footprint per title with no visible quality loss.',
+                EmbeddedCoverArt: 'Music or audiobook folders where every track has embedded cover art but no folder-level cover.jpg. The fixer extracts one shared cover.jpg (and optionally strips the redundant per-file copies to save space).',
+                OrphanedDebris: 'Empty folders, orphan subtitle sidecars, orphan trickplay folders, orphan metadata whose parent media file no longer exists. The fixer recycles them.',
+                CorruptNfo: 'Zero-byte, malformed, or unrecognised-root .nfo metadata sidecars that stop Jellyfin from reading item info. The fixer recycles them so Jellyfin regenerates fresh metadata on the next refresh.',
+                CorruptArtwork: 'Poster / backdrop / thumb / logo files inside the metadata folder Jellyfin manages that are zero-byte, truncated, or fail to decode. The fixer removes them so Jellyfin re-fetches on the next metadata pass. User-placed artwork alongside your media is never touched.'
+            };
+
             // Accent-tint background for the icon tile.
             var TASK_TINT = {
                 Duplicate: 'rgba(245,158,11,.14)',
@@ -6510,10 +6540,11 @@
 
             function buildTaskCard(t) {
                 var meta = STR.types[t.key];
+                var tooltip = TASK_TOOLTIPS[t.key] || '';
                 return '<section class="mdTask" id="mdSet-task-' + t.key + '" data-key="' + t.key + '" ' +
                     'style="--md-accent:' + meta.color + ';--md-accent-tint:' + TASK_TINT[t.key] + ';--md-accent-ink:' + TASK_INKS[t.key] + ';--md-accent-border:' + TASK_ON_BORDER[t.key] + ';">' +
                     '<div class="mdTaskAccent"></div>' +
-                    '<header class="mdTaskHead" data-role="head">' +
+                    '<header class="mdTaskHead" data-role="head"' + (tooltip ? ' title="' + esc(tooltip) + '"' : '') + '>' +
                         '<span class="mdTaskIcon"><span class="material-icons">' + meta.icon + '</span></span>' +
                         '<span class="mdTaskLabel">' +
                             '<span class="mdTaskTitle">' + esc(meta.title) + '</span>' +
@@ -10037,6 +10068,37 @@
                             Dashboard.alert({ title: 'Clear history log', message: 'The server refused the request. Check the Errors tab for details.' });
                         });
                     });
+
+                    // Roadmap 2b49df88: client-side text filter on the History + Recycle-bin tables.
+                    // Walks the rendered rows and hides any whose textContent doesn't contain the
+                    // query (case-insensitive). Applied to whatever rows are currently rendered —
+                    // no server round-trip, no re-render, works alongside the existing filter chips.
+                    function wireSearchFilter(inputId, listId) {
+                        var input = view.querySelector(inputId);
+                        var list = view.querySelector(listId);
+                        if (!input || !list) return;
+                        function apply() {
+                            var q = input.value.toLowerCase().trim();
+                            var rows = list.children;
+                            for (var i = 0; i < rows.length; i++) {
+                                var row = rows[i];
+                                if (q === '' || row.textContent.toLowerCase().indexOf(q) !== -1) {
+                                    row.style.display = '';
+                                } else {
+                                    row.style.display = 'none';
+                                }
+                            }
+                        }
+
+                        input.addEventListener('input', apply);
+                        // Re-apply whenever the list is re-populated so filter survives loadHistory /
+                        // loadBinContents refreshes.
+                        var observer = new MutationObserver(apply);
+                        observer.observe(list, { childList: true });
+                    }
+
+                    wireSearchFilter('#mdHistorySearch', '#mdHistoryList');
+                    wireSearchFilter('#mdBinSearch', '#mdBinList');
 
                     view.querySelector('#mdErrorsRefresh').addEventListener('click', loadErrors);
                     view.querySelector('#mdErrorsClear').addEventListener('click', function () {
