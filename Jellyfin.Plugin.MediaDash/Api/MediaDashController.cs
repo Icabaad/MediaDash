@@ -27,7 +27,13 @@ namespace Jellyfin.Plugin.MediaDash.Api;
 [Produces("application/json")]
 public class MediaDashController : ControllerBase
 {
+    private static readonly IReadOnlyCollection<IssueStatus> ApproveFromDetected = new[] { IssueStatus.Detected };
+    private static readonly IReadOnlyCollection<IssueStatus> DismissFromOpen = new[] { IssueStatus.Detected, IssueStatus.Queued };
+    private static readonly IReadOnlyCollection<IssueStatus> RevertFromQueuedOrDismissed = new[] { IssueStatus.Queued, IssueStatus.Dismissed };
+
     private readonly MediaDashDb _db;
+    private readonly IssueStore _issues;
+    private readonly HistoryStore _history;
     private readonly ITaskManager _taskManager;
     private readonly RecycleBin _recycleBin;
     private readonly ILibraryMonitor _libraryMonitor;
@@ -37,11 +43,16 @@ public class MediaDashController : ControllerBase
     private readonly IEnumerable<IScanner> _scanners;
     private readonly PostUpgradeCleanup _postUpgradeCleanup;
     private readonly LibraryGuard _libraryGuard;
+    private readonly ScheduledTasks.RunState _runState;
+    private readonly RestoreService _restoreService;
+    private readonly StatusQueryService _statusQuery;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="MediaDashController"/> class.
     /// </summary>
     /// <param name="db">The plugin database.</param>
+    /// <param name="issues">Issue-table store (05-C.2). Issue-family endpoints (approve/dismiss/revert/bulk/queue/summary/list) route through here; cross-store endpoints stay on <paramref name="db"/>.</param>
+    /// <param name="history">History-table store (05-C.3). Powers history/lifetime/redownload endpoints; <c>MediaDashDb.RecordFixOutcome</c> stays the cross-store transaction seam.</param>
     /// <param name="taskManager">Instance of the <see cref="ITaskManager"/> interface.</param>
     /// <param name="recycleBin">The recycle bin.</param>
     /// <param name="libraryMonitor">Instance of the <see cref="ILibraryMonitor"/> interface.</param>
@@ -51,8 +62,13 @@ public class MediaDashController : ControllerBase
     /// <param name="scanners">Registered scanners, used by targeted-scan endpoints like the Maintenance virus scan.</param>
     /// <param name="postUpgradeCleanup">The one-shot post-Jellyfin-12 upgrade cleaner.</param>
     /// <param name="libraryGuard">The library boundary guard; used to refuse restores whose stored path escaped the current library set.</param>
+    /// <param name="runState">The shared run-state holder (02-A) — used to arm bypass-idle-once and read the fix pause reason.</param>
+    /// <param name="restoreService">05-B: single owner of the restore workflow (owner-tokened claim + FS + DB bookkeeping).</param>
+    /// <param name="statusQuery">05-C.7: composes the /Status payload. Owns drive scan, SMART probe, aggregate history reads, recycle-bin contents and library-drive classification.</param>
     public MediaDashController(
         MediaDashDb db,
+        IssueStore issues,
+        HistoryStore history,
         ITaskManager taskManager,
         RecycleBin recycleBin,
         ILibraryMonitor libraryMonitor,
@@ -61,9 +77,14 @@ public class MediaDashController : ControllerBase
         IEnumerable<ISubtitleProvider> subtitleProviders,
         IEnumerable<IScanner> scanners,
         PostUpgradeCleanup postUpgradeCleanup,
-        LibraryGuard libraryGuard)
+        LibraryGuard libraryGuard,
+        ScheduledTasks.RunState runState,
+        RestoreService restoreService,
+        StatusQueryService statusQuery)
     {
         _db = db;
+        _issues = issues;
+        _history = history;
         _taskManager = taskManager;
         _recycleBin = recycleBin;
         _libraryMonitor = libraryMonitor;
@@ -73,6 +94,13 @@ public class MediaDashController : ControllerBase
         _scanners = scanners;
         _postUpgradeCleanup = postUpgradeCleanup;
         _libraryGuard = libraryGuard;
+        _runState = runState;
+        _restoreService = restoreService;
+        _statusQuery = statusQuery;
+        // 02-A: bridge to Plugin.AttachedRunState so the display-only Plugin.CurrentActivity /
+        // ScanScannersDone/Total facades resolve to this same instance. Idempotent — ScanTask
+        // and FixTask do the same on their own resolution.
+        Plugin.AttachedRunState = runState;
     }
 
     /// <summary>
@@ -81,214 +109,7 @@ public class MediaDashController : ControllerBase
     /// <returns>The status.</returns>
     [HttpGet("Status")]
     [ProducesResponseType(StatusCodes.Status200OK)]
-    public ActionResult<StatusResponse> GetStatus()
-    {
-        var summary = _db.GetSummary();
-        var scanTask = GetScanTask();
-        var fixTask = _taskManager.ScheduledTasks.FirstOrDefault(w => w.ScheduledTask is FixTask);
-        long freeDisk = 0, totalDisk = 0;
-        var drives = new List<DriveUsage>();
-
-        // Roots that host a library folder — used to mark library drives and to keep the aggregated
-        // FreeDiskBytes/TotalDiskBytes fields scoped to what MediaDash actually cares about.
-        // FindDriveForPath is the right resolver on both Windows AND Linux — Path.GetPathRoot
-        // returns "/" for every Linux path, which would collapse every library folder to root
-        // and never match any mount point (leaving all drives unmarked as library drives on Linux,
-        // which suppressed the SMART probe for every library drive there).
-        var libraryRoots = _libraryManager.GetVirtualFolders()
-            .SelectMany(f => f.Locations)
-            .Select(l => Fixers.RecycleBin.FindDriveForPath(l))
-            .Where(d => d is not null)
-            .Select(d => System.IO.Path.TrimEndingDirectorySeparator(d!.RootDirectory.FullName))
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        var recycleDrive = Fixers.RecycleBin.FindDriveForPath(_recycleBin.GetEffectiveRoot());
-        var recycleRoot = recycleDrive is null ? null : System.IO.Path.TrimEndingDirectorySeparator(recycleDrive.RootDirectory.FullName);
-
-        foreach (var drive in System.IO.DriveInfo.GetDrives())
-        {
-            try
-            {
-                // Fixed only — skip CDs, network shares (which may not be ready or may be huge remote mounts we
-                // don't want to poll), and RAM disks. IsReady guards against USB drives that are attached but
-                // not yet mounted.
-                if (drive.DriveType != System.IO.DriveType.Fixed || !drive.IsReady)
-                {
-                    continue;
-                }
-
-                var trimmedName = System.IO.Path.TrimEndingDirectorySeparator(drive.Name);
-                var isLibraryDrive = libraryRoots.Contains(trimmedName);
-                var isRecycleDrive = recycleRoot is not null && string.Equals(trimmedName, recycleRoot, StringComparison.OrdinalIgnoreCase);
-                if (isLibraryDrive)
-                {
-                    freeDisk += drive.AvailableFreeSpace;
-                    totalDisk += drive.TotalSize;
-                }
-
-                var usage = new DriveUsage
-                {
-                    Root = drive.Name,
-                    FreeBytes = drive.AvailableFreeSpace,
-                    TotalBytes = drive.TotalSize,
-                    IsLibraryDrive = isLibraryDrive,
-                    IsRecycleBinDrive = isRecycleDrive
-                };
-                if (isLibraryDrive || isRecycleDrive)
-                {
-                    CopySmartFields(usage, Probing.SmartHealthProbe.Get(drive.Name));
-                }
-
-                drives.Add(usage);
-            }
-            catch (IOException ex)
-            {
-                Diagnostics.Record("SystemStats.DriveStat", "Could not read drive '" + drive.Name + "' for the Overview: " + ex.Message + ". Its free-space total will be missing until the next scan.");
-            }
-            catch (UnauthorizedAccessException ex)
-            {
-                Diagnostics.Record("SystemStats.DriveStat", "Access denied reading drive '" + drive.Name + "' for the Overview: " + ex.Message + ". Grant Jellyfin's user read permission on the drive root to include it.");
-            }
-        }
-
-        // Docker overlay / btrfs subvolume / etc. often report as DriveType.Unknown and get filtered out
-        // above. If the recycle bin lives on one of those, its drive wouldn't appear on the Overview and
-        // the user would run out of space with no warning. Force-add it here.
-        if (recycleDrive is not null && !drives.Any(d =>
-            string.Equals(System.IO.Path.TrimEndingDirectorySeparator(d.Root), recycleRoot, StringComparison.OrdinalIgnoreCase)))
-        {
-            try
-            {
-                var recycleUsage = new DriveUsage
-                {
-                    Root = recycleDrive.Name,
-                    FreeBytes = recycleDrive.AvailableFreeSpace,
-                    TotalBytes = recycleDrive.TotalSize,
-                    IsLibraryDrive = false,
-                    IsRecycleBinDrive = true
-                };
-                CopySmartFields(recycleUsage, Probing.SmartHealthProbe.Get(recycleDrive.Name));
-                drives.Add(recycleUsage);
-            }
-            catch (IOException)
-            {
-            }
-            catch (UnauthorizedAccessException)
-            {
-            }
-        }
-
-        var config = Plugin.Instance!.Configuration;
-        var queuedCount = _db.GetIssues(status: IssueStatus.Queued).Count;
-        var autoQueueableCount = _db.GetIssues(status: IssueStatus.Detected)
-            .Count(i => config.GetFixMode(i.Type) == Configuration.FixMode.Automatic);
-        var binContents = SafeGetBinContents();
-
-        (int FileCount, long SizeBytes) SafeGetBinContents()
-        {
-            try
-            {
-                return _recycleBin.GetContents();
-            }
-            catch (IOException)
-            {
-                return (0, 0);
-            }
-            catch (UnauthorizedAccessException)
-            {
-                return (0, 0);
-            }
-        }
-
-        return new StatusResponse
-        {
-            IsScanning = scanTask is not null && scanTask.State != TaskState.Idle,
-            ScanProgress = scanTask?.CurrentProgress,
-            IsFixing = fixTask is not null && fixTask.State != TaskState.Idle,
-            FixProgress = fixTask?.CurrentProgress,
-            OpenIssueTotal = summary.Sum(s => s.Count),
-            FailedHistoryTotal = _db.GetFailedHistoryCount(config.HistoryHiddenBeforeUtcTicks),
-            FreeDiskBytes = freeDisk,
-            TotalDiskBytes = totalDisk,
-            LastScanUtc = summary.Count > 0 ? summary.Max(s => s.NewestDetectedUtc) : null,
-            TotalPotentialSavings = summary.Sum(s => s.PotentialSavings),
-            LifetimeBytesReclaimed = _db.GetLifetimeBytesFreed(),
-            LifetimeCounts = _db.GetLifetimeSummary().Select(s => new TypeCount
-            {
-                Type = s.Type.ToString(),
-                Count = s.Count,
-                PotentialSavings = s.PotentialSavings
-            }).ToList(),
-            Counts = summary.Select(s => new TypeCount
-            {
-                Type = s.Type.ToString(),
-                Count = s.Count,
-                PotentialSavings = s.PotentialSavings
-            }).ToList(),
-            PendingFixCount = queuedCount + autoQueueableCount,
-            ScanScannersDone = Plugin.ScanScannersDone,
-            ScanScannersTotal = Plugin.ScanScannersTotal,
-            Drives = drives,
-            CurrentActivity = Plugin.CurrentActivity,
-            CurrentActivityLabel = Plugin.CurrentActivityLabel,
-            DataDirectory = Data.MediaDashDb.DataDirectory,
-            // When the user has hidden the System Performance card, skip sampling entirely — no WMI
-            // perf counter, no /proc read, no PDH GPU walk, no nvidia-smi spawn. Empty payload lets
-            // the client render its placeholder chip without a special-case. Doubled-up polling was
-            // the field report: users running Task Manager / btop / Grafana alongside MediaDash
-            // didn't want the plugin re-sampling the same counters every 3 seconds.
-            System = Plugin.Instance!.Configuration.ShowSystemPerformance
-                ? SystemStats.Sample()
-                : new SystemStats { SystemStatsAvailable = false },
-            RecycleBinPath = _recycleBin.GetEffectiveRoot(),
-            RecycleBinCrossVolume = ComputeRecycleBinCrossVolume(drives),
-            RecycleBinBytes = binContents.SizeBytes,
-            RecycleBinFileCount = binContents.FileCount,
-            RecycleBinRetentionDays = config.RecycleBinRetentionDays,
-            LastFixRun = Plugin.LastFixRun,
-            FixPauseReason = FixTask.PauseReason,
-            RedownloadWarnings = Plugin.RedownloadWarnings,
-            Repair = _db.GetRepairSummary(DateTime.UtcNow.AddDays(-30).Ticks)
-        };
-    }
-
-    // Flatten a Probing.SmartHealthResult onto a DriveUsage. Keeping the DTO flat (as opposed to nesting a
-    // "smart" object) means older clients ignore new fields cleanly and the Overview JS reads one row.
-    private static void CopySmartFields(DriveUsage usage, Probing.SmartHealthResult health)
-    {
-        usage.SmartHealth = health.Status.ToString().ToLowerInvariant();
-        usage.SmartMessage = health.Message;
-        usage.SmartModel = health.ModelName;
-        usage.SmartTemperatureCelsius = health.TemperatureCelsius;
-        usage.SmartTemperatureMaxCelsius = health.TemperatureMaxCelsius;
-        usage.SmartWearPercent = health.WearPercent;
-        usage.SmartPowerOnHours = health.PowerOnHours;
-        usage.SmartReadErrorsUncorrected = health.ReadErrorsUncorrected;
-        usage.SmartWriteErrorsUncorrected = health.WriteErrorsUncorrected;
-    }
-
-    private bool ComputeRecycleBinCrossVolume(List<DriveUsage> drives)
-    {
-        // Only warn when there ARE library drives (i.e., the user has configured libraries) and the recycle
-        // bin sits on a different volume. On single-drive setups the answer is trivially "no" — do nothing.
-        var libraryDrives = drives.Where(d => d.IsLibraryDrive).ToList();
-        if (libraryDrives.Count == 0)
-        {
-            return false;
-        }
-
-        var recycleDrive = Fixers.RecycleBin.FindDriveForPath(_recycleBin.GetEffectiveRoot());
-        if (recycleDrive is null)
-        {
-            return false;
-        }
-
-        var recycleRoot = System.IO.Path.TrimEndingDirectorySeparator(recycleDrive.RootDirectory.FullName);
-        return !libraryDrives.Any(d => string.Equals(
-            System.IO.Path.TrimEndingDirectorySeparator(d.Root),
-            recycleRoot,
-            StringComparison.OrdinalIgnoreCase));
-    }
+    public ActionResult<StatusResponse> GetStatus() => _statusQuery.BuildStatus();
 
     /// <summary>
     /// Gets issues, optionally filtered by type and status.
@@ -305,8 +126,8 @@ public class MediaDashController : ControllerBase
         [FromQuery] bool openOnly = false)
     {
         var rows = openOnly
-            ? _db.GetIssues(type, IssueStatus.Detected).Concat(_db.GetIssues(type, IssueStatus.Queued)).ToList()
-            : _db.GetIssues(type, status).ToList();
+            ? _issues.GetIssues(type, IssueStatus.Detected).Concat(_issues.GetIssues(type, IssueStatus.Queued)).ToList()
+            : _issues.GetIssues(type, status).ToList();
 
         // Enrich each DTO with a "was previously restored" flag so the UI can render the badge that
         // explains why an auto-mode type isn't queuing on its own. Cache the restored path set per
@@ -340,7 +161,7 @@ public class MediaDashController : ControllerBase
         var scanTask = GetScanTask();
         if (scanTask is not null && scanTask.State == TaskState.Idle)
         {
-            ScanTask.BypassIdleCheckOnce = true;
+            _runState.ArmBypassIdleCheck(ScheduledTasks.RunRole.Scan);
             _taskManager.Execute(scanTask, new TaskOptions());
         }
 
@@ -368,7 +189,7 @@ public class MediaDashController : ControllerBase
         var start = DateTime.UtcNow;
         var progress = new Progress<double>();
         var issues = await scanner.RunScanAsync(progress, HttpContext.RequestAborted).ConfigureAwait(false);
-        _db.ReplaceDetectedIssues(scanner.Type, issues, null);
+        _issues.ReplaceDetectedIssues(scanner.Type, issues, null);
         return Ok(new
         {
             Detected = issues.Count,
@@ -377,35 +198,53 @@ public class MediaDashController : ControllerBase
     }
 
     /// <summary>
-    /// Approves an issue: it is queued for the next fix run.
+    /// Approves an issue: it is queued for the next fix run. Only legal from Detected —
+    /// re-approving a queued or fixed row is a stale request from an out-of-date UI and returns
+    /// 409 so the client refreshes rather than resurrecting an already-completed fix.
     /// </summary>
     /// <param name="id">The issue id.</param>
-    /// <returns>No content, or 404 when the issue does not exist.</returns>
+    /// <returns>No content on success; 404 for unknown ids; 409 when the row isn't Detected.</returns>
     [HttpPost("Issues/{id}/Approve")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
     public ActionResult ApproveIssue([FromRoute] long id)
     {
-        return _db.UpdateIssueStatus(id, IssueStatus.Queued) ? NoContent() : NotFound();
+        return _issues.TryTransitionIssueStatus(id, ApproveFromDetected, IssueStatus.Queued) switch
+        {
+            StatusTransitionResult.Applied => NoContent(),
+            StatusTransitionResult.NotFound => NotFound(),
+            _ => Conflict("Approve is only legal from Detected. The issue is no longer in that state — refresh the Issues tab to see its current status.")
+        };
     }
 
     /// <summary>
-    /// Dismisses an issue: it will not be re-reported by future scans.
+    /// Dismisses an issue: it will not be re-reported by future scans. Legal from Detected or
+    /// Queued (change of mind before the fix runs). Refuses Dismissed (already ignored) and Fixed
+    /// (the file has already been touched) so the audit trail can't be silently rewritten.
     /// </summary>
     /// <param name="id">The issue id.</param>
-    /// <returns>No content, or 404 when the issue does not exist.</returns>
+    /// <returns>No content on success; 404 for unknown ids; 409 when the row is Dismissed or Fixed.</returns>
     [HttpPost("Issues/{id}/Dismiss")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
     public ActionResult DismissIssue([FromRoute] long id)
     {
-        return _db.UpdateIssueStatus(id, IssueStatus.Dismissed) ? NoContent() : NotFound();
+        return _issues.TryTransitionIssueStatus(id, DismissFromOpen, IssueStatus.Dismissed) switch
+        {
+            StatusTransitionResult.Applied => NoContent(),
+            StatusTransitionResult.NotFound => NotFound(),
+            _ => Conflict("Dismiss is only legal from Detected or Queued. The issue has already been fixed or dismissed — refresh the Issues tab.")
+        };
     }
 
     /// <summary>
     /// Reverts a queued or dismissed issue back to Detected so the user can change their mind
     /// after clicking Approve or Dismiss by accident. Refuses when the issue has already Fixed
     /// (the file has already been touched) — the History tab's Restore is the right path for that.
+    /// The transition is atomic: the source-status check happens inside the UPDATE so a concurrent
+    /// fixer completion or dismiss can't slip through a read-then-write race.
     /// </summary>
     /// <param name="id">The issue id.</param>
     /// <returns>No content on success; 404 for unknown ids; 409 for any status other than Queued or Dismissed.</returns>
@@ -415,18 +254,12 @@ public class MediaDashController : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public ActionResult RevertIssue([FromRoute] long id)
     {
-        var current = _db.GetIssueStatus(id);
-        if (current is null)
+        return _issues.TryTransitionIssueStatus(id, RevertFromQueuedOrDismissed, IssueStatus.Detected) switch
         {
-            return NotFound();
-        }
-
-        if (current != IssueStatus.Queued && current != IssueStatus.Dismissed)
-        {
-            return Conflict("Can only revert issues in Queued or Dismissed state; this one is " + current + ". If the fix has already run, use the History tab's Restore instead.");
-        }
-
-        return _db.UpdateIssueStatus(id, IssueStatus.Detected) ? NoContent() : NotFound();
+            StatusTransitionResult.Applied => NoContent(),
+            StatusTransitionResult.NotFound => NotFound(),
+            _ => Conflict("Can only revert issues in Queued or Dismissed state. If the fix has already run, use the History tab's Restore instead.")
+        };
     }
 
     /// <summary>
@@ -440,7 +273,7 @@ public class MediaDashController : ControllerBase
         var fixTask = _taskManager.ScheduledTasks.FirstOrDefault(w => w.ScheduledTask is FixTask);
         if (fixTask is not null && fixTask.State == TaskState.Idle)
         {
-            FixTask.BypassIdleCheckOnce = true;
+            _runState.ArmBypassIdleCheck(ScheduledTasks.RunRole.Fix);
             _taskManager.Execute(fixTask, new TaskOptions());
         }
 
@@ -527,7 +360,30 @@ public class MediaDashController : ControllerBase
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     public ActionResult IgnoreFixActivity()
     {
-        FixTask.IgnoreActivityForCurrentRun = true;
+        _runState.SetFixIgnoreActivity();
+        return NoContent();
+    }
+
+    /// <summary>
+    /// Clears every persisted Errors-tab diagnostic whose source starts with <paramref name="prefix"/>.
+    /// Called by the SMART pill's "Disable SMART monitoring" context-menu item (prefix
+    /// <c>SmartHealth.</c>) so existing SmartHealth.* rows vanish immediately after the user turns
+    /// the subsystem off; the paired config flag prevents new ones from ever being recorded.
+    /// Generic-by-design so other subsystem-off toggles can reuse it without new endpoints.
+    /// </summary>
+    /// <param name="prefix">Source prefix to purge (e.g. <c>SmartHealth.</c>). Required.</param>
+    /// <returns>No content.</returns>
+    [HttpPost("Diagnostics/PurgeByPrefix")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public ActionResult PurgeDiagnosticsByPrefix([FromQuery] string prefix)
+    {
+        if (string.IsNullOrWhiteSpace(prefix))
+        {
+            return BadRequest("prefix is required");
+        }
+
+        Diagnostics.RemoveBySourcePrefix(prefix);
         return NoContent();
     }
 
@@ -540,18 +396,28 @@ public class MediaDashController : ControllerBase
     [ProducesResponseType(StatusCodes.Status200OK)]
     public ActionResult<int> ApproveAll([FromQuery] IssueType? type = null)
     {
+        // Consent gate: blocking-warning rows (bitmap-sub removals, low-space overrides, etc.)
+        // require an explicit per-row Approve from the Issues tab and must NOT be auto-approved
+        // by a bulk "Approve all of type X" click — the user can't see the warning bubble on a
+        // collapsed row. Mirror the FixTask auto-queue pattern: collect the just-transitioned IDs,
+        // then run RollbackAutoQueuedBlockingWarnings against that exact set so blocking rows
+        // bounce back to Detected. The count we return excludes the reverts so the toast tells
+        // the truth about what's actually queued to run.
+        var autoQueuedIds = new List<long>();
         if (type is not null)
         {
-            return _db.QueueDetectedIssues(type.Value);
+            autoQueuedIds.AddRange(_issues.QueueDetectedIssues(type.Value));
         }
-
-        var total = 0;
-        foreach (var t in Enum.GetValues<IssueType>())
+        else
         {
-            total += _db.QueueDetectedIssues(t);
+            foreach (var t in Enum.GetValues<IssueType>())
+            {
+                autoQueuedIds.AddRange(_issues.QueueDetectedIssues(t));
+            }
         }
 
-        return total;
+        var reverted = _issues.RollbackAutoQueuedBlockingWarnings(autoQueuedIds);
+        return autoQueuedIds.Count - reverted;
     }
 
     /// <summary>
@@ -582,7 +448,7 @@ public class MediaDashController : ControllerBase
         // Detected/Queued — so branch before the target lookup.
         if (string.Equals(request.Action, "Revert", StringComparison.OrdinalIgnoreCase))
         {
-            return _db.BulkRevertDismissedIssues(request.Ids);
+            return _issues.BulkRevertDismissedIssues(request.Ids);
         }
 
         IssueStatus target;
@@ -601,7 +467,19 @@ public class MediaDashController : ControllerBase
 
         // Guarded transition — only Detected/Queued rows are touched. Prevents a stale client
         // snapshot from un-ignoring items via bulk-approve, or un-fixing them via bulk-dismiss.
-        return _db.BulkUpdateOpenIssueStatus(request.Ids, target);
+        // For the Approve path, blocking-warning rows must not bypass the per-row consent gate —
+        // the bulk endpoint's "approve all shown" click can catch rows whose warning bubble was
+        // never expanded, so run the RollbackAutoQueuedBlockingWarnings pass against the exact
+        // just-transitioned IDs (same pattern the FixTask auto-queue uses). Dismiss action has no
+        // consent gate — bulk-dismissing a blocking-warning row is a valid "never touch this" click.
+        var transitioned = _issues.BulkUpdateOpenIssueStatus(request.Ids, target);
+        if (target == IssueStatus.Queued)
+        {
+            var reverted = _issues.RollbackAutoQueuedBlockingWarnings(transitioned);
+            return transitioned.Count - reverted;
+        }
+
+        return transitioned.Count;
     }
 
     /// <summary>
@@ -618,7 +496,7 @@ public class MediaDashController : ControllerBase
             .SelectMany(f => (f.Locations ?? []).Select(l => (Name: f.Name, Root: Path.TrimEndingDirectorySeparator(Path.GetFullPath(l)))))
             .ToList();
 
-        return Ok(_db.GetHistory().Select(entry =>
+        return Ok(_history.GetHistory().Select(entry =>
         {
             var dto = HistoryDto.FromEntry(entry);
             dto.Library = ResolveLibraryName(entry.Path, libraryLocations);
@@ -643,7 +521,7 @@ public class MediaDashController : ControllerBase
 
         long total = 0;
         var byLibrary = new Dictionary<string, long>(StringComparer.Ordinal);
-        foreach (var (path, bytesFreed) in _db.GetLifetimePathTotals())
+        foreach (var (path, bytesFreed) in _history.GetLifetimePathTotals())
         {
             total += bytesFreed;
             var libName = ResolveLibraryName(path, libraryLocations);
@@ -716,116 +594,16 @@ public class MediaDashController : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public ActionResult RestoreFromHistory([FromRoute] long id, [FromQuery] bool force = false)
     {
-        var entry = _db.GetHistoryEntry(id);
-        if (entry is null)
-        {
-            return NotFound();
-        }
-
-        // Defense in depth: history rows from older MediaDash versions or a hand-edited DB can carry
-        // a target path outside the current library set. Without this guard, a poisoned row could
-        // direct MoveAcrossVolumes to write to arbitrary paths (e.g. /etc/cron.d/) that Jellyfin can
-        // reach — arbitrary file write escalation. Mirrors RestoreOptimizedCopy's guard.
-        if (!_libraryGuard.IsInsideLibrary(entry.Path))
-        {
-            return Conflict("Refused: the target path '" + entry.Path + "' is not inside a configured Jellyfin library.");
-        }
-
-        if (entry.Restored || string.IsNullOrEmpty(entry.RecyclePath) || !System.IO.File.Exists(entry.RecyclePath))
-        {
-            return Conflict("This file is no longer in the recycle bin.");
-        }
-
-        var targetPath = entry.Path;
-        var suffixed = false;
-
-        if (System.IO.File.Exists(entry.Path))
-        {
-            if (force)
-            {
-                // Explicit destructive path: swap the current file to the bin so the original goes
-                // back into its slot. Logged as its own recyclable history row (still reversible).
-                try
-                {
-                    var swappedBinPath = _recycleBin.MoveToBin(entry.Path);
-                    _db.AddHistory(new HistoryEntry
-                    {
-                        IssueId = 0,
-                        Type = entry.Type,
-                        Path = entry.Path,
-                        Action = "Swapped out to recycle bin so an older copy could be restored in its place.",
-                        BytesFreed = 0,
-                        RecyclePath = swappedBinPath,
-                        FixedAtUtc = DateTime.UtcNow,
-                        WasDryRun = false,
-                        Success = true
-                    });
-                }
-                catch (IOException ex)
-                {
-                    return Conflict("Couldn't move the current file to the recycle bin before restoring: " + ex.Message);
-                }
-            }
-            else
-            {
-                // Non-destructive default: land next to the current file with a suffix. The user's
-                // reasonable concern is "will restoring nuke my re-encoded copy?" — this answers no,
-                // both live side-by-side and the user picks which to keep from the File Browser.
-                targetPath = ResolveNonCollidingRestorePath(entry.Path);
-                suffixed = true;
-            }
-        }
-
-        try
-        {
-            _recycleBin.Restore(entry.RecyclePath, targetPath);
-        }
-        catch (IOException ex)
-        {
-            return Conflict(ex.Message);
-        }
-
-        _db.MarkRestored(id);
-        // Record the user's "don't touch this again" signal so the FixTask auto-queue step skips
-        // any future re-detection at this (path, type) — the scanner still emits the Issue so the
-        // user can see it in the Issues tab, but MediaDash won't automatically re-recycle it.
-        // Guard on entry.Path (original) rather than targetPath so a -restored-suffixed collision
-        // still protects the ORIGINAL slot — that's the file identity the user cared about.
-        _db.MarkPathRestored(entry.Path, entry.Type);
-        _libraryMonitor.ReportFileSystemChanged(targetPath);
-        if (suffixed)
-        {
-            // Force is false and we wrote to a different path; still ping the original so any
-            // Jellyfin-side listeners rescan the folder and pick up the sibling.
-            _libraryMonitor.ReportFileSystemChanged(entry.Path);
-        }
-
-        return Ok(new RestoreResult { RestoredTo = targetPath, Suffixed = suffixed });
+        var outcome = _restoreService.RestoreFromHistory(id, force);
+        return MapRestoreOutcome(outcome);
     }
 
-    // Returns the original path when it's free; otherwise the first non-existing path of the form
-    // <dir>/<name>-restored<ext>, <name>-restored-2<ext>, …. Exposed internal for unit-test reach —
-    // tests seed collisions on disk in a tmpdir rather than mocking File.Exists.
+    // Thin forwarder to <see cref="RestoreService.ResolveNonCollidingRestorePath"/>. The real
+    // implementation moved to RestoreService in 05-B so all three restore routes share the
+    // directory-aware suffix resolver. Existing tests reach the resolver via this symbol; the
+    // forwarder keeps the test-visible surface stable without duplicating logic.
     internal static string ResolveNonCollidingRestorePath(string originalPath)
-    {
-        if (!System.IO.File.Exists(originalPath))
-        {
-            return originalPath;
-        }
-
-        var dir = System.IO.Path.GetDirectoryName(originalPath) ?? string.Empty;
-        var name = System.IO.Path.GetFileNameWithoutExtension(originalPath);
-        var ext = System.IO.Path.GetExtension(originalPath);
-        var candidate = System.IO.Path.Combine(dir, name + "-restored" + ext);
-        var counter = 2;
-        while (System.IO.File.Exists(candidate))
-        {
-            candidate = System.IO.Path.Combine(dir, name + "-restored-" + counter.ToString(System.Globalization.CultureInfo.InvariantCulture) + ext);
-            counter++;
-        }
-
-        return candidate;
-    }
+        => RestoreService.ResolveNonCollidingRestorePath(originalPath);
 
     /// <summary>
     /// Gets the recycle bin contents summary.
@@ -1252,7 +1030,7 @@ public class MediaDashController : ControllerBase
         // Join each bin file back to its history row so the UI can show a per-item Restore button.
         // History is authoritative for the original destination path AND the reason (issue type +
         // action text) — the bin itself doesn't store either.
-        var byRecyclePath = _db.GetHistory()
+        var byRecyclePath = _history.GetHistory()
             .Where(h => !h.Restored && !string.IsNullOrEmpty(h.RecyclePath))
             .GroupBy(h => h.RecyclePath!, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(g => g.Key, g => g.OrderByDescending(h => h.FixedAtUtc).First(), StringComparer.OrdinalIgnoreCase);
@@ -1338,15 +1116,13 @@ public class MediaDashController : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public ActionResult RestoreByBinPath([FromBody] BinRestoreRequest request)
     {
-        // F-207 / issue #26: the endpoint used to return 409 for a missing BinPath, which
-        // matches "state conflict" semantics but users routinely POST alternative shapes
-        // ({ids: [...]}, {itemIds: [...]}, {id: "..."}) inherited from other bin APIs.
-        // Distinguish "you sent the wrong shape" (400) from "you sent the right shape but
-        // the target can't be restored right now" (409).
+        // F-207 / issue #26: the endpoint distinguishes "you sent the wrong shape" (400) from
+        // "you sent the right shape but the target can't be restored right now" (409).
 
         // Batch path: {BinPaths: [...]} with 2+ entries. Always returns 200 with per-entry outcomes
-        // so a bad path halfway through doesn't hide the successes. Single-item batches fall through
-        // to the single-item path below so backward-compatible clients still get a RestoreResult.
+        // so a bad path halfway through doesn't hide the successes. Single-item batches fall
+        // through to the single-item path below so backward-compatible clients still get a
+        // RestoreResult body.
         if (request.BinPaths is { Length: > 1 } batch)
         {
             var body = new BatchRestoreResult();
@@ -1362,9 +1138,16 @@ public class MediaDashController : ControllerBase
                     continue;
                 }
 
-                var row = RestoreOneBinPath(candidatePath, entries);
-                body.Results.Add(row);
-                if (row.Success)
+                var outcome = _restoreService.RestoreManifestEntryFromListing(candidatePath, entries);
+                body.Results.Add(new BatchRestoreEntry
+                {
+                    BinPath = candidatePath,
+                    Success = outcome.Success,
+                    RestoredTo = outcome.RestoredTo,
+                    Suffixed = outcome.Suffixed,
+                    Error = outcome.Success ? null : outcome.TechnicalDetail
+                });
+                if (outcome.Success)
                 {
                     body.Successes++;
                 }
@@ -1388,131 +1171,25 @@ public class MediaDashController : ControllerBase
             return BadRequest("Missing 'BinPath' (or 'BinPaths[]'). Get valid values from GET /MediaDash/RecycleBin/Items — each row's 'BinPath' field is what this endpoint expects. If your client is sending {ids: […]} or {itemIds: […]}, update it to send {BinPath: '…'} instead.");
         }
 
-        var singleEntries = _recycleBin.ListContents(limit: 5000);
-        var entry = singleEntries.FirstOrDefault(e =>
-            string.Equals(e.BinPath, binPath, StringComparison.OrdinalIgnoreCase));
-        if (entry.BinPath is null)
+        var singleOutcome = _restoreService.RestoreManifestEntry(binPath);
+        return MapRestoreOutcome(singleOutcome);
+    }
+
+    // Shared HTTP mapping for RestoreOutcome (single-item shapes). RestoreOptimizedCopy has its
+    // own 204/404/409 shape and doesn't use this; batch uses the outcome fields directly.
+    private ActionResult MapRestoreOutcome(RestoreOutcome outcome)
+    {
+        if (outcome.Success)
+        {
+            return Ok(new RestoreResult { RestoredTo = outcome.RestoredTo!, Suffixed = outcome.Suffixed });
+        }
+
+        if (outcome.IsNotFound)
         {
             return NotFound();
         }
 
-        if (string.IsNullOrEmpty(entry.OriginalPath))
-        {
-            return Conflict("This bin file has no origin manifest — MediaDash doesn't know where it came from. Restore it manually from the Files tab's Recycle bin shortcut.");
-        }
-
-        if (!_libraryGuard.IsInsideLibrary(entry.OriginalPath))
-        {
-            return Conflict("Refused: the origin path '" + entry.OriginalPath + "' is not inside a configured Jellyfin library.");
-        }
-
-        var targetPath = System.IO.File.Exists(entry.OriginalPath)
-            ? ResolveNonCollidingRestorePath(entry.OriginalPath)
-            : entry.OriginalPath;
-        var suffixed = !string.Equals(targetPath, entry.OriginalPath, StringComparison.Ordinal);
-
-        try
-        {
-            _recycleBin.Restore(entry.BinPath, targetPath);
-        }
-        catch (IOException ex)
-        {
-            return Conflict(ex.Message);
-        }
-
-        // Log the manual restore as a history row so future audits can see it — matches the shape
-        // of a normal fixer output but with no IssueId, and marked Restored=true straight away.
-        _db.AddHistory(new HistoryEntry
-        {
-            IssueId = 0,
-            Type = Data.IssueType.Duplicate,
-            Path = entry.OriginalPath!,
-            Action = suffixed
-                ? "Restored bin file (with -restored suffix) via Recycle bin tab: " + targetPath
-                : "Restored bin file via Recycle bin tab: " + targetPath,
-            BytesFreed = 0,
-            RecyclePath = entry.BinPath,
-            FixedAtUtc = DateTime.UtcNow,
-            WasDryRun = false,
-            Success = true,
-            Restored = true
-        });
-
-        // Manifest-only restores don't know the underlying IssueType (the manifest sidecar stores
-        // only the origin path). Record the block under the "any type" sentinel so no scanner can
-        // auto-fix this path again. If it re-detects, the row sits Detected for manual review.
-        _db.MarkPathRestoredForAnyType(entry.OriginalPath!);
-
-        _libraryMonitor.ReportFileSystemChanged(targetPath);
-        return Ok(new RestoreResult { RestoredTo = targetPath, Suffixed = suffixed });
-    }
-
-    /// <summary>
-    /// Per-entry helper for the batch restore path. Same policy as the single-item path but
-    /// records failures into a <see cref="BatchRestoreEntry"/> row instead of returning HTTP
-    /// status codes, so one bad path doesn't fail the whole batch.
-    /// </summary>
-    private BatchRestoreEntry RestoreOneBinPath(
-        string binPath,
-        System.Collections.Generic.IReadOnlyList<(string FileName, string BinPath, long SizeBytes, DateTime RecycledAtUtc, string? OriginalPath)> entries)
-    {
-        var row = new BatchRestoreEntry { BinPath = binPath };
-        var entry = entries.FirstOrDefault(e => string.Equals(e.BinPath, binPath, StringComparison.OrdinalIgnoreCase));
-        if (entry.BinPath is null)
-        {
-            row.Error = "Unknown bin path — not currently in the recycle bin.";
-            return row;
-        }
-
-        if (string.IsNullOrEmpty(entry.OriginalPath))
-        {
-            row.Error = "No origin manifest — MediaDash doesn't know where this file came from. Restore manually from the Files tab.";
-            return row;
-        }
-
-        if (!_libraryGuard.IsInsideLibrary(entry.OriginalPath))
-        {
-            row.Error = "Origin path '" + entry.OriginalPath + "' is not inside any configured Jellyfin library.";
-            return row;
-        }
-
-        var targetPath = System.IO.File.Exists(entry.OriginalPath)
-            ? ResolveNonCollidingRestorePath(entry.OriginalPath)
-            : entry.OriginalPath;
-        var suffixed = !string.Equals(targetPath, entry.OriginalPath, StringComparison.Ordinal);
-
-        try
-        {
-            _recycleBin.Restore(entry.BinPath, targetPath);
-        }
-        catch (IOException ex)
-        {
-            row.Error = ex.Message;
-            return row;
-        }
-
-        _db.AddHistory(new HistoryEntry
-        {
-            IssueId = 0,
-            Type = Data.IssueType.Duplicate,
-            Path = entry.OriginalPath!,
-            Action = suffixed
-                ? "Batch-restored bin file (with -restored suffix) via Recycle bin tab: " + targetPath
-                : "Batch-restored bin file via Recycle bin tab: " + targetPath,
-            BytesFreed = 0,
-            RecyclePath = entry.BinPath,
-            FixedAtUtc = DateTime.UtcNow,
-            WasDryRun = false,
-            Success = true,
-            Restored = true
-        });
-        _db.MarkPathRestoredForAnyType(entry.OriginalPath!);
-        _libraryMonitor.ReportFileSystemChanged(targetPath);
-
-        row.Success = true;
-        row.RestoredTo = targetPath;
-        row.Suffixed = suffixed;
-        return row;
+        return Conflict(outcome.TechnicalDetail ?? "Restore refused.");
     }
 
     /// <summary>
@@ -1618,7 +1295,7 @@ public class MediaDashController : ControllerBase
     [ProducesResponseType(StatusCodes.Status200OK)]
     public ActionResult<IReadOnlyList<OtherBinLocation>> GetOtherBinLocations()
     {
-        return Ok(_recycleBin.DiscoverOtherBinRoots(_db)
+        return Ok(_recycleBin.DiscoverOtherBinRoots(_history)
             .Select(t => new OtherBinLocation { RootPath = t.RootPath, BatchCount = t.BatchCount, SizeBytes = t.SizeBytes })
             .ToList());
     }
@@ -1648,7 +1325,7 @@ public class MediaDashController : ControllerBase
         // Gate the source against DiscoverOtherBinRoots — that's the only set of paths the UI is
         // supposed to send. Prevents an admin token from being used to move arbitrary folders on
         // the host; also refuses when the "other" root turns out to be the current one.
-        var known = _recycleBin.DiscoverOtherBinRoots(_db)
+        var known = _recycleBin.DiscoverOtherBinRoots(_history)
             .Any(t => string.Equals(
                 System.IO.Path.TrimEndingDirectorySeparator(System.IO.Path.GetFullPath(t.RootPath)),
                 System.IO.Path.TrimEndingDirectorySeparator(System.IO.Path.GetFullPath(request.SourceRoot)),
@@ -1770,7 +1447,7 @@ public class MediaDashController : ControllerBase
         }
 
         var result = await _postUpgradeCleanup.RunAsync().ConfigureAwait(false);
-        _db.AddHistory(new Data.HistoryEntry
+        _history.AddHistory(new Data.HistoryEntry
         {
             Type = Data.IssueType.Stale,
             Path = "(post-Jellyfin-12 cleanup)",
@@ -1802,12 +1479,12 @@ public class MediaDashController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public ActionResult AcknowledgeRedownloadWarning([FromRoute] long historyId)
     {
-        if (!_db.AcknowledgeHistoryEntry(historyId))
+        if (!_history.AcknowledgeHistoryEntry(historyId))
         {
             return NotFound();
         }
 
-        Plugin.RedownloadWarnings = RedownloadDetector.Detect(_db, TimeSpan.FromDays(30));
+        Plugin.RedownloadWarnings = RedownloadDetector.Detect(_history, TimeSpan.FromDays(30));
         return NoContent();
     }
 
@@ -1826,78 +1503,20 @@ public class MediaDashController : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public ActionResult RestoreOptimizedCopy([FromRoute] long historyId, [FromQuery] bool force = false)
     {
-        var entry = _db.GetHistoryEntry(historyId);
-        if (entry is null)
+        var outcome = _restoreService.RestoreOptimizedCopy(historyId, force);
+        if (outcome.Success)
+        {
+            // Endpoint contract is 204 NoContent (not 200 + body). Also refresh the banner cache.
+            Plugin.RedownloadWarnings = RedownloadDetector.Detect(_history, TimeSpan.FromDays(30));
+            return NoContent();
+        }
+
+        if (outcome.IsNotFound)
         {
             return NotFound();
         }
 
-        if (string.IsNullOrEmpty(entry.RecyclePath))
-        {
-            return Conflict("This history row has no recorded recycle path — the original file wasn't sent to the bin.");
-        }
-
-        // Defense in depth: history rows from older MediaDash versions (or a hand-edited DB) can carry
-        // a Path outside any currently-configured library. Refuse to touch it — every other user path
-        // through this controller validates via LibraryGuard.
-        if (!_libraryGuard.IsInsideLibrary(entry.Path))
-        {
-            return Conflict("Refused: the target path '" + entry.Path + "' is not inside a configured Jellyfin library.");
-        }
-
-        // Pass the source's on-disk path so SelectOptimizedTwin can prefer manifest-matched
-        // candidates when two same-basename bin files sit in the fix's time window.
-        var twin = _recycleBin.FindOptimizedTwin(entry.RecyclePath, entry.FixedAtUtc, entry.Path);
-        if (twin is null)
-        {
-            return Conflict("Couldn't find an unambiguous optimized twin in the recycle bin. It may have been purged, or multiple candidates were found. Use the Recycle bin tab to pick manually, or use the History tab's Restore to bring back the original instead.");
-        }
-
-        if (System.IO.File.Exists(entry.Path))
-        {
-            if (!force)
-            {
-                return Conflict("A file already exists at " + entry.Path + ". Use force=true to send it to the recycle bin first, then restore the optimized copy in its place.");
-            }
-
-            try
-            {
-                var swappedBinPath = _recycleBin.MoveToBin(entry.Path);
-                // Parity with RestoreFromHistory's force=true branch: the swapped-out file gets its
-                // own HistoryEntry so it stays restorable from the Recycle bin tab. Without this row
-                // the swap silently vanishes from History and only shows up under "no origin".
-                _db.AddHistory(new HistoryEntry
-                {
-                    IssueId = 0,
-                    Type = entry.Type,
-                    Path = entry.Path,
-                    Action = "Swapped out to recycle bin so the optimized copy could be restored in its place.",
-                    BytesFreed = 0,
-                    RecyclePath = swappedBinPath,
-                    FixedAtUtc = DateTime.UtcNow,
-                    WasDryRun = false,
-                    Success = true
-                });
-            }
-            catch (IOException ex)
-            {
-                return Conflict("Couldn't move the current file to the recycle bin before restoring: " + ex.Message);
-            }
-        }
-
-        try
-        {
-            _recycleBin.Restore(twin.Value.BinPath, entry.Path);
-        }
-        catch (IOException ex)
-        {
-            return Conflict(ex.Message);
-        }
-
-        _db.AcknowledgeHistoryEntry(historyId);
-        _libraryMonitor.ReportFileSystemChanged(entry.Path);
-        Plugin.RedownloadWarnings = RedownloadDetector.Detect(_db, TimeSpan.FromDays(30));
-        return NoContent();
+        return Conflict(outcome.TechnicalDetail ?? "Could not restore optimized copy.");
     }
 
     /// <summary>

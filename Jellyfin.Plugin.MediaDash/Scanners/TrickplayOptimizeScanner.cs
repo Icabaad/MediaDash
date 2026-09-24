@@ -40,19 +40,19 @@ public sealed class TrickplayOptimizeScanner : IScanner
 
     private readonly IApplicationPaths _appPaths;
     private readonly ILibraryManager _libraryManager;
-    private readonly Data.MediaDashDb _db;
+    private readonly Data.HistoryStore _history;
     private readonly ILogger<TrickplayOptimizeScanner> _logger;
 
     /// <summary>Initializes a new instance of the <see cref="TrickplayOptimizeScanner"/> class.</summary>
     /// <param name="appPaths">Jellyfin's application paths (used to locate the trickplay data dir).</param>
     /// <param name="libraryManager">Used to resolve trickplay-folder GUIDs back to item names for the Issue label.</param>
-    /// <param name="db">Plugin DB, queried for the last-successful-fix timestamp per trickplay folder — used as a rescan cutoff so sprites the fixer legitimately couldn't shrink don't re-flag every session.</param>
+    /// <param name="history">History-table store (05-C.3), queried for the last-successful-fix timestamp per trickplay folder — used as a rescan cutoff so sprites the fixer legitimately couldn't shrink don't re-flag every session.</param>
     /// <param name="logger">The logger.</param>
-    public TrickplayOptimizeScanner(IApplicationPaths appPaths, ILibraryManager libraryManager, Data.MediaDashDb db, ILogger<TrickplayOptimizeScanner> logger)
+    public TrickplayOptimizeScanner(IApplicationPaths appPaths, ILibraryManager libraryManager, Data.HistoryStore history, ILogger<TrickplayOptimizeScanner> logger)
     {
         _appPaths = appPaths;
         _libraryManager = libraryManager;
-        _db = db;
+        _history = history;
         _logger = logger;
     }
 
@@ -126,7 +126,7 @@ public sealed class TrickplayOptimizeScanner : IScanner
 
         void TryAddIssue(string dir, Guid itemId, string displayName)
         {
-            var cutoff = _db.GetLastSuccessfulFixUtc(IssueType.LargeTrickplay, dir);
+            var cutoff = _history.GetLastSuccessfulFixUtc(IssueType.LargeTrickplay, dir);
             var (jpgCount, jpgBytes) = MeasureConvertibleJpgs(dir, cutoff);
             if (jpgCount == 0 || jpgBytes < minBytes)
             {

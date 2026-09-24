@@ -50,13 +50,13 @@ public sealed class MissingSubtitleFixer : IFixer
 
         if (_libraryManager.GetItemById(issue.ItemId) is not Video video)
         {
-            return FixResult.Fail("The library item is no longer available — re-scan to refresh the list.");
+            return FixResult.Fail(FixReason.SourceMissing, "The library item is no longer available — re-scan to refresh the list.");
         }
 
         IReadOnlyList<string> wanted = ReadMissingLanguages(issue) ?? (IReadOnlyList<string>)config.AllowedSubtitleLanguages;
         if (wanted.Count == 0)
         {
-            return FixResult.Fail("No wanted subtitle languages configured. Set some in Settings → Languages, then re-scan.");
+            return FixResult.Refused(FixReason.ConsentChanged, "No wanted subtitle languages configured. Set some in Settings → Languages, then re-scan.");
         }
 
         // Skip the "already added since scan" pre-check — a re-scan clears the issue in that case, and
@@ -81,6 +81,7 @@ public sealed class MissingSubtitleFixer : IFixer
         }
 
         var attempts = new List<string>();
+        var providerQuotaExhausted = false;
         foreach (var lang in wanted)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -97,6 +98,11 @@ public sealed class MissingSubtitleFixer : IFixer
             catch (InvalidOperationException ex)
             {
                 attempts.Add($"{normalized}: {ex.Message}");
+                if (LooksLikeProviderQuota(ex.Message))
+                {
+                    providerQuotaExhausted = true;
+                }
+
                 continue;
             }
             catch (HttpRequestException ex)
@@ -135,11 +141,15 @@ public sealed class MissingSubtitleFixer : IFixer
             {
                 await _subtitleManager.DownloadSubtitles(video, pick.Id, cancellationToken).ConfigureAwait(false);
                 _logger.LogInformation("Subtitle download: {Action}", actionText);
-                return new FixResult { Success = true, Message = actionText, BytesFreed = 0 };
+                return new FixResult { Success = true, Outcome = FixOutcome.Applied, Message = actionText, BytesFreed = 0 };
             }
             catch (InvalidOperationException ex)
             {
                 attempts.Add($"{normalized}: download failed ({ex.Message})");
+                if (LooksLikeProviderQuota(ex.Message))
+                {
+                    providerQuotaExhausted = true;
+                }
             }
             catch (HttpRequestException ex)
             {
@@ -150,7 +160,36 @@ public sealed class MissingSubtitleFixer : IFixer
         var reason = attempts.Count == 0
             ? "No subtitle providers are configured in Jellyfin's Dashboard → Metadata."
             : string.Join("; ", attempts);
-        return FixResult.Fail(reason);
+        // Provider quota is the one "please try again later" outcome the scheduler needs to
+        // recognise — one exhausted provider means every remaining MissingSubtitles issue in
+        // this run will hit the same wall. Return a typed Deferred outcome so FixTask can
+        // short-circuit the rest of the run without parsing the message string. Boundary
+        // parsing lives ONLY here (per the master plan's "third-party stderr/provider strings
+        // may be parsed once at that integration boundary" rule).
+        if (providerQuotaExhausted)
+        {
+            return FixResult.Deferred(FixReason.ProviderQuota, reason);
+        }
+
+        return FixResult.Fail(FixReason.ProcessFailed, reason);
+    }
+
+    /// <summary>Boundary parser for OpenSubtitles' quota-exhausted signal. The provider surfaces
+    /// two phrasings in <c>InvalidOperationException.Message</c>; both flip the fixer to
+    /// <see cref="FixReason.ProviderQuota"/> so <c>FixTask</c> can short-circuit the rest of the
+    /// subtitle queue in this run without message classifiers of its own. Public for direct
+    /// coverage from the batch-3 tests.</summary>
+    /// <param name="message">The provider exception message.</param>
+    /// <returns>True when the phrase indicates an exhausted download quota.</returns>
+    internal static bool LooksLikeProviderQuota(string? message)
+    {
+        if (string.IsNullOrEmpty(message))
+        {
+            return false;
+        }
+
+        return message.Contains("download limit reached", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("download quota", StringComparison.OrdinalIgnoreCase);
     }
 
     private static List<string>? ReadMissingLanguages(Issue issue)

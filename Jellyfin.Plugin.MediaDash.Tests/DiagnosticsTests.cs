@@ -4,6 +4,7 @@ using Xunit;
 
 namespace Jellyfin.Plugin.MediaDash.Tests;
 
+[Collection("Diagnostics")]
 public sealed class DiagnosticsTests
 {
     [Fact]

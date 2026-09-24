@@ -77,6 +77,8 @@ public class PluginConfiguration : BasePluginConfiguration
         SubtitleIgnoreRateLimit = true;
         SubtitleHearingImpairedMode = false;
         ShowSystemPerformance = true;
+        SmartMonitoringEnabled = true;
+        FixerDisabled = [];
         AnimeTargetPath = string.Empty;
         StaleFixMode = FixMode.Off;
         StaleThresholdDays = 365;
@@ -555,6 +557,22 @@ public class PluginConfiguration : BasePluginConfiguration
     public bool ShowSystemPerformance { get; set; }
 
     /// <summary>
+    /// Gets or sets a value indicating whether SMART monitoring runs at all. When false, the server-
+    /// side probe short-circuits without shelling out to smartctl / WMI, no SmartHealth.* diagnostics
+    /// are recorded, and the client hides drive-card SMART panels and shows the header pill in a
+    /// "disabled" state. Toggled via right-click / long-press on any drive card's SMART pill.
+    /// </summary>
+    public bool SmartMonitoringEnabled { get; set; }
+
+    /// <summary>
+    /// Gets or sets the set of <see cref="Data.IssueType"/> names the user has muted from fix runs
+    /// (via the disable icon in the "Fix order" dialog). Independent of <see cref="FixMode"/>: the
+    /// scanner still detects and the row still surfaces on the Issues tab, but the fixer skips
+    /// this type until the user re-enables it (or Reset to default clears the list).
+    /// </summary>
+    public string[] FixerDisabled { get; set; }
+
+    /// <summary>
     /// Gets or sets the destination folder anime lands in when the media sorter runs. Empty disables anime
     /// routing — anime is treated as its underlying kind (Movie or TV episode). Must sit inside a Jellyfin
     /// library or moves are refused by <see cref="Fixers.LibraryGuard"/>. Detection uses Jellyfin's "Anime"
@@ -592,7 +610,8 @@ public class PluginConfiguration : BasePluginConfiguration
     /// Gets or sets the minimum age in days a duplicate copy must have before the scanner will flag it.
     /// Filters out fresh imports whose Jellyfin metadata hasn't stabilised yet — a movie imported 5 minutes
     /// ago will often match itself under the "no metadata" bucket for a short window before the provider
-    /// scrape lands. Default 7. Set to 0 to disable the gate.
+    /// scrape lands. Default 0 (no age gate — flag duplicates as soon as they're found). Set to a positive
+    /// number to defer flagging until every copy is at least that old.
     /// </summary>
     public int DuplicateMinAgeDays { get; set; }
 

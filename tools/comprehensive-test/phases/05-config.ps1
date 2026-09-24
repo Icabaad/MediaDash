@@ -140,13 +140,14 @@ function Invoke-Phase-Config {
     # ─── Per-type FixMode toggles ───
     Invoke-Test "Setting a fix type to 'Off' hides it from scans" {
         # QualityScanner: set to Off, scan, verify Quality issues not detected
-        Set-MediaDashConfig @{ QualityFixMode = "Off" }
+        $previousMode = (Get-MediaDashConfig).TranscodeFixMode
+        Set-MediaDashConfig @{ TranscodeFixMode = "Off" }
         Start-MediaDashScan -Wait -TimeoutSec 600
         $issues = Get-MediaDashIssues
         $q = @($issues | Where-Object { $_.Type -eq "Quality" })
         Assert-Equal 0 $q.Count "Quality issues should not be detected when scanner is Off"
         # Reset
-        Set-MediaDashConfig @{ QualityFixMode = "Manual" }
+        Set-MediaDashConfig @{ TranscodeFixMode = $previousMode }
     }
 
     Invoke-Test "Recycle bin retention days is honored" {

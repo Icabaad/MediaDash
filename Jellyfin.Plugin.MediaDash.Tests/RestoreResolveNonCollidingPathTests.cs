@@ -126,6 +126,71 @@ public class RestoreResolveNonCollidingPathTests
     }
 
     [Fact]
+    public void UsesRestoredSuffix_OnDirectoryCollision()
+    {
+        // Release audit finding #5 (2026-09-19): pre-fix helper only checked File.Exists, so a
+        // directory sitting at the restore target fell through as "free". _recycleBin.Restore
+        // then threw a collision and the endpoint 409'd. Now suffixed for both kinds.
+        var dir = Path.Combine(Path.GetTempPath(), "mediadash-restore-" + Path.GetRandomFileName());
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var originalFolder = Path.Combine(dir, "Yellowstone (2018)");
+            Directory.CreateDirectory(originalFolder);
+
+            var expected = Path.Combine(dir, "Yellowstone (2018)-restored");
+            Assert.Equal(expected, MediaDashController.ResolveNonCollidingRestorePath(originalFolder));
+        }
+        finally
+        {
+            Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
+    public void CountsUp_ThroughDirectoryCollisions()
+    {
+        // Symmetric with the file version — the counter loop must probe both File.Exists AND
+        // Directory.Exists at each step so a mix of file+folder collisions on the same stem
+        // (unusual but possible if a fixer produced a folder next to a file of the same name)
+        // still resolves to a free slot.
+        var dir = Path.Combine(Path.GetTempPath(), "mediadash-restore-" + Path.GetRandomFileName());
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var original = Path.Combine(dir, "Movie");
+            Directory.CreateDirectory(original);
+            Directory.CreateDirectory(Path.Combine(dir, "Movie-restored"));
+            File.WriteAllText(Path.Combine(dir, "Movie-restored-2"), string.Empty);
+
+            var expected = Path.Combine(dir, "Movie-restored-3");
+            Assert.Equal(expected, MediaDashController.ResolveNonCollidingRestorePath(original));
+        }
+        finally
+        {
+            Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
+    public void ReturnsOriginal_WhenNothingAtDirectoryPath()
+    {
+        // A recycle-bin restore of a folder whose original slot is empty returns the original
+        // path unchanged — same shape as the file case at ReturnsOriginal_WhenNothingAtPath.
+        var dir = Path.Combine(Path.GetTempPath(), "mediadash-restore-" + Path.GetRandomFileName());
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var target = Path.Combine(dir, "Some Series (2024)");
+            Assert.Equal(target, MediaDashController.ResolveNonCollidingRestorePath(target));
+        }
+        finally
+        {
+            Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
     public void CountsUp_ThroughManyCollisions()
     {
         // Stress: 10 consecutive collisions. Guards against off-by-one in the counter (a naive

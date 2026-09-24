@@ -1,5 +1,14 @@
 # MediaDash E2E Testing — Master Index
 
+## Current regression planning (2026-09-19)
+
+Read the [coverage review](REGRESSION-COVERAGE-REVIEW-2026-09-19.md) for current
+verification, false-pass risks in the harness and required regression cases.
+The [roadmap test matrix](ROADMAP-TEST-MATRIX.md) defines acceptance cases for every
+unfinished roadmap card. These additions are test specifications, not new E2E passes.
+Progress tables and checked boxes below are historical evidence; use a fresh run
+record for each candidate build rather than treating them as current coverage.
+
 End-to-end test suite for every component of the MediaDash Jellyfin plugin,
 runnable against a localhost Jellyfin instance across multiple sessions.
 

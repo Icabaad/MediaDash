@@ -32,14 +32,55 @@ public static class LanguageHelper
         ["wel"] = "cym"
     };
 
-    // Macrolanguage equivalence groups. A user who allows "nor" (Norwegian) should have their
-    // "nob" (Bokmål) and "nno" (Nynorsk) tracks kept too — most Norwegian media is tagged with
-    // the specific variant, so a "nor"-only allowed list would silently delete everything.
-    // Every code in a group matches every other code in the same group in IsAllowed().
-    // Add more groups here when users report similar false-positives (Chinese cmn/yue, etc.).
+    // Macrolanguage equivalence groups. A user who allows the macrolanguage code (Jellyfin's
+    // picker labels these plainly as "Chinese", "Arabic", "Norwegian", etc.) should have tracks
+    // tagged with any individual variant kept too — most real-world media is tagged with the
+    // specific individual, so a macro-only allowed list would silently delete everything.
+    // Every code in a group matches every other code in the same group inside IsAllowed().
+    //
+    // Design tradeoff: a user who allows a specific individual (e.g. "cmn" Mandarin only) will
+    // ALSO keep sibling individuals (e.g. "yue" Cantonese) with this shape. Deliberate: the
+    // silent-drop failure mode is worse than the keep-extra one, and matches the Norwegian
+    // precedent that shipped in 1.0.7.6. If a user files a strict-individual-filter request we
+    // can layer a hierarchical variant on top; until then flat equivalence is enough.
+    //
+    // Codes here are the TERMINOLOGICAL form because `Normalize` runs
+    // `BibliographicToTerminological` first — "chi" arrives as "zho", "may" as "msa", "per" as
+    // "fas", so bib aliases don't need to appear in the group.
     private static readonly IReadOnlyList<HashSet<string>> EquivalenceGroups =
     [
-        new(StringComparer.OrdinalIgnoreCase) { "nor", "nob", "nno" }
+        // Norwegian: macrolanguage "nor" spans Bokmål "nob" and Nynorsk "nno". Norwegian media
+        // is near-universally tagged with the specific variant, so a "nor"-only allowed list
+        // dropped both. Shipped in 1.0.7.6; kept for regression coverage.
+        new(StringComparer.OrdinalIgnoreCase) { "nor", "nob", "nno" },
+
+        // Chinese: macrolanguage "zho" spans Mandarin "cmn", Cantonese "yue", plus the six other
+        // Chinese-family individuals ISO 639-3 recognises (Wu, Min Nan, Hakka, Xiang, Gan). Real
+        // user files — anime dubs, HK/TW/CN films, mainland releases — routinely tag audio as
+        // "cmn" or "yue"; a "zho" allowed list (which is what Jellyfin's "Chinese" picker
+        // produces) would drop every one of them silently.
+        new(StringComparer.OrdinalIgnoreCase) { "zho", "cmn", "yue", "wuu", "nan", "hak", "hsn", "gan" },
+
+        // Arabic: macrolanguage "ara" spans Modern Standard "arb" (Netflix / newer Amazon rips
+        // often tag this), Egyptian "arz", Moroccan "ary", Levantine "apc", Algerian "arq",
+        // Tunisian "aeb", Iraqi "acm", Sudanese "apd". Regional dubs on Middle Eastern releases
+        // are near-universally tagged with the individual code, not "ara".
+        new(StringComparer.OrdinalIgnoreCase) { "ara", "arb", "arz", "ary", "apc", "arq", "aeb", "acm", "apd" },
+
+        // Portuguese: "pob" is not ISO 639-2 — there's no bibliographic code for pt-BR — but
+        // scene groups and some Plex/Emby tooling use it for Brazilian Portuguese in stream
+        // metadata. Filename tags like "pt-BR" survive the region-strip inside Normalize, but
+        // bare "pob" in a stream metadata field does not fall out anywhere else — needs the
+        // explicit pair here to be treated as Portuguese.
+        new(StringComparer.OrdinalIgnoreCase) { "por", "pob" },
+
+        // Malay: macrolanguage "msa" spans Standard Malay "zsm". Southeast Asian releases tag
+        // as "zsm" almost exclusively.
+        new(StringComparer.OrdinalIgnoreCase) { "msa", "zsm" },
+
+        // Persian: macrolanguage "fas" spans Iranian Persian "pes" and Dari "prs". Iranian
+        // releases are usually "pes"; Afghan releases "prs".
+        new(StringComparer.OrdinalIgnoreCase) { "fas", "pes", "prs" }
     ];
 
     /// <summary>

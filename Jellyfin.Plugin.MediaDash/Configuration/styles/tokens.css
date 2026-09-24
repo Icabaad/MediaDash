@@ -1,0 +1,182 @@
+/*
+ * TOKENS
+ *
+ * Webfonts, material-icons remap, emby-checkbox fix, design tokens (default + prefers-color-scheme: light) and the per-task accent map.
+ *
+ * Served via /MediaDash/Asset/tokens.css by Api/PluginAssetController.cs
+ * (whitelist entry "tokens.css"). Extracted in 06-FOLLOWUP-3-bulk-2 from
+ * configPage.html — ranges 11-38, 39-104, 112-165, 202-220 of the original inline <style> block
+ * (pre-06-FOLLOWUP-3-bulk-1 line numbers, post-jump.css state). Move is
+ * verbatim; comment headers preserved; @media blocks travel with their
+ * default-scheme counterparts so the pairing survives the split.
+ */
+
+/* Webfonts — Figtree for UI text, IBM Plex Mono for every number, path, timestamp,
+   error code and mode tag; Material Symbols Outlined weight 300 replaces the filled
+   Material Icons the plugin currently ships with.
+   ponytail: CDN load on admin-page open; self-host later if it becomes a problem. */
+@import url('https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,300,0,0&display=swap');
+
+/* The plugin has 4700 lines of markup below that reference `class="material-icons"`.
+   Remap that class to Material Symbols Outlined so the icon swap needs no HTML edits. */
+#MediaDashConfigPage .material-icons {
+    font-family: 'Material Symbols Outlined' !important;
+    font-weight: normal !important; font-style: normal !important;
+    font-variation-settings: 'wght' 300, 'FILL' 0, 'GRAD' 0, 'opsz' 24;
+    font-size: 20px;
+    line-height: 1; letter-spacing: normal; text-transform: none;
+    display: inline-block; white-space: nowrap; word-wrap: normal; direction: ltr;
+    -webkit-font-feature-settings: 'liga'; -webkit-font-smoothing: antialiased;
+    vertical-align: middle;
+}
+/* emby-checkbox's own rules hide the wrong glyph via `.checkboxIcon-*` selectors,
+   but the `#MediaDashConfigPage .material-icons { display: inline-block }` rule above
+   outranks them by specificity, so both check + uncheck glyphs stay visible and an
+   unticked box keeps its checkmark. Restore the correct swap. */
+#MediaDashConfigPage .emby-checkbox:not(:checked) ~ .checkboxOutline .checkboxIcon-checked,
+#MediaDashConfigPage .emby-checkbox:checked ~ .checkboxOutline .checkboxIcon-unchecked {
+    display: none !important;
+}
+
+
+/* ── Design tokens ──────────────────────────────────────────
+   Three surface levels: page (darkest) → panel (raised) → inner (recessed).
+   Dark by default; light theme via prefers-color-scheme. */
+#MediaDashConfigPage {
+    --md-page: #0f1216;
+    --md-header-band: #191e26;
+    --md-panel: #242b36;
+    --md-panel-hover: #29313d;
+    --md-panel-inactive: #1c2229;
+    --md-inner: #1a2028;
+    --md-inner-hover: #1f2630;
+    --md-track: #171c23;
+    --md-chip: #1b212a;
+    --md-scrim: #090c10;
+    --md-scrim-modal: #242b36;
+
+    --md-ink: #edf1f7;
+    --md-body: rgba(237,241,247,.82);
+    --md-label: rgba(237,241,247,.7);
+    --md-subtitle: rgba(237,241,247,.72);
+    --md-meta: rgba(237,241,247,.55);
+    --md-disabled: rgba(237,241,247,.5);
+
+    --md-border-card: rgba(255,255,255,.08);
+    --md-border-inner: rgba(255,255,255,.06);
+    --md-border-row: rgba(255,255,255,.05);
+    --md-border-btn: rgba(255,255,255,.15);
+    --md-border-dashed: rgba(255,255,255,.18);
+
+    --md-shadow-card: 0 2px 0 rgba(255,255,255,.05) inset, 0 18px 40px rgba(0,0,0,.45);
+    --md-shadow-modal: 0 2px 0 rgba(255,255,255,.05) inset, 0 40px 90px rgba(0,0,0,.65);
+    --md-shadow-popover: 0 24px 60px rgba(0,0,0,.6);
+
+    --md-primary: #22d3ee;
+    --md-primary-hover: #67e8f9;
+    --md-primary-ink: #052a33;
+    --md-confirm: #10b981;
+    --md-confirm-hover: #34d399;
+    --md-confirm-ink: #032c1f;
+    --md-neutral: #232a34;
+    --md-neutral-hover: #2c333f;
+
+    --md-save-fill: #edf1f7;
+    --md-save-ink: #0f1216;
+    --md-save-hover: #ffffff;
+
+    --md-dest-fill: rgba(127,29,29,.35);
+    --md-dest-border: rgba(239,68,68,.4);
+    --md-dest-ink: #fca5a5;
+    --md-dest-hover: rgba(127,29,29,.55);
+
+    --md-success: #34d399;
+    --md-error: #f87171;
+    --md-dim: rgba(148,163,184,.7);
+
+    --md-safety: #22d3ee;
+    --md-libraries: #06b6d4;
+    --md-recycle: #ec4899;
+    --md-maintenance: #94a3b8;
+
+    background: var(--md-page);
+    color: var(--md-ink);
+    font-family: Figtree, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    -webkit-font-smoothing: antialiased;
+}
+
+
+@media (prefers-color-scheme: light) {
+    #MediaDashConfigPage {
+        --md-page: #e4e7ec;
+        --md-header-band: #f6f7f9;
+        --md-panel: #f6f7f9;
+        --md-panel-hover: #f0f2f5;
+        --md-panel-inactive: #f0f2f5;
+        --md-inner: #eaedf1;
+        --md-inner-hover: #e4e7ec;
+        --md-track: #dee2e8;
+        --md-chip: #e4e7ec;
+        --md-scrim: #c9ced6;
+        --md-scrim-modal: #f6f7f9;
+
+        --md-ink: #111823;
+        --md-body: rgba(17,24,35,.82);
+        --md-label: rgba(17,24,35,.75);
+        --md-subtitle: rgba(17,24,35,.72);
+        --md-meta: rgba(17,24,35,.66);
+        --md-disabled: rgba(17,24,35,.6);
+
+        --md-border-card: rgba(17,24,35,.10);
+        --md-border-inner: rgba(17,24,35,.08);
+        --md-border-row: rgba(17,24,35,.06);
+        --md-border-btn: rgba(17,24,35,.16);
+        --md-border-dashed: rgba(17,24,35,.22);
+
+        --md-shadow-card: 0 1px 2px rgba(16,24,40,.06), 0 10px 28px rgba(16,24,40,.08);
+        --md-shadow-modal: 0 1px 3px rgba(16,24,40,.10), 0 26px 60px rgba(16,24,40,.16);
+        --md-shadow-popover: 0 24px 60px rgba(16,24,40,.18);
+
+        --md-primary: #0e7490;
+        --md-primary-hover: #155e75;
+        --md-primary-ink: #ffffff;
+        --md-confirm: #047857;
+        --md-confirm-hover: #065f46;
+        --md-confirm-ink: #ffffff;
+        --md-neutral: #f6f7f9;
+        --md-neutral-hover: #eaedf1;
+
+        --md-save-fill: #111823;
+        --md-save-ink: #f6f7f9;
+        --md-save-hover: #2a3444;
+
+        --md-dest-fill: rgba(185,28,28,.09);
+        --md-dest-border: rgba(185,28,28,.35);
+        --md-dest-ink: #b91c1c;
+        --md-dest-hover: rgba(185,28,28,.16);
+
+        --md-success: #047857;
+        --md-error: #b91c1c;
+        --md-dim: #475569;
+    }
+}
+
+/* ── Per-task accent map ──────────────────────────────────────
+   Every task card, chip and issue-card left-edge inherits its --md-accent from
+   here. The dark ink + light-glyph values come from the handoff's contrast table. */
+#MediaDashConfigPage .mdTask[data-key="Duplicate"],        #MediaDashConfigPage .mdSetChip[data-task-chip="Duplicate"]        { --md-accent: #d946ef; --md-accent-tint: rgba(217,70,239,.16);  --md-accent-ink: #2a0733; --md-accent-light: #a21caf; }
+#MediaDashConfigPage .mdTask[data-key="Playability"],      #MediaDashConfigPage .mdSetChip[data-task-chip="Playability"]      { --md-accent: #eab308; --md-accent-tint: rgba(234,179,8,.16);  --md-accent-ink: #241a00; --md-accent-light: #a16207; }
+#MediaDashConfigPage .mdTask[data-key="Quality"],          #MediaDashConfigPage .mdSetChip[data-task-chip="Quality"]          { --md-accent: #3b82f6; --md-accent-tint: rgba(59,130,246,.16); --md-accent-ink: #051d44; --md-accent-light: #1d4ed8; }
+#MediaDashConfigPage .mdTask[data-key="HeavyTranscode"],   #MediaDashConfigPage .mdSetChip[data-task-chip="HeavyTranscode"]   { --md-accent: #f97316; --md-accent-tint: rgba(249,115,22,.16); --md-accent-ink: #2b1002; --md-accent-light: #c2410c; }
+#MediaDashConfigPage .mdTask[data-key="FailedTranscode"],  #MediaDashConfigPage .mdSetChip[data-task-chip="FailedTranscode"]  { --md-accent: #dc2626; --md-accent-tint: rgba(220,38,38,.16);  --md-accent-ink: #ffffff; --md-accent-light: #b91c1c; }
+#MediaDashConfigPage .mdTask[data-key="SubtitleLanguage"], #MediaDashConfigPage .mdSetChip[data-task-chip="SubtitleLanguage"] { --md-accent: #8b5cf6; --md-accent-tint: rgba(139,92,246,.16); --md-accent-ink: #100521; --md-accent-light: #6d28d9; }
+#MediaDashConfigPage .mdTask[data-key="AudioLanguage"],    #MediaDashConfigPage .mdSetChip[data-task-chip="AudioLanguage"]    { --md-accent: #10b981; --md-accent-tint: rgba(16,185,129,.16); --md-accent-ink: #032c1f; --md-accent-light: #047857; }
+#MediaDashConfigPage .mdTask[data-key="Stale"],            #MediaDashConfigPage .mdSetChip[data-task-chip="Stale"]            { --md-accent: #64748b; --md-accent-tint: rgba(100,116,139,.16); --md-accent-ink: #ffffff; --md-accent-light: #475569; }
+#MediaDashConfigPage .mdTask[data-key="Misplaced"],        #MediaDashConfigPage .mdSetChip[data-task-chip="Misplaced"]        { --md-accent: #f97316; --md-accent-tint: rgba(249,115,22,.16); --md-accent-ink: #2b1002; --md-accent-light: #c2410c; }
+#MediaDashConfigPage .mdTask[data-key="MissingSubtitles"], #MediaDashConfigPage .mdSetChip[data-task-chip="MissingSubtitles"] { --md-accent: #a78bfa; --md-accent-tint: rgba(167,139,250,.16); --md-accent-ink: #1b0f3d; --md-accent-light: #6d28d9; }
+#MediaDashConfigPage .mdTask[data-key="MalwareRisk"],      #MediaDashConfigPage .mdSetChip[data-task-chip="MalwareRisk"]      { --md-accent: #dc2626; --md-accent-tint: rgba(220,38,38,.16);  --md-accent-ink: #ffffff; --md-accent-light: #b91c1c; }
+#MediaDashConfigPage .mdTask[data-key="LargeTrickplay"],   #MediaDashConfigPage .mdSetChip[data-task-chip="LargeTrickplay"]   { --md-accent: #14b8a6; --md-accent-tint: rgba(20,184,166,.16); --md-accent-ink: #022c28; --md-accent-light: #0f766e; }
+#MediaDashConfigPage .mdTask[data-key="EmbeddedCoverArt"], #MediaDashConfigPage .mdSetChip[data-task-chip="EmbeddedCoverArt"] { --md-accent: #a855f7; --md-accent-tint: rgba(168,85,247,.16); --md-accent-ink: #ffffff; --md-accent-light: #7e22ce; }
+#MediaDashConfigPage .mdTask[data-key="OrphanedDebris"],   #MediaDashConfigPage .mdSetChip[data-task-chip="OrphanedDebris"]   { --md-accent: #78716c; --md-accent-tint: rgba(120,113,108,.16); --md-accent-ink: #ffffff; --md-accent-light: #57534e; }
+#MediaDashConfigPage .mdTask[data-key="CorruptNfo"],       #MediaDashConfigPage .mdSetChip[data-task-chip="CorruptNfo"]       { --md-accent: #e11d48; --md-accent-tint: rgba(225,29,72,.16);  --md-accent-ink: #ffffff; --md-accent-light: #be123c; }

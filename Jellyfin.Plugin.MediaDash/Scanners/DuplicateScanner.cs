@@ -399,14 +399,34 @@ public sealed partial class DuplicateScanner : IScanner
             }
 
             var probe = await _ffprobe.ProbeAsync(path, cancellationToken).ConfigureAwait(false);
+            if (probe is null)
+            {
+                // MD-010 sibling: `probe is null` is INFRASTRUCTURE failure (SMB timeout, ffprobe
+                // missing, permission blip on a network share), not evidence the file's content is
+                // bad. Silently skipping this candidate biases the ranking against unreachable
+                // copies — a NAS-based 4K master with a transient share hiccup would be excluded
+                // and the ranker would designate a local 1080p as keeper, then recycle sibling
+                // local copies against a downgraded keeper. Refuse to rank the group at all this
+                // scan; the next scan re-attempts and produces the correct ranking once the
+                // probe succeeds. Diagnostic surfaces on the Errors tab so the user can spot a
+                // chronically-flaky share instead of the group silently under-flagging forever.
+                Api.Diagnostics.Record(
+                    "DuplicateScanner.ProbeUnavailable",
+                    "Skipping duplicate ranking for group '" + groupKey + "' this scan: ffprobe returned no data for '" + path + "' (share offline, timeout, or ffprobe error). MediaDash will retry on the next scan.");
+                return [];
+            }
+
             var itemKind = item.GetBaseItemKind();
             var isAudioItem = itemKind == BaseItemKind.Audio || itemKind == BaseItemKind.AudioBook;
             var stream = isAudioItem
-                ? probe?.Streams?.FirstOrDefault(s => string.Equals(s.CodecType, "audio", StringComparison.OrdinalIgnoreCase))
-                : probe?.Streams?.FirstOrDefault(s => string.Equals(s.CodecType, "video", StringComparison.OrdinalIgnoreCase));
+                ? probe.Streams?.FirstOrDefault(s => string.Equals(s.CodecType, "audio", StringComparison.OrdinalIgnoreCase))
+                : probe.Streams?.FirstOrDefault(s => string.Equals(s.CodecType, "video", StringComparison.OrdinalIgnoreCase));
             if (stream is null)
             {
-                // Unreadable copies are the playability scanner's business; don't rank them here.
+                // Probe SUCCEEDED but the file has no target stream — that's a content problem
+                // (genuine broken file, or a mismatched-container ext that the playability scanner
+                // will flag). Skipping this specific candidate from ranking is fine because the
+                // other siblings can still be compared meaningfully against each other.
                 continue;
             }
 

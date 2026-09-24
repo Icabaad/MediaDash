@@ -60,4 +60,34 @@ public class LibraryGuardTests
         var attackerPath = Path.GetFullPath(Path.Combine(libraryRoot, "..", "..", "etc", "passwd"));
         Assert.False(LibraryGuard.IsUnder(attackerPath, libraryRoot));
     }
+
+    [Fact]
+    public void IsInEnabledLocations_KeepsPathInsideEnabledRoot()
+    {
+        // Regression from 2026-09-19 QA sweep: the fix loop treated the queue as global scope and
+        // ran approved fixes against files whose library had been un-ticked in Settings → Libraries.
+        // This helper is the predicate FixTask now uses to scope its queue.
+        var enabled = new[] { P("sweep-generated") + Path.DirectorySeparatorChar };
+        Assert.True(LibraryGuard.IsInEnabledLocations(P("sweep-generated", "Healthy Control (2026).mkv"), enabled));
+    }
+
+    [Fact]
+    public void IsInEnabledLocations_RejectsPathInDisabledRoot()
+    {
+        // The exact bug from the QA sweep: 'Sweep Disabled' library is not ticked, but a queued
+        // installer.exe under it was being fixed anyway. The predicate must return false so
+        // FixTask drops it before handing to the fixer.
+        var enabled = new[] { P("sweep-generated") + Path.DirectorySeparatorChar };
+        Assert.False(LibraryGuard.IsInEnabledLocations(P("sweep-disabled", "installer.exe"), enabled));
+    }
+
+    [Fact]
+    public void IsInEnabledLocations_EmptyPathIsPassedThrough()
+    {
+        // Path-less issues get surfaced elsewhere (they typically fail File.Exists inside the
+        // fixer); the scope filter must not silently swallow them by returning false.
+        var enabled = new[] { P("sweep-generated") + Path.DirectorySeparatorChar };
+        Assert.True(LibraryGuard.IsInEnabledLocations(string.Empty, enabled));
+        Assert.True(LibraryGuard.IsInEnabledLocations(null, enabled));
+    }
 }

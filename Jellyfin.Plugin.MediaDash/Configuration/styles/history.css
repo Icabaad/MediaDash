@@ -1,0 +1,200 @@
+/*
+ * HISTORY
+ *
+ * History tab: filter chips + icon accents, tab header, uppercase eyebrow + big mono figure summary, filter row, Phase B rows with left accent.
+ *
+ * Served via /MediaDash/Asset/history.css by Api/PluginAssetController.cs
+ * (whitelist entry "history.css"). Extracted in 06-FOLLOWUP-3-bulk-2 from
+ * configPage.html — ranges 2287-2473 of the original inline <style> block
+ * (pre-06-FOLLOWUP-3-bulk-1 line numbers, post-jump.css state). Move is
+ * verbatim; comment headers preserved; @media blocks travel with their
+ * default-scheme counterparts so the pairing survives the split.
+ */
+
+/* ── Phase B: History rows ────────────────────────────────────
+   16px radius, 4px LEFT accent, 20px 26px padding, mono meta right-aligned. */
+#MediaDashConfigPage #mdHistoryList .mdIssueCard {
+    border-radius: 16px;
+    padding: 20px 26px;
+}
+#MediaDashConfigPage #mdHistoryList .mdBadge {
+    margin-left: 8px;
+}
+#MediaDashConfigPage #mdHistoryList .fieldDescription {
+    font: 500 12.5px 'IBM Plex Mono', monospace !important;
+    color: var(--md-meta);
+}
+/* Icon inside the History filter chips keeps its accent colour even when the chip is
+   active (background flips to solid, icon still reads as its status colour). */
+#MediaDashConfigPage .mdHistFilter.mdHistFilterActive .material-icons { color: #fff !important; }
+#MediaDashConfigPage #mdHistoryClear,
+#MediaDashConfigPage #mdErrorsClear,
+#MediaDashConfigPage #mdBinEmpty {
+    background: var(--md-dest-fill) !important;
+    border: 1px solid var(--md-dest-border) !important;
+    color: var(--md-dest-ink) !important;
+    border-radius: 999px !important;
+    padding: 8px 16px !important;
+    font-weight: 600 !important;
+    min-height: 40px;
+}
+#MediaDashConfigPage #mdHistoryClear:hover,
+#MediaDashConfigPage #mdErrorsClear:hover,
+#MediaDashConfigPage #mdBinEmpty:hover {
+    background: var(--md-dest-hover) !important;
+}
+/* Per-row Delete sits next to Restore — same pill shape (mdBinRestore), destructive tone. */
+#MediaDashConfigPage .mdBinDelete {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--md-dest-fill) !important;
+    border: 1px solid var(--md-dest-border) !important;
+    color: var(--md-dest-ink) !important;
+    border-radius: 999px !important;
+    padding: 0 14px !important;
+    height: 34px; min-height: 34px !important;
+    font: 600 13px Figtree, sans-serif !important;
+}
+#MediaDashConfigPage .mdBinDelete:hover { background: var(--md-dest-hover) !important; }
+#MediaDashConfigPage .mdBinDelete .material-icons { font-size: 17px !important; }
+/* Tab header: title + description on the left, right-side summary widget. */
+#MediaDashConfigPage .mdTabHeader {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    gap: 22px; flex-wrap: wrap;
+    margin: 0 0 8px;
+}
+#MediaDashConfigPage .mdTabHeaderText { flex: 1 1 340px; min-width: 260px; }
+#MediaDashConfigPage .mdTabTitle {
+    font: 800 26px Figtree, sans-serif; letter-spacing: -.025em;
+    color: var(--md-ink); margin: 0; line-height: 1.15;
+}
+#MediaDashConfigPage .mdTabDesc {
+    font: 400 14px/1.55 Figtree, sans-serif;
+    color: var(--md-body);
+    margin: 6px 0 0; max-width: 620px;
+}
+/* History summary — uppercase Figtree eyebrow above a big mono green figure. */
+#MediaDashConfigPage #mdHistorySummary {
+    display: flex; flex-direction: column; align-items: flex-end;
+    gap: 4px;
+    margin: 0 !important;
+}
+#MediaDashConfigPage #mdHistorySummary:empty { display: none; }
+#MediaDashConfigPage .mdHistSummaryLabel {
+    font: 800 11.5px Figtree, sans-serif;
+    letter-spacing: .14em; text-transform: uppercase;
+    color: var(--md-meta);
+}
+#MediaDashConfigPage .mdHistSummaryValue {
+    font: 700 30px 'IBM Plex Mono', monospace;
+    letter-spacing: -.03em;
+    color: var(--md-success);
+    line-height: 1.05;
+}
+#MediaDashConfigPage #mdTab-history {
+    display: flex; flex-direction: column;
+}
+#MediaDashConfigPage #mdTab-history > * { order: 0; }
+#MediaDashConfigPage #mdTab-history > #mdHistorySummary { order: -1; }
+
+/* History filter row: chips + right-aligned destructive Clear log. */
+#MediaDashConfigPage #mdHistoryFilterBar {
+    margin: 22px 0 16px !important;
+}
+
+/* History rows — 16px radius, 4px LEFT accent tinted by success/failed/dry-run kind. */
+#MediaDashConfigPage .mdHistRow {
+    --md-hist-accent: var(--md-primary);
+    padding: 20px 26px !important;
+    margin: 0 0 12px !important;
+    border-left: 4px solid var(--md-hist-accent) !important;
+    border-radius: 16px !important;
+}
+#MediaDashConfigPage .mdHistRow[data-kind="succeeded"] { --md-hist-accent: var(--md-success); }
+#MediaDashConfigPage .mdHistRow[data-kind="failed"] { --md-hist-accent: var(--md-error); }
+#MediaDashConfigPage .mdHistRow[data-kind="dryrun"] { --md-hist-accent: var(--md-dim); opacity: .78; }
+#MediaDashConfigPage .mdHistLayout {
+    display: flex; align-items: flex-start; gap: 16px;
+}
+#MediaDashConfigPage .mdHistIcon {
+    flex: 0 0 auto; width: 26px; height: 26px;
+    display: inline-flex; align-items: center; justify-content: center;
+    color: var(--md-hist-accent);
+    margin-top: 2px;
+}
+#MediaDashConfigPage .mdHistIcon .material-icons { font-size: 22px !important; color: inherit; }
+#MediaDashConfigPage .mdHistBody { flex: 1; min-width: 0; }
+#MediaDashConfigPage .mdHistAction { overflow-wrap: anywhere; min-width: 0; max-width: 100%; }
+#MediaDashConfigPage .mdHistTitleRow {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    margin-bottom: 4px;
+}
+#MediaDashConfigPage .mdHistAction {
+    font: 700 15.5px Figtree, sans-serif; letter-spacing: -.01em;
+    color: var(--md-ink);
+}
+#MediaDashConfigPage .mdHistRow[data-kind="dryrun"] .mdHistAction { color: var(--md-body); }
+#MediaDashConfigPage .mdHistTypeChip {
+    padding: 3px 10px; border-radius: 999px;
+    background: var(--md-inner); color: var(--md-body);
+    font: 700 11px 'IBM Plex Mono', monospace;
+    text-transform: uppercase; letter-spacing: .05em;
+}
+#MediaDashConfigPage .mdHistDryChip {
+    padding: 3px 10px; border-radius: 999px;
+    background: color-mix(in srgb, var(--md-dim) 20%, transparent);
+    color: var(--md-body);
+    font: 700 11px 'IBM Plex Mono', monospace;
+    text-transform: uppercase; letter-spacing: .05em;
+}
+#MediaDashConfigPage .mdHistPath {
+    font: 500 12.5px 'IBM Plex Mono', monospace;
+    color: var(--md-meta);
+    overflow-wrap: anywhere;
+}
+#MediaDashConfigPage .mdHistMeta {
+    display: flex; flex-direction: column; align-items: flex-end; gap: 6px;
+    flex: 0 0 auto; min-width: 120px;
+}
+#MediaDashConfigPage .mdHistMetaTop {
+    display: flex; align-items: center; gap: 12px; justify-content: flex-end;
+}
+#MediaDashConfigPage .mdHistBytes {
+    font: 700 17px 'IBM Plex Mono', monospace;
+    color: var(--md-success);
+}
+#MediaDashConfigPage .mdHistBytesDim { color: var(--md-meta); }
+#MediaDashConfigPage .mdHistTime {
+    font: 500 12px 'IBM Plex Mono', monospace;
+    color: var(--md-meta);
+}
+#MediaDashConfigPage .mdHistAct { margin-top: 0; }
+#MediaDashConfigPage .mdRestore {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--md-neutral) !important;
+    border: 1px solid var(--md-border-btn) !important;
+    color: var(--md-ink) !important;
+    border-radius: 999px !important;
+    padding: 0 14px !important;
+    height: 34px; min-height: 34px !important;
+    font: 600 13px Figtree, sans-serif !important;
+}
+#MediaDashConfigPage .mdRestore:hover { background: var(--md-neutral-hover) !important; }
+#MediaDashConfigPage .mdRestore .material-icons { font-size: 17px !important; }
+#MediaDashConfigPage .mdHistRetry {
+    background: color-mix(in srgb, var(--md-error) 18%, transparent) !important;
+    border-color: color-mix(in srgb, var(--md-error) 45%, transparent) !important;
+    color: var(--md-error) !important;
+}
+#MediaDashConfigPage .mdHistNoOp {
+    font: 500 12.5px Figtree, sans-serif;
+    color: var(--md-meta);
+    padding: 6px 12px;
+    display: inline-block;
+}
+#MediaDashConfigPage .mdHistRowMsg { font-size: 12px; color: var(--md-success); margin-top: 4px; }
+@media (max-width: 720px) {
+    #MediaDashConfigPage .mdHistRow { padding: 14px 16px !important; }
+    #MediaDashConfigPage .mdHistLayout { flex-wrap: wrap; gap: 10px; }
+    #MediaDashConfigPage .mdHistMeta { flex: 1 1 100%; flex-direction: row; align-items: center; justify-content: space-between; flex-wrap: wrap; min-width: 0; }
+    #MediaDashConfigPage .mdHistMetaTop { justify-content: flex-start; }
+}

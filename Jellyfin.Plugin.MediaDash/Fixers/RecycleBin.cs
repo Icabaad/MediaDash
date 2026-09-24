@@ -43,8 +43,8 @@ public sealed class RecycleBin
     /// </summary>
     /// <param name="applicationPaths">Instance of the <see cref="IApplicationPaths"/> interface.</param>
     /// <param name="logger">The logger.</param>
-    /// <param name="db">The plugin database containing authoritative recycle history.</param>
-    public RecycleBin(IApplicationPaths applicationPaths, ILogger<RecycleBin> logger, MediaDashDb db)
+    /// <param name="history">History-table store (05-C.3), queried for the authoritative set of recycle paths (adoption + discovery).</param>
+    public RecycleBin(IApplicationPaths applicationPaths, ILogger<RecycleBin> logger, HistoryStore history)
     {
         _defaultRoot = Path.Combine(applicationPaths.DataPath, "mediadash", "recycle");
         _logger = logger;
@@ -54,7 +54,7 @@ public sealed class RecycleBin
         // real bin operation instead of in the constructor is transparent to callers.
         _legacyAdopted = new Lazy<bool>(() =>
         {
-            AdoptLegacyCustomBatches(db);
+            AdoptLegacyCustomBatches(history);
             return true;
         });
     }
@@ -292,20 +292,27 @@ public sealed class RecycleBin
     }
 
     /// <summary>
-    /// Restores a recycled file to its original location.
+    /// Restores a recycled entry (file OR directory) to its original location. MD-012: MoveToBin
+    /// accepts directories (orphan cleanup empty-folder path) but the pre-fix Restore only handled
+    /// files, so directory entries showed up in the recycle-bin tab but the restore button
+    /// silently 409'd against File.Exists / File.Move. Both callers (History restore endpoint and
+    /// recycle-bin tab restore) now work symmetrically with MoveToBin.
     /// </summary>
-    /// <param name="recyclePath">The file's location inside the bin.</param>
+    /// <param name="recyclePath">The entry's location inside the bin (file or directory).</param>
     /// <param name="originalPath">The original path to restore to.</param>
     public void Restore(string recyclePath, string originalPath)
     {
         _ = _legacyAdopted.Value;
-        if (File.Exists(originalPath))
+        // Reject collisions on either kind — a file and a folder can share a target path on
+        // different platforms depending on how MediaDash was upgraded, so check both.
+        if (File.Exists(originalPath) || Directory.Exists(originalPath))
         {
-            throw new IOException($"Cannot restore: a file already exists at {originalPath}");
+            throw new IOException($"Cannot restore: something already exists at {originalPath}");
         }
 
         Directory.CreateDirectory(Path.GetDirectoryName(originalPath)!);
-        MoveAcrossVolumes(recyclePath, originalPath);
+        var sourceIsDir = Directory.Exists(recyclePath);
+        MoveAcrossVolumes(recyclePath, originalPath, sourceIsDir);
         _logger.LogInformation("Restored {Recycle} -> {Original}", recyclePath, originalPath);
     }
 
@@ -317,6 +324,17 @@ public sealed class RecycleBin
     public void DeleteFile(string recyclePath)
     {
         _ = _legacyAdopted.Value;
+        // Directory-recycled entries (orphan cleanup, Files-tab folder delete) now surface in
+        // ListContents, so the DeleteBinItem endpoint can send us a directory path — File.Delete
+        // refuses those with UnauthorizedAccessException. Branch on the actual kind so the same
+        // whitelisted path works for both.
+        if (Directory.Exists(recyclePath))
+        {
+            Directory.Delete(recyclePath, recursive: true);
+            _logger.LogInformation("Permanently deleted bin folder {Recycle}", recyclePath);
+            return;
+        }
+
         File.Delete(recyclePath);
         _logger.LogInformation("Permanently deleted bin file {Recycle}", recyclePath);
     }
@@ -461,9 +479,95 @@ public sealed class RecycleBin
                     return result;
                 }
             }
+
+            // Bug-pattern audit 2026-09-19: MoveToBin handles directories (Directory.Move at line
+            // 190) but the listing was files-only, so recycled trees — empty per-title folders
+            // from orphan cleanup, folders deleted from the Files tab — never surfaced in the
+            // Recycle bin UI. GetContents's size scan is recursive so byte totals were correct,
+            // but the entry itself was invisible and the user's only recovery path was manual
+            // file browsing under the bin root. Enumerate top-level directories in each batch
+            // alongside the files and emit a bin entry per tree, sized via the same recursive
+            // walk GetContents uses so the UI's per-row size column matches the totals.
+            IEnumerable<string> subdirs;
+            try
+            {
+                subdirs = Directory.EnumerateDirectories(dir);
+            }
+            catch (DirectoryNotFoundException)
+            {
+                continue;
+            }
+
+            foreach (var subdir in subdirs)
+            {
+                try
+                {
+                    var info = new DirectoryInfo(subdir);
+                    var folderName = Path.GetFileName(dir);
+                    var recycledAt = TryParseRecycleTimestamp(folderName) ?? Directory.GetCreationTimeUtc(dir);
+                    var origin = MatchManifestEntryToFile(manifestOrigins, info.Name);
+                    result.Add((info.Name, subdir, DirectorySizeBytes(subdir), recycledAt, string.IsNullOrEmpty(origin) ? null : origin));
+                }
+                catch (DirectoryNotFoundException)
+                {
+                    continue;
+                }
+                catch (IOException ex)
+                {
+                    Api.Diagnostics.Record("RecycleBin.ListScan", "Could not read recycled folder '" + subdir + "': " + ex.Message + ". It will not appear in the recycle bin listing.");
+                    continue;
+                }
+                catch (UnauthorizedAccessException ex)
+                {
+                    Api.Diagnostics.Record("RecycleBin.ListScan", "Access denied on recycled folder '" + subdir + "': " + ex.Message + ". It will not appear in the recycle bin listing.");
+                    continue;
+                }
+
+                if (result.Count >= limit)
+                {
+                    return result;
+                }
+            }
         }
 
         return result;
+    }
+
+    // Recursive tree size for a recycled directory. Same IgnoreInaccessible + RecurseSubdirectories
+    // options GetContents uses so the per-row size in the bin listing matches the total.
+    // ponytail: single pass, no caching; if a bin with 10k+ folders shows up in the wild we can
+    // memoise by (path, mtime).
+    internal static long DirectorySizeBytes(string path)
+    {
+        long size = 0;
+        var enumOpts = new EnumerationOptions { IgnoreInaccessible = true, RecurseSubdirectories = true };
+        try
+        {
+            foreach (var file in Directory.EnumerateFiles(path, "*", enumOpts))
+            {
+                try
+                {
+                    size += new FileInfo(file).Length;
+                }
+                catch (FileNotFoundException)
+                {
+                }
+                catch (IOException)
+                {
+                }
+            }
+        }
+        catch (DirectoryNotFoundException)
+        {
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+
+        return size;
     }
 
     // Appends the source path to a batch's origin manifest so restore knows where to put the file
@@ -876,11 +980,11 @@ public sealed class RecycleBin
     /// entry reports counts of MediaDash-shaped batch folders still on disk and their total size —
     /// so the UI can offer a "consolidate into current bin" action.
     /// </summary>
-    /// <param name="db">The plugin database (source of historical recycle paths).</param>
+    /// <param name="history">History-table store (05-C.3), source of historical recycle paths.</param>
     /// <returns>List of foreign bin roots with file counts + sizes.</returns>
-    public IReadOnlyList<(string RootPath, int BatchCount, long SizeBytes)> DiscoverOtherBinRoots(MediaDashDb db)
+    public IReadOnlyList<(string RootPath, int BatchCount, long SizeBytes)> DiscoverOtherBinRoots(HistoryStore history)
     {
-        return DiscoverOtherBinRoots(db.GetRecyclePaths(), Root);
+        return DiscoverOtherBinRoots(history.GetRecyclePaths(), Root);
     }
 
     /// <summary>
@@ -1119,7 +1223,7 @@ public sealed class RecycleBin
         return (moved, skipped, bytes, warning);
     }
 
-    private void AdoptLegacyCustomBatches(MediaDashDb db)
+    private void AdoptLegacyCustomBatches(HistoryStore history)
     {
         var root = Root;
         if (PathsEqual(root, _defaultRoot) || !Directory.Exists(root))
@@ -1129,7 +1233,7 @@ public sealed class RecycleBin
 
         try
         {
-            foreach (var recyclePath in db.GetRecyclePaths())
+            foreach (var recyclePath in history.GetRecyclePaths())
             {
                 if (TryAdoptLegacyBatch(recyclePath, root))
                 {
@@ -1186,18 +1290,29 @@ public sealed class RecycleBin
         }
     }
 
-    private static void MoveAcrossVolumes(string source, string target)
+    private static void MoveAcrossVolumes(string source, string target, bool sourceIsDir = false)
     {
+        // MD-012: directory-aware. File.Move doesn't move directories; Directory.Move throws
+        // IOException across volumes. Both fall back to the verified copy → rename → delete
+        // helper with the appropriate sourceIsDir flag so cross-device moves preserve directory
+        // trees (orphan-cleanup empty folders, dedup sidecar folders).
         try
         {
-            File.Move(source, target);
+            if (sourceIsDir)
+            {
+                Directory.Move(source, target);
+            }
+            else
+            {
+                File.Move(source, target);
+            }
         }
         catch (IOException)
         {
             // Cross-volume: verified copy → rename → delete-source. Never delete the source before the
             // copy has been proven complete; a truncated write on the target volume would otherwise lose
             // the user's file.
-            Api.FileBrowserController.CrossDeviceMove(source, target, sourceIsDir: false);
+            Api.FileBrowserController.CrossDeviceMove(source, target, sourceIsDir: sourceIsDir);
         }
     }
 }

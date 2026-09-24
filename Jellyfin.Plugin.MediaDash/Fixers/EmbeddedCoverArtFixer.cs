@@ -34,7 +34,8 @@ public sealed class EmbeddedCoverArtFixer : IFixer
     private readonly FfprobeService _ffprobe;
     private readonly FfmpegExecutor _ffmpeg;
     private readonly LibraryGuard _guard;
-    private readonly RecycleBin _recycleBin;
+    private readonly VerifiedReplacementService _replacement;
+    private readonly IPluginConfigurationProvider _configProvider;
     private readonly ILibraryMonitor _libraryMonitor;
     private readonly ILogger<EmbeddedCoverArtFixer> _logger;
 
@@ -42,21 +43,26 @@ public sealed class EmbeddedCoverArtFixer : IFixer
     /// <param name="ffprobe">The probe service.</param>
     /// <param name="ffmpeg">The ffmpeg executor.</param>
     /// <param name="guard">Library-path guard so we refuse to touch anything outside a library.</param>
-    /// <param name="recycleBin">Recycle bin used to back up originals before stripping.</param>
+    /// <param name="replacement">03-C: the shared verify → promote → dispose → commit protocol.
+    /// Takes ownership of the source recycle (or permanent delete) for each stripped audio file.</param>
+    /// <param name="configProvider">02-A snapshot provider. Used for the pre-commit policy
+    /// recheck so a dry-run flip mid-strip aborts before touching the source.</param>
     /// <param name="libraryMonitor">Jellyfin library monitor — reports post-fix so it re-scans.</param>
     /// <param name="logger">The logger.</param>
     public EmbeddedCoverArtFixer(
         FfprobeService ffprobe,
         FfmpegExecutor ffmpeg,
         LibraryGuard guard,
-        RecycleBin recycleBin,
+        VerifiedReplacementService replacement,
+        IPluginConfigurationProvider configProvider,
         ILibraryMonitor libraryMonitor,
         ILogger<EmbeddedCoverArtFixer> logger)
     {
         _ffprobe = ffprobe;
         _ffmpeg = ffmpeg;
         _guard = guard;
-        _recycleBin = recycleBin;
+        _replacement = replacement;
+        _configProvider = configProvider;
         _libraryMonitor = libraryMonitor;
         _logger = logger;
     }
@@ -71,18 +77,18 @@ public sealed class EmbeddedCoverArtFixer : IFixer
         var folder = issue.Path;
         if (!Directory.Exists(folder))
         {
-            return FixResult.Fail("The folder no longer exists; re-scan to refresh the list.");
+            return FixResult.Fail(FixReason.SourceMissing, "The folder no longer exists; re-scan to refresh the list.");
         }
 
         if (!_guard.IsInsideLibrary(folder))
         {
-            return FixResult.Fail("The folder is outside your library folders; MediaDash will not touch it.");
+            return FixResult.Refused(FixReason.OutsideLibrary, "The folder is outside your library folders; MediaDash will not touch it.");
         }
 
         var audioFiles = SafeListAudioFiles(folder);
         if (audioFiles.Count == 0)
         {
-            return FixResult.Fail("No audio files remain in this folder; re-scan to refresh.");
+            return FixResult.NoChange(FixReason.NothingToRemove, "No audio files remain in this folder; re-scan to refresh.");
         }
 
         var coverFilename = string.IsNullOrWhiteSpace(config.EmbeddedCoverFilename) ? "cover.jpg" : config.EmbeddedCoverFilename;
@@ -95,13 +101,13 @@ public sealed class EmbeddedCoverArtFixer : IFixer
             || Path.IsPathRooted(coverFilename)
             || coverFilename.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
         {
-            return FixResult.Fail("Refused: cover filename setting '" + coverFilename + "' must be a plain file name (no separators or path traversal).");
+            return FixResult.Refused(FixReason.UnsupportedFormat, "Refused: cover filename setting '" + coverFilename + "' must be a plain file name (no separators or path traversal).");
         }
 
         var coverPath = Path.Combine(folder, coverFilename);
         if (File.Exists(coverPath))
         {
-            return FixResult.Fail("A folder cover already exists at " + coverPath + "; nothing to extract.");
+            return FixResult.NoChange(FixReason.ExistingCover, "A folder cover already exists at " + coverPath + "; nothing to extract.");
         }
 
         // Also check the scanner's broader folder-cover name set (cover|folder|album|front + jpg/png/webp)
@@ -112,7 +118,7 @@ public sealed class EmbeddedCoverArtFixer : IFixer
             {
                 if (Scanners.EmbeddedCoverArtScanner.IsFolderCover(Path.GetFileName(existing)))
                 {
-                    return FixResult.Fail("A folder cover already exists at " + existing + "; nothing to extract.");
+                    return FixResult.NoChange(FixReason.ExistingCover, "A folder cover already exists at " + existing + "; nothing to extract.");
                 }
             }
         }
@@ -133,13 +139,13 @@ public sealed class EmbeddedCoverArtFixer : IFixer
         var sourceForExtract = await FindAudioWithCoverAsync(audioFiles, cancellationToken).ConfigureAwait(false);
         if (sourceForExtract is null)
         {
-            return FixResult.Fail("No audio file in the folder currently has an embedded cover — nothing to extract.");
+            return FixResult.NoChange(FixReason.NothingToRemove, "No audio file in the folder currently has an embedded cover — nothing to extract.");
         }
 
         var extractError = await ExtractCoverViaWebpAsync(sourceForExtract, coverPath, cancellationToken).ConfigureAwait(false);
         if (extractError is not null)
         {
-            return FixResult.Fail("Cover extraction failed; the folder is untouched.", TranscodeFixer.Truncate(extractError));
+            return FixResult.Fail(FixReason.ProcessFailed, "Cover extraction failed; the folder is untouched.", TranscodeFixer.Truncate(extractError));
         }
 
         long freed = 0;
@@ -193,6 +199,7 @@ public sealed class EmbeddedCoverArtFixer : IFixer
         return new FixResult
         {
             Success = true,
+            Outcome = FixOutcome.Applied,
             Message = summary + ".",
             BytesFreed = freed,
             AdditionalRecycled = additionalRecycled
@@ -237,7 +244,8 @@ public sealed class EmbeddedCoverArtFixer : IFixer
         {
             // Step 1: extract the cover image losslessly to PNG so the webp encoder has a clean source
             // regardless of what codec the embed used (mjpeg / png / webp / bmp).
-            var extractArgs = new List<string> { "-i", audioSource, "-an", "-map", "0:v", "-frames:v", "1", "-c:v", "png", rawPath };
+            // R09 (2026-09-20): rawPath tail is `.mediaDash.tmp` — pass -f image2 explicitly.
+            var extractArgs = new List<string> { "-i", audioSource, "-an", "-map", "0:v", "-frames:v", "1", "-c:v", "png", "-f", "image2", rawPath };
             var extractError = await _ffmpeg.RunAsync(extractArgs, CommandTimeout, cancellationToken).ConfigureAwait(false);
             if (extractError is not null)
             {
@@ -252,7 +260,7 @@ public sealed class EmbeddedCoverArtFixer : IFixer
             // Step 2: transcode PNG → webp using libwebp with a mid-high quality. libwebp's compression
             // ratio at the same visible quality beats jpeg by a wide margin, which is the whole point of
             // this intermediate.
-            var webpArgs = new List<string> { "-i", rawPath, "-c:v", "libwebp", "-q:v", "82", webpPath };
+            var webpArgs = new List<string> { "-i", rawPath, "-c:v", "libwebp", "-q:v", "82", "-f", "webp", webpPath };
             var webpError = await _ffmpeg.RunAsync(webpArgs, CommandTimeout, cancellationToken).ConfigureAwait(false);
             if (webpError is not null)
             {
@@ -302,14 +310,18 @@ public sealed class EmbeddedCoverArtFixer : IFixer
         var originalSize = new FileInfo(audioPath).Length;
         var ext = Path.GetExtension(audioPath).TrimStart('.');
         var tempPath = TranscodeFixer.SidecarPath(audioPath, "strip", ext);
-        var swapPath = TranscodeFixer.SidecarPath(audioPath, "swap", string.Empty);
 
         // -map 0 -map -0:v drops every video / image stream while keeping audio + chapters +
         // metadata. -c copy avoids re-encoding — pure remux, byte-for-byte on audio data.
-        var args = new List<string> { "-i", audioPath, "-map", "0", "-map", "-0:v", "-c", "copy", tempPath };
+        // R09 (2026-09-20): tempPath tail is `.mediaDash.tmp` — pass -f explicitly matching
+        // the source audio container so ffmpeg's muxer picks the right one.
+        var args = new List<string> { "-i", audioPath, "-map", "0", "-map", "-0:v", "-c", "copy", "-f", TranscodeFixer.ContainerToFfmpegFormat(ext), tempPath };
 
-        var originalDisposed = false;
-        var swapDone = false;
+        // 03-C: capture source identity BEFORE ffmpeg runs so pre-commit recheck fires on stale.
+        var audioInfo = new FileInfo(audioPath);
+        var expectedSourceLength = audioInfo.Exists ? audioInfo.Length : 0;
+        var expectedSourceMtimeTicks = audioInfo.Exists ? audioInfo.LastWriteTimeUtc.Ticks : 0;
+
         try
         {
             var runError = await _ffmpeg.RunAsync(args, CommandTimeout, cancellationToken).ConfigureAwait(false);
@@ -324,37 +336,72 @@ public sealed class EmbeddedCoverArtFixer : IFixer
             }
 
             // Verify the rewritten file: it must still parse, still have every audio stream, and
-            // must not carry a video image stream any more.
+            // must not carry a video image stream any more. Both invariants (cover removed AND
+            // audio streams preserved) are enforced INSIDE this callback so a broken ffmpeg /
+            // corrupt source combination can't produce a videoless-AND-audioless output that
+            // then gets committed over the original.
             var verifyProbe = await _ffprobe.ProbeAsync(tempPath, cancellationToken).ConfigureAwait(false);
             if (verifyProbe is null || verifyProbe.Error is not null || HasEmbeddedCoverStream(verifyProbe))
             {
                 return StripResult.Failed("rewritten file failed post-strip verification; original left in place.");
             }
 
-            if (File.Exists(swapPath))
+            var sourceAudioCount = CountAudioStreams(probe);
+            var rewrittenAudioCount = CountAudioStreams(verifyProbe);
+            if (rewrittenAudioCount < sourceAudioCount)
             {
-                File.Delete(swapPath);
+                return StripResult.Failed(
+                    "rewritten file lost audio streams (" + sourceAudioCount + " → " + rewrittenAudioCount
+                    + "); original left in place.");
             }
 
-            File.Move(tempPath, swapPath);
+            // 03-C: hand the verified strip to VerifiedReplacementService. Same-path swap;
+            // service takes ownership of the recycle/delete of the audio original.
+            var request = new ReplacementRequest(
+                SourcePath: audioPath,
+                OutputPath: tempPath,
+                DestinationPath: audioPath,
+                ExpectedSourceLength: expectedSourceLength,
+                ExpectedSourceMtimeUtcTicks: expectedSourceMtimeTicks,
+                RecycleOriginal: disposal == DisposalMethod.RecycleBin,
+                PreserveSourceTimestamps: true);
 
-            string? recyclePath = null;
-            if (disposal == DisposalMethod.RecycleBin)
-            {
-                recyclePath = _recycleBin.MoveToBin(audioPath);
-            }
-            else if (File.Exists(audioPath))
-            {
-                File.Delete(audioPath);
-            }
+            var replacementResult = await _replacement.ReplaceAsync(
+                request,
+                verifyOutput: _ => Task.FromResult<string?>(null),
+                checkCurrentPolicy: () =>
+                {
+                    var currentConfig = _configProvider.GetSnapshot();
+                    if (currentConfig.DryRun)
+                    {
+                        return PolicyDecision.Refuse(FixReason.TypeDisabled);
+                    }
 
-            originalDisposed = true;
-            File.Move(swapPath, audioPath);
-            swapDone = true;
+                    return PolicyDecision.Allow;
+                },
+                cancellationToken).ConfigureAwait(false);
+
+            if (!replacementResult.Applied)
+            {
+                if (replacementResult.Reason == FixReason.RecoveryRequired && replacementResult.RecoveryPath is not null)
+                {
+                    Diagnostics.Record(
+                        "EmbeddedCoverArt.Swap",
+                        "Strip finished but the final rename failed for '" + audioPath + "'. The stripped file is preserved at '" + replacementResult.RecoveryPath + "' — rename it to '" + audioPath + "' manually. Do NOT delete this file; it is currently your only copy of the content.");
+                    return StripResult.Failed("recovery required — stripped copy preserved at '" + replacementResult.RecoveryPath + "'; rename manually.");
+                }
+
+                if (replacementResult.Reason == FixReason.SourceChanged)
+                {
+                    return StripResult.Failed("source changed mid-strip; original preserved.");
+                }
+
+                return StripResult.Failed("strip could not be committed: " + (replacementResult.TechnicalDetail ?? replacementResult.Reason.ToString()));
+            }
 
             var newSize = new FileInfo(audioPath).Length;
             var freed = Math.Max(0, originalSize - newSize);
-            return StripResult.Ok(freed, audioPath, recyclePath);
+            return StripResult.Ok(freed, audioPath, replacementResult.RecyclePath);
         }
         catch (IOException ex)
         {
@@ -367,20 +414,28 @@ public sealed class EmbeddedCoverArtFixer : IFixer
         finally
         {
             SafeDelete(tempPath);
-            if (!swapDone && File.Exists(swapPath))
+        }
+    }
+
+    /// <summary>Counts audio streams in the probe. FU-2 (audit round 4): the cover-strip
+    /// verify path uses this to guarantee the rewrite didn't accidentally drop audio.</summary>
+    private static int CountAudioStreams(FfprobeData? probe)
+    {
+        if (probe?.Streams is null)
+        {
+            return 0;
+        }
+
+        var count = 0;
+        foreach (var s in probe.Streams)
+        {
+            if (string.Equals(s.CodecType, "audio", StringComparison.OrdinalIgnoreCase))
             {
-                if (originalDisposed)
-                {
-                    Diagnostics.Record(
-                        "EmbeddedCoverArt.Swap",
-                        "Strip finished but the final rename failed for '" + audioPath + "'. The stripped file is at '" + swapPath + "'; move it into place manually if you want to keep the strip.");
-                }
-                else
-                {
-                    SafeDelete(swapPath);
-                }
+                count++;
             }
         }
+
+        return count;
     }
 
     private static bool HasEmbeddedCoverStream(FfprobeData? probe)

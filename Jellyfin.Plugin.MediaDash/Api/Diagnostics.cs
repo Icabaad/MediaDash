@@ -10,86 +10,70 @@ namespace Jellyfin.Plugin.MediaDash.Api;
 /// (silent nulls from a system-stats sample, per-file scan failures, cancelled fixes)
 /// show up in one place the admin can look at.
 ///
-/// The in-memory buffer is a write-through cache over a persisted <c>diagnostics</c> SQLite table —
-/// once <see cref="Attach"/> hands the class a database reference at plugin startup, every
-/// <see cref="Record"/> flushes to disk so errors survive Jellyfin restarts and plugin updates.
-/// Before <see cref="Attach"/> runs (early in plugin construction, before the DB is ready),
-/// writes stay memory-only.
+/// 02-C: state authority moved to the DI-owned
+/// <see cref="Api.DiagnosticService"/> singleton. This static class stays as a
+/// facade for the many legacy call sites (scanners/fixers/controller) that predate DI
+/// injection. Every method forwards to <see cref="Plugin.AttachedDiagnosticService"/>
+/// when present; before the service is constructed (early startup / test contexts
+/// that don't spin up DI) the facade keeps a small local ring buffer so nothing is lost.
+/// The first <see cref="Attach"/> call after DI wire-up drains the buffer into the service.
 /// </summary>
 public static class Diagnostics
 {
-    // In-memory buffer stays small so serialisation of the /Errors payload is cheap and DOM
-    // rendering on the Errors tab stays snappy. Anything older than this is still on disk —
-    // /Errors?full=true reads directly from the persisted table up to MaxPersisted.
-    private const int MaxEntries = 100;
-    private const int MaxPersisted = 5000;
+    // Fallback state used before Plugin.AttachedDiagnosticService is set. Every real
+    // deployment has the service attached within a few ms of plugin load, so this only
+    // catches diagnostics recorded during the DI graph's own construction plus every
+    // unit test that doesn't build a container.
+    private const int FallbackMaxEntries = 100;
+    private static readonly object FallbackLock = new();
+    private static readonly LinkedList<DiagnosticEntry> FallbackEntries = new();
+    private static Data.DiagnosticStore? _pendingStore;
 
-    private static readonly object Lock = new();
-    private static readonly LinkedList<DiagnosticEntry> Entries = new();
-    private static Data.MediaDashDb? _db;
-
-    /// <summary>
-    /// Attach the shared database and rehydrate the ring buffer from persisted rows.
-    /// Called once from <see cref="PluginServiceRegistrator"/> after the DB service is available.
-    /// Safe to call multiple times — subsequent attachments swap the reference and reload.
-    /// </summary>
-    /// <param name="db">The plugin database. Rows in the <c>diagnostics</c> table become the initial buffer contents.</param>
-    public static void Attach(Data.MediaDashDb db)
+    /// <summary>Attach the diagnostics store and rehydrate the ring buffer from persisted rows.</summary>
+    /// <param name="store">The diagnostics store (05-C.5).</param>
+    public static void Attach(Data.DiagnosticStore store)
     {
-        lock (Lock)
+        var service = Plugin.AttachedDiagnosticService;
+        if (service is not null)
         {
-            _db = db;
-            Entries.Clear();
-            try
-            {
-                foreach (var row in db.LoadDiagnostics(MaxEntries))
-                {
-                    Entries.AddLast(new DiagnosticEntry
-                    {
-                        AtUtc = row.AtUtc,
-                        LastAtUtc = row.LastAtUtc,
-                        Source = row.Source,
-                        Message = row.Message,
-                        MessageHash = row.MessageHash,
-                        Count = row.Count
-                    });
-                }
-            }
-            catch (Exception)
-            {
-                // If the load fails (fresh install, disk hiccup, schema not yet migrated) start
-                // with an empty buffer — subsequent Record calls will populate it.
-            }
+            service.Attach(store);
+            return;
         }
+
+        // Service not resolved yet — save the store reference so it can be attached on service
+        // construction, and let the fallback buffer keep swallowing Record calls in the mean time.
+        _pendingStore = store;
     }
 
-    /// <summary>Records a diagnostic event. Message is truncated to avoid huge stack traces.</summary>
-    /// <param name="source">Short source label (e.g., "SystemStats.Linux", "PlayabilityScanner").</param>
-    /// <param name="message">Human-readable description of what went wrong.</param>
+    /// <summary>Records a diagnostic event.</summary>
+    /// <param name="source">Short source label.</param>
+    /// <param name="message">Human-readable description.</param>
     public static void Record(string source, string message)
     {
+        var service = Plugin.AttachedDiagnosticService;
+        if (service is not null)
+        {
+            service.Record(source, message);
+            return;
+        }
+
         if (string.IsNullOrWhiteSpace(source) || string.IsNullOrWhiteSpace(message))
         {
             return;
         }
 
         var trimmed = message.Length > 800 ? message[..800] + "…" : message;
-        // Dedup key hashes the *pre-truncation* message so two different long errors that share the
-        // truncation prefix don't get collapsed into one entry with a misleading Count.
-        var messageHash = StableStringHash(message);
+        var hash = Diagnostics_StableHash(message);
         var now = DateTime.UtcNow;
-        DateTime firstSeen;
-        int newCount;
-        lock (Lock)
+        lock (FallbackLock)
         {
-            // Dedup: any existing entry with the same source + full message gets its Count bumped
-            // and moved to the head. Previous "head-only dedup" merged repeats only when they hit
-            // back to back; scanning all entries mirrors the SQLite ON CONFLICT semantics.
+            // Same dedup shape as DiagnosticService.Record — an identical (source, message) bumps
+            // the existing entry's Count and moves it to the head, rather than adding a duplicate.
             LinkedListNode<DiagnosticEntry>? match = null;
-            for (var node = Entries.First; node is not null; node = node.Next)
+            for (var node = FallbackEntries.First; node is not null; node = node.Next)
             {
                 if (string.Equals(node.Value.Source, source, StringComparison.Ordinal)
-                    && node.Value.MessageHash == messageHash
+                    && node.Value.MessageHash == hash
                     && string.Equals(node.Value.Message, trimmed, StringComparison.Ordinal))
                 {
                     match = node;
@@ -99,52 +83,34 @@ public static class Diagnostics
 
             if (match is not null)
             {
-                firstSeen = match.Value.AtUtc;
-                newCount = match.Value.Count + 1;
-                Entries.Remove(match);
-                Entries.AddFirst(new DiagnosticEntry
+                var firstSeen = match.Value.AtUtc;
+                var newCount = match.Value.Count + 1;
+                FallbackEntries.Remove(match);
+                FallbackEntries.AddFirst(new DiagnosticEntry
                 {
                     AtUtc = firstSeen,
                     LastAtUtc = now,
                     Source = source,
                     Message = trimmed,
-                    MessageHash = messageHash,
-                    Count = newCount
+                    MessageHash = hash,
+                    Count = newCount,
                 });
             }
             else
             {
-                firstSeen = now;
-                newCount = 1;
-                Entries.AddFirst(new DiagnosticEntry
+                FallbackEntries.AddFirst(new DiagnosticEntry
                 {
-                    AtUtc = firstSeen,
+                    AtUtc = now,
                     LastAtUtc = now,
                     Source = source,
                     Message = trimmed,
-                    MessageHash = messageHash,
-                    Count = newCount
+                    MessageHash = hash,
+                    Count = 1,
                 });
-                while (Entries.Count > MaxEntries)
+                while (FallbackEntries.Count > FallbackMaxEntries)
                 {
-                    Entries.RemoveLast();
+                    FallbackEntries.RemoveLast();
                 }
-            }
-        }
-
-        // Persist outside the buffer lock — SQLite has its own locking and we don't want to hold
-        // the in-memory mutex across the disk write. If the persist call fails the buffer stays
-        // authoritative for this session (and re-persists on the next Record).
-        var db = _db;
-        if (db is not null)
-        {
-            try
-            {
-                db.SaveDiagnostic(source, messageHash, trimmed, firstSeen, now, MaxPersisted);
-            }
-            catch (Exception)
-            {
-                // Persistence is best-effort. The Errors tab still shows the in-memory copy.
             }
         }
     }
@@ -153,96 +119,169 @@ public static class Diagnostics
     /// <returns>The entries.</returns>
     public static IReadOnlyList<DiagnosticEntry> Recent()
     {
-        lock (Lock)
+        var service = Plugin.AttachedDiagnosticService;
+        if (service is not null)
         {
-            return Entries.ToList();
+            return service.Recent();
+        }
+
+        lock (FallbackLock)
+        {
+            return FallbackEntries.ToList();
         }
     }
 
-    /// <summary>
-    /// Reads the persisted diagnostics table directly (bypassing the in-memory ring buffer) so the
-    /// Errors tab's "Load older" button can surface entries beyond the newest <see cref="MaxEntries"/>.
-    /// Returns the newest <see cref="MaxPersisted"/> at most. Falls back to the in-memory buffer if
-    /// the DB isn't attached yet or the read fails.
-    /// </summary>
+    /// <summary>Reads the persisted diagnostics table directly.</summary>
     /// <returns>All persisted entries, newest first.</returns>
     public static IReadOnlyList<DiagnosticEntry> RecentAll()
     {
-        var db = _db;
-        if (db is null)
-        {
-            return Recent();
-        }
-
-        try
-        {
-            var rows = db.LoadDiagnostics(MaxPersisted);
-            var list = new List<DiagnosticEntry>(rows.Count);
-            foreach (var row in rows)
-            {
-                list.Add(new DiagnosticEntry
-                {
-                    AtUtc = row.AtUtc,
-                    LastAtUtc = row.LastAtUtc,
-                    Source = row.Source,
-                    Message = row.Message,
-                    MessageHash = row.MessageHash,
-                    Count = row.Count
-                });
-            }
-
-            return list;
-        }
-        catch (Exception)
-        {
-            return Recent();
-        }
+        var service = Plugin.AttachedDiagnosticService;
+        return service is not null ? service.RecentAll() : Recent();
     }
 
-    /// <summary>
-    /// Total number of persisted diagnostic entries. Used by the Errors tab to decide whether to
-    /// surface a "Load older" button (persisted total exceeds the in-memory buffer size).
-    /// </summary>
+    /// <summary>Total number of persisted diagnostic entries.</summary>
     /// <returns>Persisted row count, or the in-memory buffer size when the DB isn't attached.</returns>
     public static int PersistedCount()
     {
-        var db = _db;
-        if (db is null)
+        var service = Plugin.AttachedDiagnosticService;
+        if (service is not null)
         {
-            lock (Lock)
-            {
-                return Entries.Count;
-            }
+            return service.PersistedCount();
         }
 
-        try
+        lock (FallbackLock)
         {
-            return db.CountDiagnostics();
+            return FallbackEntries.Count;
         }
-        catch (Exception)
+    }
+
+    /// <summary>Deterministic 32-bit FNV-1a hash.</summary>
+    /// <param name="s">The string to hash.</param>
+    /// <returns>A stable 32-bit hash.</returns>
+    public static int StableStringHash(string s) => Diagnostics_StableHash(s);
+
+    /// <summary>Empties the buffer and the persisted table.</summary>
+    public static void Clear()
+    {
+        var service = Plugin.AttachedDiagnosticService;
+        if (service is not null)
         {
-            lock (Lock)
+            service.Clear();
+            return;
+        }
+
+        lock (FallbackLock)
+        {
+            FallbackEntries.Clear();
+        }
+    }
+
+    /// <summary>Startup-time cleanup for diagnostics the current build no longer emits.</summary>
+    public static void PurgeObsolete()
+    {
+        var service = Plugin.AttachedDiagnosticService;
+        service?.PurgeObsolete();
+    }
+
+    /// <summary>Removes every diagnostic entry matching source + message substring.</summary>
+    /// <param name="source">Exact source tag to match.</param>
+    /// <param name="messageSubstring">Substring the message must contain.</param>
+    public static void RemoveMatching(string source, string messageSubstring)
+    {
+        var service = Plugin.AttachedDiagnosticService;
+        if (service is not null)
+        {
+            service.RemoveMatching(source, messageSubstring);
+            return;
+        }
+
+        if (string.IsNullOrEmpty(source) || string.IsNullOrEmpty(messageSubstring))
+        {
+            return;
+        }
+
+        lock (FallbackLock)
+        {
+            var node = FallbackEntries.First;
+            while (node is not null)
             {
-                return Entries.Count;
+                var next = node.Next;
+                if (string.Equals(node.Value.Source, source, StringComparison.Ordinal)
+                    && node.Value.Message.Contains(messageSubstring, StringComparison.Ordinal))
+                {
+                    FallbackEntries.Remove(node);
+                }
+
+                node = next;
+            }
+        }
+    }
+
+    /// <summary>Removes every diagnostic whose source equals or begins with <paramref name="subsystem"/>.</summary>
+    /// <param name="subsystem">Subsystem name.</param>
+    public static void RemoveBySourcePrefix(string subsystem)
+    {
+        var service = Plugin.AttachedDiagnosticService;
+        if (service is not null)
+        {
+            service.RemoveBySourcePrefix(subsystem);
+            return;
+        }
+
+        if (string.IsNullOrEmpty(subsystem))
+        {
+            return;
+        }
+
+        var dotted = subsystem + ".";
+        lock (FallbackLock)
+        {
+            var node = FallbackEntries.First;
+            while (node is not null)
+            {
+                var next = node.Next;
+                var src = node.Value.Source;
+                if (string.Equals(src, subsystem, StringComparison.Ordinal)
+                    || src.StartsWith(dotted, StringComparison.Ordinal))
+                {
+                    FallbackEntries.Remove(node);
+                }
+
+                node = next;
             }
         }
     }
 
     /// <summary>
-    /// Deterministic 32-bit hash of a diagnostic message. Used as the second half of the
-    /// <c>(source, message_hash)</c> dedup key in the <c>diagnostics</c> table so repeated fires
-    /// of the same error message collapse into one row with a Count that increments — even
-    /// across Jellyfin restarts. <see cref="string.GetHashCode(StringComparison)"/> is randomised
-    /// per-process (hash-flooding mitigation), which silently broke dedup: each restart rewrote
-    /// the same message under a fresh random hash, adding a "duplicate" row on the Errors tab
-    /// on every restart. FNV-1a 32-bit is stable across processes and machines, fast enough for
-    /// diagnostic-level rates (millions of hashes/sec), and collision risk is bounded by the
-    /// PRIMARY KEY conflict — a genuine hash clash between two different messages would just
-    /// overwrite the older count, which is safer than accumulating duplicates.
+    /// 02-C: called by <see cref="Api.DiagnosticService"/> after it installs itself as
+    /// <see cref="Plugin.AttachedDiagnosticService"/>. Drains any diagnostics the fallback buffer
+    /// captured before the service existed, and forwards a pending <see cref="Attach"/> DB.
     /// </summary>
-    /// <param name="s">The string to hash.</param>
-    /// <returns>A stable 32-bit hash suitable for the diagnostics dedup key.</returns>
-    public static int StableStringHash(string s)
+    /// <param name="service">The freshly-constructed service to hand off state to.</param>
+    internal static void DrainFallbackTo(DiagnosticService service)
+    {
+        List<DiagnosticEntry> snapshot;
+        lock (FallbackLock)
+        {
+            snapshot = FallbackEntries.ToList();
+            FallbackEntries.Clear();
+        }
+
+        // Replay from oldest → newest so the resulting ring buffer preserves relative order.
+        for (var i = snapshot.Count - 1; i >= 0; i--)
+        {
+            service.Record(snapshot[i].Source, snapshot[i].Message);
+        }
+
+        var pending = _pendingStore;
+        _pendingStore = null;
+        if (pending is not null)
+        {
+            service.Attach(pending);
+        }
+    }
+
+    private static int Diagnostics_StableHash(string s)
     {
         unchecked
         {
@@ -255,106 +294,6 @@ public static class Diagnostics
             }
 
             return hash;
-        }
-    }
-
-    /// <summary>Empties the buffer and the persisted table.</summary>
-    public static void Clear()
-    {
-        lock (Lock)
-        {
-            Entries.Clear();
-        }
-
-        var db = _db;
-        if (db is not null)
-        {
-            try
-            {
-                db.ClearDiagnostics();
-            }
-            catch (Exception)
-            {
-                // Same policy as Record — persistence is best-effort. Next Record repopulates the DB.
-            }
-        }
-    }
-
-    /// <summary>
-    /// Startup-time cleanup for diagnostics the current build no longer emits but that
-    /// pre-upgrade users still have persisted in their <c>diagnostics</c> SQLite table.
-    /// Without this, upgrading from v1.0.6 to v1.0.7+ leaves the noisy SMART diagnostics
-    /// visible on the Errors tab even though the underlying spam was fixed in v1.0.7.
-    /// Called once, right after <see cref="Attach"/> installs the DB reference.
-    /// Every entry here is a message that v1.0.7's <c>SmartHealthProbeWmi.cs</c> stopped
-    /// recording:
-    ///   * "No MSFT_StorageReliabilityCounter association found for &lt;model&gt; via any WMI or PowerShell path…"
-    ///   * "PowerShell counter fallback ran for '&lt;model&gt;' but no output line's FriendlyName matched…"
-    /// Neither is actionable; both were benign UI-state reports that spammed the Errors tab.
-    /// </summary>
-    public static void PurgeObsolete()
-    {
-        RemoveMatching("SmartHealth.Wmi", "No MSFT_StorageReliabilityCounter association found");
-        RemoveMatching("SmartHealth.Wmi", "PowerShell counter fallback ran for");
-        // v1.0.8: LegacyBatchNeedsReview retired in favour of auto-adopt on startup. Any diagnostic
-        // persisted from an earlier install is stale by definition — either it's already been
-        // adopted by the new startup pass, or the user needs to re-run adoption. Either way the
-        // sitting-there row misleads.
-        RemoveMatching("RecycleBin.LegacyBatchNeedsReview", "Legacy-looking recycle batch");
-    }
-
-    /// <summary>
-    /// Removes every diagnostic entry — from the in-memory buffer AND the persisted table —
-    /// whose source matches <paramref name="source"/> AND whose message contains
-    /// <paramref name="messageSubstring"/>. Used when a one-click UI action (like the Errors
-    /// tab's "Merge into current bin" button) resolves the underlying condition and the
-    /// stale diagnostic should disappear on the next refresh instead of sitting there
-    /// misleading the user. Ordinal substring match; no regex.
-    /// </summary>
-    /// <param name="source">Exact source tag to match.</param>
-    /// <param name="messageSubstring">Substring the message must contain.</param>
-    public static void RemoveMatching(string source, string messageSubstring)
-    {
-        if (string.IsNullOrEmpty(source) || string.IsNullOrEmpty(messageSubstring))
-        {
-            return;
-        }
-
-        var doomed = new List<(string Source, int Hash)>();
-        lock (Lock)
-        {
-            var node = Entries.First;
-            while (node is not null)
-            {
-                var next = node.Next;
-                if (string.Equals(node.Value.Source, source, StringComparison.Ordinal)
-                    && node.Value.Message.Contains(messageSubstring, StringComparison.Ordinal))
-                {
-                    doomed.Add((node.Value.Source, node.Value.MessageHash));
-                    Entries.Remove(node);
-                }
-
-                node = next;
-            }
-        }
-
-        var db = _db;
-        if (db is null || doomed.Count == 0)
-        {
-            return;
-        }
-
-        foreach (var (src, hash) in doomed)
-        {
-            try
-            {
-                db.DeleteDiagnostic(src, hash);
-            }
-            catch (Exception)
-            {
-                // Best-effort; the in-memory buffer is already updated so the /Errors response
-                // reflects the removal even if disk write fails. Next Record repopulates on demand.
-            }
         }
     }
 }

@@ -6,6 +6,7 @@ using Xunit;
 
 namespace Jellyfin.Plugin.MediaDash.Tests;
 
+[Collection("MediaDashDb")]
 public sealed class MediaDashDbTests : IDisposable
 {
     private readonly string _dbPath = Path.Combine(Path.GetTempPath(), "mediadash-test-" + Guid.NewGuid().ToString("N") + ".db");
@@ -49,7 +50,8 @@ public sealed class MediaDashDbTests : IDisposable
     {
         _db.ReplaceDetectedIssues(IssueType.Playability, [Make("A")]);
         var id = _db.GetIssues(IssueType.Playability)[0].Id;
-        _db.UpdateIssueStatus(id, IssueStatus.Fixed);
+        _db.TryTransitionIssueStatus(id, [IssueStatus.Detected], IssueStatus.Queued);
+        _db.TryTransitionIssueStatus(id, [IssueStatus.Queued], IssueStatus.Fixed);
 
         _db.ReplaceDetectedIssues(IssueType.Playability, [Make("A")]);
 
@@ -61,7 +63,7 @@ public sealed class MediaDashDbTests : IDisposable
     {
         _db.ReplaceDetectedIssues(IssueType.Playability, [Make("A")]);
         var id = _db.GetIssues(IssueType.Playability)[0].Id;
-        _db.UpdateIssueStatus(id, IssueStatus.Dismissed);
+        _db.TryTransitionIssueStatus(id, [IssueStatus.Detected, IssueStatus.Queued], IssueStatus.Dismissed);
 
         _db.ReplaceDetectedIssues(IssueType.Playability, [Make("A")]);
 

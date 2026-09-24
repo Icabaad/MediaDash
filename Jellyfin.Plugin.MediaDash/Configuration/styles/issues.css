@@ -1,0 +1,281 @@
+/*
+ * ISSUES
+ *
+ * Issues tab: filter row, clear-all + unignore + show-ignored toggles, Phase B filter panel, Phase B cards, Phase B Approve/dismiss action buttons.
+ *
+ * Served via /MediaDash/Asset/issues.css by Api/PluginAssetController.cs
+ * (whitelist entry "issues.css"). Extracted in 06-FOLLOWUP-3-bulk-2 from
+ * configPage.html — ranges 1277-1327, 2129-2286, 2555-2612 of the original inline <style> block
+ * (pre-06-FOLLOWUP-3-bulk-1 line numbers, post-jump.css state). Move is
+ * verbatim; comment headers preserved; @media blocks travel with their
+ * default-scheme counterparts so the pairing survives the split.
+ */
+
+/* ── Issues filter row ────────────────────────────────────── */
+#MediaDashConfigPage .mdIssueFilterRow {
+    display: flex; gap: 14px; align-items: flex-end; flex-wrap: wrap;
+    margin-bottom: 14px;
+}
+#MediaDashConfigPage .mdApproveAllBtn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 10px 16px !important;
+    border-radius: 999px !important;
+    font: 600 13px Figtree, sans-serif !important;
+    background: color-mix(in srgb, var(--md-primary) 16%, transparent) !important;
+    color: var(--md-primary) !important;
+    border: 1px solid color-mix(in srgb, var(--md-primary) 55%, transparent) !important;
+    height: 44px;
+}
+#MediaDashConfigPage .mdApproveAllBtn:not(:disabled):hover {
+    background: color-mix(in srgb, var(--md-primary) 26%, transparent) !important;
+}
+#MediaDashConfigPage .mdApproveAllBtn .material-icons { color: var(--md-primary); font-size: 18px; }
+/* Clear-all shares the approve-all pill shape but recolored red to signal destructive intent. */
+#MediaDashConfigPage #mdClearAllIssues.mdApproveAllBtn {
+    background: color-mix(in srgb, #ef4444 16%, transparent) !important;
+    color: #ef4444 !important;
+    border-color: color-mix(in srgb, #ef4444 55%, transparent) !important;
+}
+#MediaDashConfigPage #mdClearAllIssues.mdApproveAllBtn:not(:disabled):hover {
+    background: color-mix(in srgb, #ef4444 26%, transparent) !important;
+}
+#MediaDashConfigPage #mdClearAllIssues.mdApproveAllBtn .material-icons { color: #ef4444; }
+/* Unignore mode: same pill, recolored green — the action is constructive, not destructive. */
+#MediaDashConfigPage #mdClearAllIssues.mdApproveAllBtn.mdRevertMode {
+    background: color-mix(in srgb, #22c55e 16%, transparent) !important;
+    color: #22c55e !important;
+    border-color: color-mix(in srgb, #22c55e 55%, transparent) !important;
+}
+#MediaDashConfigPage #mdClearAllIssues.mdApproveAllBtn.mdRevertMode:not(:disabled):hover {
+    background: color-mix(in srgb, #22c55e 26%, transparent) !important;
+}
+#MediaDashConfigPage #mdClearAllIssues.mdApproveAllBtn.mdRevertMode .material-icons { color: #22c55e; }
+/* "Show ignored" toggle in Active mode — amber to match the History/Ignore tone
+   so the user can tell at a glance they've left the open-issue view. */
+#MediaDashConfigPage #mdToggleIgnored.mdApproveAllBtn.mdToggleActive {
+    background: color-mix(in srgb, #f59e0b 18%, transparent) !important;
+    color: #f59e0b !important;
+    border-color: color-mix(in srgb, #f59e0b 55%, transparent) !important;
+}
+#MediaDashConfigPage #mdToggleIgnored.mdApproveAllBtn.mdToggleActive:not(:disabled):hover {
+    background: color-mix(in srgb, #f59e0b 28%, transparent) !important;
+}
+#MediaDashConfigPage #mdToggleIgnored.mdApproveAllBtn.mdToggleActive .material-icons { color: #f59e0b; }
+
+
+/* ── Phase B: Issues filter panel ─────────────────────────────
+   Section card wrapping type chips row, search field, approve-all button, hint. */
+#MediaDashConfigPage .mdIssueFilterCard {
+    padding: 20px 24px;
+    display: flex; flex-direction: column; gap: 14px;
+    margin-bottom: 14px;
+}
+#MediaDashConfigPage .mdIssueTypeChips {
+    display: flex; flex-wrap: wrap; gap: 8px;
+}
+#MediaDashConfigPage .mdIssueFilterActionRow {
+    display: flex; align-items: stretch; gap: 12px; flex-wrap: wrap;
+}
+#MediaDashConfigPage .mdIssueSearchWrap {
+    position: relative; flex: 1 1 260px; min-width: 200px;
+}
+#MediaDashConfigPage .mdIssueSearchIcon {
+    position: absolute; left: 14px; top: 50%; transform: translateY(-50%);
+    font-size: 20px !important; color: var(--md-meta);
+    pointer-events: none;
+}
+#MediaDashConfigPage #mdIssueFilter,
+#MediaDashConfigPage #mdHistorySearch,
+#MediaDashConfigPage #mdBinSearch {
+    width: 100%; height: 44px;
+    background: var(--md-inner) !important;
+    border: 1px solid transparent !important;
+    border-radius: 999px !important;
+    padding: 0 16px 0 44px !important;
+    color: var(--md-ink) !important;
+    font: 500 14px Figtree, sans-serif !important;
+    outline: none;
+    box-sizing: border-box;
+}
+#MediaDashConfigPage #mdIssueFilter:focus,
+#MediaDashConfigPage #mdHistorySearch:focus,
+#MediaDashConfigPage #mdBinSearch:focus {
+    border-color: var(--md-primary) !important;
+}
+#MediaDashConfigPage #mdIssueFilter::placeholder,
+#MediaDashConfigPage #mdHistorySearch::placeholder,
+#MediaDashConfigPage #mdBinSearch::placeholder { color: var(--md-meta); }
+#MediaDashConfigPage .mdIssueApproveNote {
+    font: 400 12.5px Figtree, sans-serif;
+    color: var(--md-meta);
+}
+
+/* ── Phase B: Issues cards ────────────────────────────────────
+   18px radius, 4px LEFT edge accent, 22px 26px padding, layout: 40px accent-tinted
+   icon disc | body (filename + chips + mono path + hint + meta) | actions column. */
+#MediaDashConfigPage .mdIssueCard {
+    position: relative;
+    background: var(--md-panel);
+    border: 1px solid var(--md-border-card);
+    border-left: 4px solid var(--md-issue-accent, var(--md-primary));
+    border-radius: 18px;
+    padding: 22px 26px;
+    margin: 0 0 14px;
+    box-shadow: var(--md-shadow-card);
+}
+#MediaDashConfigPage .mdIssueLayout {
+    display: flex; gap: 16px; align-items: flex-start;
+}
+#MediaDashConfigPage .mdIssueDisc {
+    flex: 0 0 40px; width: 40px; height: 40px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--md-issue-accent, var(--md-primary)) 18%, transparent);
+    color: var(--md-issue-accent, var(--md-primary));
+    display: inline-flex; align-items: center; justify-content: center;
+}
+#MediaDashConfigPage .mdIssueDisc .material-icons {
+    font-size: 22px; color: inherit;
+}
+#MediaDashConfigPage .mdIssueBody {
+    flex: 1; min-width: 0;
+    display: flex; flex-direction: column; gap: 6px;
+}
+#MediaDashConfigPage .mdIssueTitleRow {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+#MediaDashConfigPage .mdIssueFilename {
+    font: 700 16.5px Figtree, sans-serif; letter-spacing: -.012em;
+    color: var(--md-ink);
+    overflow-wrap: anywhere;
+}
+#MediaDashConfigPage .mdIssueTagChip {
+    padding: 3px 10px; border-radius: 999px;
+    background: color-mix(in srgb, var(--md-issue-accent, var(--md-primary)) 18%, transparent);
+    color: var(--md-issue-accent, var(--md-primary));
+    font: 700 11px 'IBM Plex Mono', monospace;
+    text-transform: uppercase; letter-spacing: .05em;
+}
+#MediaDashConfigPage .mdIssueStatusChip {
+    padding: 3px 10px; border-radius: 999px;
+    background: var(--md-inner);
+    color: var(--md-body);
+    font: 700 11px 'IBM Plex Mono', monospace;
+    text-transform: uppercase; letter-spacing: .05em;
+}
+#MediaDashConfigPage .mdIssueCard .mdIssuePath {
+    font: 500 12.5px 'IBM Plex Mono', monospace !important;
+    color: var(--md-meta) !important;
+    overflow-wrap: anywhere;
+    white-space: normal !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+#MediaDashConfigPage .mdIssueHint {
+    font: 400 13.5px/1.55 Figtree, sans-serif;
+    color: var(--md-body);
+}
+#MediaDashConfigPage .mdIssueSavings {
+    font: 700 13px 'IBM Plex Mono', monospace;
+    color: var(--md-issue-accent, var(--md-primary));
+}
+#MediaDashConfigPage .mdIssueActions {
+    display: flex; flex-direction: column; gap: 8px;
+    flex: 0 0 200px; align-items: stretch;
+    min-width: 180px; max-width: 220px;
+}
+#MediaDashConfigPage .mdIssueActions button { min-height: 40px; }
+#MediaDashConfigPage .mdIssueFooter {
+    margin-top: 12px; padding-left: 56px;
+    display: flex; flex-direction: column; gap: 4px;
+}
+#MediaDashConfigPage .mdIssueActionHint {
+    font: 400 12.5px/1.5 Figtree, sans-serif;
+    color: var(--md-meta);
+}
+#MediaDashConfigPage .mdIssueRowMsg {
+    font-size: 12.5px; color: var(--md-meta);
+}
+@media (max-width: 720px) {
+    #MediaDashConfigPage .mdIssueCard { padding: 16px 16px; }
+    #MediaDashConfigPage .mdIssueLayout { flex-wrap: wrap; gap: 12px; }
+    #MediaDashConfigPage .mdIssueActions { flex: 0 0 100%; min-width: 0; flex-direction: row; flex-wrap: wrap; max-width: none; }
+    #MediaDashConfigPage .mdIssueFooter { padding-left: 0; }
+}
+/* Filter row: type chips with mono counts, active chip accent-tinted, "All" pill. */
+#MediaDashConfigPage .mdTotalPill {
+    padding: 8px 14px !important; border-radius: 999px !important;
+    font: 600 13px Figtree, sans-serif !important;
+    background: var(--md-chip) !important;
+    color: var(--md-body) !important;
+    border: 1px solid transparent !important;
+    min-height: 40px;
+    display: inline-flex; align-items: center; gap: 6px;
+}
+#MediaDashConfigPage .mdTotalPill:hover {
+    background: var(--md-panel-hover) !important;
+    color: var(--md-ink) !important;
+}
+#MediaDashConfigPage .mdTotalPill b {
+    font-family: 'IBM Plex Mono', monospace;
+    font-weight: 700;
+    opacity: .85;
+}
+
+
+/* ── Phase B: Approve/dismiss issue action buttons ── */
+#MediaDashConfigPage .mdIssueCard .mdApprove {
+    background: var(--md-issue-accent, var(--md-primary)) !important;
+    color: var(--md-issue-accent-ink, var(--md-primary-ink)) !important;
+    border: 0 !important;
+    border-radius: 999px !important;
+    padding: 8px 16px !important;
+    font-weight: 700 !important;
+    min-height: 40px;
+}
+#MediaDashConfigPage .mdIssueCard .mdDismiss {
+    background: transparent !important;
+    border: 1px solid var(--md-border-btn) !important;
+    color: var(--md-body) !important;
+    border-radius: 999px !important;
+    padding: 8px 16px !important;
+    min-height: 40px;
+}
+#MediaDashConfigPage .mdIssueCard .mdDismiss:hover {
+    background: var(--md-panel-hover) !important;
+    color: var(--md-ink) !important;
+}
+#MediaDashConfigPage .mdIssueCard .mdRestore,
+#MediaDashConfigPage .mdIssueCard .mdUndoAction {
+    background: var(--md-neutral) !important;
+    border: 1px solid var(--md-border-btn) !important;
+    color: var(--md-ink) !important;
+    border-radius: 999px !important;
+    padding: 8px 16px !important;
+    min-height: 40px;
+}
+#MediaDashConfigPage .mdIssueCard .mdUndoAction:hover {
+    background: var(--md-panel-hover) !important;
+}
+/* Unignore: constructive filled pill — same shape as Approve but green so it reads
+   as "put this back on the list" not "same as Approve". */
+#MediaDashConfigPage .mdIssueCard .mdUnignore {
+    background: color-mix(in srgb, #22c55e 20%, transparent) !important;
+    border: 1px solid color-mix(in srgb, #22c55e 55%, transparent) !important;
+    color: #16a34a !important;
+    border-radius: 999px !important;
+    padding: 8px 16px !important;
+    font-weight: 700 !important;
+    min-height: 40px;
+}
+#MediaDashConfigPage .mdIssueCard .mdUnignore:not(:disabled):hover {
+    background: color-mix(in srgb, #22c55e 30%, transparent) !important;
+}
+#MediaDashConfigPage .mdIssueCard .mdUnignore .material-icons { color: #16a34a; }
+#MediaDashConfigPage .mdIssueCard .mdOpenInJellyfin {
+    background: transparent !important;
+    border: 1px solid var(--md-border-btn) !important;
+    color: var(--md-body) !important;
+    border-radius: 999px !important;
+    padding: 8px 14px !important;
+    min-height: 40px;
+}

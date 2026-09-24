@@ -1,0 +1,88 @@
+/*
+ * MASTHEAD
+ *
+ * Full-width header band, logo, product title/tagline/meta, primary + destructive action buttons.
+ *
+ * Served via /MediaDash/Asset/masthead.css by Api/PluginAssetController.cs
+ * (whitelist entry "masthead.css"). Extracted in 06-FOLLOWUP-3-bulk-2 from
+ * configPage.html — ranges 221-296 of the original inline <style> block
+ * (pre-06-FOLLOWUP-3-bulk-1 line numbers, post-jump.css state). Move is
+ * verbatim; comment headers preserved; @media blocks travel with their
+ * default-scheme counterparts so the pairing survives the split.
+ */
+
+/* ── Masthead ────────────────────────────────────────────────
+   Full-width header band with 56px logo, product name, tagline, mono "Last scan" line,
+   and the two action buttons. Below sits the tab bar; the active tab uses the page
+   background so it reads as connected to the content below. */
+#MediaDashConfigPage .mdMasthead {
+    background: var(--md-header-band);
+    border-bottom: 1px solid var(--md-border-card);
+    padding: 32px 0 0;
+    margin: 0;
+}
+#MediaDashConfigPage .mdMastheadInner {
+    display: flex; align-items: flex-start; gap: 20px; flex-wrap: wrap;
+}
+#MediaDashConfigPage .mdMasthead #mdLogo {
+    width: 56px; height: 56px; border-radius: 18px;
+    flex: none; object-fit: cover; display: block;
+}
+#MediaDashConfigPage .mdMastheadTitleBlock {
+    flex: 1 1 340px; min-width: 260px;
+}
+#MediaDashConfigPage .mdMastheadTitleBlock h1 {
+    margin: 0; font: 800 34px/1.05 Figtree, sans-serif;
+    letter-spacing: -.03em; color: var(--md-ink);
+}
+#MediaDashConfigPage .mdVersionTag {
+    margin-left: 10px; vertical-align: 6px;
+    font: 500 13px 'IBM Plex Mono', monospace;
+    letter-spacing: 0; color: var(--md-meta);
+}
+#MediaDashConfigPage .mdVersionTag:empty { display: none; }
+#MediaDashConfigPage .mdMastheadTagline {
+    margin: 8px 0 0; font-size: 15px; line-height: 1.55;
+    color: var(--md-meta); max-width: 620px; text-wrap: pretty;
+}
+#MediaDashConfigPage .mdMastheadMeta {
+    margin: 12px 0 0; font: 500 12.5px 'IBM Plex Mono', monospace;
+    color: var(--md-meta);
+}
+#MediaDashConfigPage .mdMastheadActions {
+    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+}
+
+/* Primary button (cyan). Neutral secondary button. Both 44px tall. */
+#MediaDashConfigPage .mdActionBtn {
+    display: inline-flex; align-items: center; gap: 8px;
+    height: 44px; padding: 0 20px !important;
+    border-radius: 999px !important;
+    font: 600 14.5px Figtree, sans-serif !important;
+    background: var(--md-neutral) !important;
+    color: var(--md-ink) !important;
+    border: 1px solid var(--md-border-btn) !important;
+    cursor: pointer;
+    transition: background .14s ease, color .14s ease;
+}
+#MediaDashConfigPage .mdActionBtn:not(:disabled):hover {
+    background: var(--md-neutral-hover) !important;
+}
+#MediaDashConfigPage .mdActionBtn .material-icons { font-size: 20px; }
+#MediaDashConfigPage .mdActionFix {
+    background: var(--md-primary) !important;
+    color: var(--md-primary-ink) !important;
+    border: none !important;
+    font-weight: 700 !important;
+}
+#MediaDashConfigPage .mdActionFix:not(:disabled):hover {
+    background: var(--md-primary-hover) !important;
+}
+#MediaDashConfigPage .mdActionBtn.mdActionStop {
+    background: var(--md-dest-fill) !important;
+    border-color: var(--md-dest-border) !important;
+    color: var(--md-dest-ink) !important;
+}
+#MediaDashConfigPage .mdActionBtn.mdActionStop:not(:disabled):hover {
+    background: var(--md-dest-hover) !important;
+}

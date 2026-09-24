@@ -16,7 +16,7 @@ public class FixTaskDiskFullTests
         // fall through to the generic IOError bucket so we stop mis-labelling sharing violations
         // and network glitches as "disk error" (issue #19).
         var ex = new IOException("simulated") { HResult = hresult };
-        Assert.True(FixTask.IsDiskFull(ex));
+        Assert.True(FixExecutor.IsDiskFull(ex));
     }
 
     [Theory]
@@ -27,6 +27,6 @@ public class FixTaskDiskFullTests
     public void IsDiskFull_NonDiskFullCodes_ReturnFalse(int hresult)
     {
         var ex = new IOException("simulated") { HResult = hresult };
-        Assert.False(FixTask.IsDiskFull(ex));
+        Assert.False(FixExecutor.IsDiskFull(ex));
     }
 }

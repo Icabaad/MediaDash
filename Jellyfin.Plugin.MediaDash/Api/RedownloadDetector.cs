@@ -17,16 +17,16 @@ public static class RedownloadDetector
     /// When the current file is close to the size of the original (still preserved in the recycle
     /// bin), the re-encode was undone.
     /// </summary>
-    /// <param name="db">The plugin database.</param>
+    /// <param name="history">History-table store (05-C.3).</param>
     /// <param name="lookback">How far back to check history. 30 days matches the default recycle-bin retention.</param>
     /// <returns>A list of suspected redownload cases, newest first, capped at 25.</returns>
-    public static IReadOnlyList<RedownloadWarning> Detect(MediaDashDb db, TimeSpan lookback)
+    public static IReadOnlyList<RedownloadWarning> Detect(HistoryStore history, TimeSpan lookback)
     {
         var cutoff = DateTime.UtcNow - lookback;
         var warnings = new List<RedownloadWarning>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var entry in db.GetHistory(2000))
+        foreach (var entry in history.GetHistory(2000))
         {
             if (entry.FixedAtUtc < cutoff)
             {

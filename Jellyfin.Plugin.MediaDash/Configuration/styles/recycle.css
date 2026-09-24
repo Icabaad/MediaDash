@@ -1,0 +1,224 @@
+/*
+ * RECYCLE
+ *
+ * Recycle bin: summary card (accent bar, disc, meta, actions), contents list (headers, rows, reason chips, retention pills, restore buttons, empty state), Phase B tab hint.
+ *
+ * Served via /MediaDash/Asset/recycle.css by Api/PluginAssetController.cs
+ * (whitelist entry "recycle.css"). Extracted in 06-FOLLOWUP-3-bulk-2 from
+ * configPage.html — ranges 587-782, 2502-2516 of the original inline <style> block
+ * (pre-06-FOLLOWUP-3-bulk-1 line numbers, post-jump.css state). Move is
+ * verbatim; comment headers preserved; @media blocks travel with their
+ * default-scheme counterparts so the pairing survives the split.
+ */
+
+/* Recycle bin summary card — pink accent top bar, 42px disc, mono total, actions. */
+#MediaDashConfigPage .mdRecycleSummary {
+    position: relative;
+    overflow: hidden;
+    padding: 24px 30px !important;
+    margin-bottom: 16px;
+    --md-section-accent: #ec4899;
+}
+#MediaDashConfigPage .mdRecycleSummary::before {
+    content: ""; position: absolute; top: 0; left: 0; right: 0;
+    height: 4px; background: var(--md-recycle);
+}
+#MediaDashConfigPage .mdRecycleHead {
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+}
+#MediaDashConfigPage .mdRecycleDisc {
+    width: 42px; height: 42px; flex: 0 0 42px;
+    border-radius: 999px;
+    background: var(--md-recycle);
+    color: #fff;
+    display: inline-flex; align-items: center; justify-content: center;
+}
+#MediaDashConfigPage .mdRecycleDisc .material-icons { font-size: 22px; }
+#MediaDashConfigPage .mdRecycleInfo { flex: 1; min-width: 200px; }
+#MediaDashConfigPage .mdRecycleTitle {
+    font: 700 18px Figtree, sans-serif; letter-spacing: -.015em;
+    color: var(--md-ink);
+}
+#MediaDashConfigPage .mdRecycleMeta {
+    font: 500 13.5px 'IBM Plex Mono', monospace !important;
+    color: var(--md-body) !important;
+    margin-top: 4px;
+}
+#MediaDashConfigPage .mdRecycleActions {
+    display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+}
+#MediaDashConfigPage .mdRecycleActions #mdBinRefresh {
+    background: var(--md-neutral) !important;
+    border: 1px solid var(--md-border-btn) !important;
+    color: var(--md-ink) !important;
+    border-radius: 999px !important;
+    padding: 8px 16px !important;
+    min-height: 40px;
+}
+
+/* Recycle bin contents card — single card wrapping column headers + row list. */
+#MediaDashConfigPage .mdBinListCard {
+    padding: 0 !important;
+    overflow: hidden;
+}
+#MediaDashConfigPage .mdBinListCard #mdBinList {
+    background: transparent;
+    border: 0 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+    max-height: none !important;
+    overflow: visible !important;
+}
+/* Column headers row: File / Size 90px / Recycled 130px / actions 120px. */
+#MediaDashConfigPage .mdBinHeader {
+    display: grid;
+    grid-template-columns: 1fr 90px 130px 120px;
+    gap: 16px;
+    padding: 14px 26px;
+    background: var(--md-inner);
+    border-bottom: 1px solid var(--md-border-inner);
+    font: 800 11.5px Figtree, sans-serif;
+    letter-spacing: .14em; text-transform: uppercase;
+    color: var(--md-meta);
+}
+#MediaDashConfigPage .mdBinHeadSize,
+#MediaDashConfigPage .mdBinHeadDate { text-align: right; }
+/* Bin row grid matches header columns. */
+#MediaDashConfigPage .mdBinRow {
+    display: grid !important;
+    grid-template-columns: 1fr 90px 130px 120px;
+    gap: 16px;
+    align-items: center;
+    padding: 16px 26px !important;
+    border-bottom: 1px solid var(--md-border-row) !important;
+}
+#MediaDashConfigPage .mdBinRow:last-child { border-bottom: none !important; }
+#MediaDashConfigPage .mdBinRowFile { min-width: 0; overflow: hidden; }
+#MediaDashConfigPage .mdBinRowName {
+    font: 600 14.5px Figtree, sans-serif;
+    color: var(--md-ink);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#MediaDashConfigPage .mdBinRowFrom {
+    font: 500 12px 'IBM Plex Mono', monospace;
+    color: var(--md-meta);
+    margin-top: 3px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#MediaDashConfigPage .mdBinReasonRow {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+    margin-top: 6px;
+    font: 500 12px Figtree, sans-serif;
+    color: var(--md-meta);
+}
+#MediaDashConfigPage .mdBinReasonChip {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 3px 10px; border-radius: 999px;
+    background: rgba(59,130,246,.12);
+    border: 1px solid rgba(59,130,246,.35);
+    color: #93c5fd;
+    font: 700 11.5px Figtree, sans-serif;
+    text-transform: none;
+}
+#MediaDashConfigPage .mdBinReasonChip--manual {
+    background: rgba(148,163,184,.12);
+    border-color: rgba(148,163,184,.35);
+    color: #cbd5e1;
+}
+#MediaDashConfigPage .mdBinReasonChip--orphan {
+    background: rgba(245,158,11,.10);
+    border-color: rgba(245,158,11,.40);
+    color: #fcd34d;
+}
+#MediaDashConfigPage .mdBinRowAction2 {
+    font: 400 12.5px/1.45 Figtree, sans-serif;
+    color: var(--md-body);
+    margin-top: 6px;
+    font-style: italic;
+    opacity: .85;
+}
+#MediaDashConfigPage .mdBinRowHelp {
+    display: inline-flex; align-items: center; gap: 4px;
+    margin-top: 6px;
+    padding: 3px 10px;
+    border-radius: 6px;
+    background: rgba(16,185,129,.08);
+    border: 1px solid rgba(16,185,129,.28);
+    color: #6ee7b7;
+    font: 400 11.5px/1.5 Figtree, sans-serif;
+    cursor: help;
+    max-width: 100%;
+}
+#MediaDashConfigPage .mdBinRowHelp .material-icons { font-size: 14px; }
+#MediaDashConfigPage .mdBinRetentionSoon { color: #fbbf24; font-weight: 700; }
+#MediaDashConfigPage .mdBinRetentionUrgent { color: #f87171; font-weight: 700; }
+#MediaDashConfigPage .mdBinRowSize,
+#MediaDashConfigPage .mdBinRowDate {
+    font: 500 13px 'IBM Plex Mono', monospace;
+    color: var(--md-body);
+    text-align: right;
+}
+#MediaDashConfigPage .mdBinRowAction {
+    display: flex; align-items: center; justify-content: flex-end; gap: 8px;
+}
+#MediaDashConfigPage .mdBinRestore {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--md-neutral) !important;
+    border: 1px solid var(--md-border-btn) !important;
+    color: var(--md-ink) !important;
+    border-radius: 999px !important;
+    padding: 0 14px !important;
+    height: 34px; min-height: 34px !important;
+    font: 600 13px Figtree, sans-serif !important;
+}
+#MediaDashConfigPage .mdBinRestore:hover { background: var(--md-neutral-hover) !important; }
+#MediaDashConfigPage .mdBinRestore .material-icons { font-size: 17px !important; }
+#MediaDashConfigPage .mdBinNoHistory {
+    display: inline-flex; align-items: center;
+    padding: 6px 14px; border-radius: 999px;
+    background: var(--md-inner);
+    border: 1px solid var(--md-border-btn);
+    color: var(--md-meta);
+    font: 600 12px 'IBM Plex Mono', monospace;
+    text-transform: lowercase;
+}
+#MediaDashConfigPage .mdBinRow:has(.mdBinNoHistory) .mdBinRowName { opacity: .6; }
+#MediaDashConfigPage .mdBinRowMsg {
+    font-size: 12px; color: var(--md-success);
+}
+#MediaDashConfigPage .mdBinEmpty {
+    padding: 20px 26px;
+    font: 500 13.5px Figtree, sans-serif;
+    color: var(--md-meta);
+}
+#MediaDashConfigPage .mdRecycleHint {
+    margin-top: 16px;
+    font: 400 13px/1.55 Figtree, sans-serif;
+    color: var(--md-meta);
+}
+@media (max-width: 720px) {
+    #MediaDashConfigPage .mdBinHeader,
+    #MediaDashConfigPage .mdBinRow {
+        grid-template-columns: 1fr auto;
+        grid-template-areas: "file action" "size date";
+    }
+    #MediaDashConfigPage .mdBinHeadDate,
+    #MediaDashConfigPage .mdBinHeadActions { display: none; }
+}
+
+
+/* ── Phase B: Recycle bin tab ─────────────────────────────────
+   Summary card in pink accent, contents rows with mono size/timestamp. */
+#MediaDashConfigPage #mdBinList {
+    max-height: none !important;
+    border: 1px solid var(--md-border-card) !important;
+    border-radius: 18px !important;
+    overflow-y: auto;
+    background: var(--md-panel);
+    box-shadow: var(--md-shadow-card);
+}
+#MediaDashConfigPage #mdBinInfo {
+    font: 500 13px 'IBM Plex Mono', monospace;
+    color: var(--md-body);
+}

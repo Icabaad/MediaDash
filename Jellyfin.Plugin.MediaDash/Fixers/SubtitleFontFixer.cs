@@ -43,17 +43,17 @@ public sealed class SubtitleFontFixer : IFixer
         if (!issue.Path.EndsWith(".ass", StringComparison.OrdinalIgnoreCase)
             && !issue.Path.EndsWith(".ssa", StringComparison.OrdinalIgnoreCase))
         {
-            return Task.FromResult(FixResult.Fail("Refused: not an .ass/.ssa file — " + issue.Path));
+            return Task.FromResult(FixResult.Refused(FixReason.UnsupportedFormat, "Refused: not an .ass/.ssa file — " + issue.Path));
         }
 
         if (!_libraryGuard.IsInsideLibrary(issue.Path))
         {
-            return Task.FromResult(FixResult.Fail("Refused: subtitle sits outside your library folders — " + issue.Path));
+            return Task.FromResult(FixResult.Refused(FixReason.OutsideLibrary, "Refused: subtitle sits outside your library folders — " + issue.Path));
         }
 
         if (!File.Exists(issue.Path))
         {
-            return Task.FromResult(FixResult.Fail("The subtitle file no longer exists: " + issue.Path));
+            return Task.FromResult(FixResult.Fail(FixReason.SourceMissing, "The subtitle file no longer exists: " + issue.Path));
         }
 
         var config = Plugin.Instance!.Configuration;
@@ -66,17 +66,17 @@ public sealed class SubtitleFontFixer : IFixer
         }
         catch (NotSupportedException ex)
         {
-            return Task.FromResult(FixResult.Fail("Can't optimise this subtitle — it uses a feature MediaDash doesn't support.", ex.Message));
+            return Task.FromResult(FixResult.Refused(FixReason.UnsupportedFormat, "Can't optimise this subtitle — it uses a feature MediaDash doesn't support.", ex.Message));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            return Task.FromResult(FixResult.Fail("Couldn't read " + Path.GetFileName(issue.Path) + " — check that Jellyfin can read it.", ex.Message));
+            return Task.FromResult(FixResult.Fail(FixReason.AccessDenied, "Couldn't read " + Path.GetFileName(issue.Path) + " — check that Jellyfin can read it.", ex.Message));
         }
 
         var embedded = ass.EmbeddedFonts();
         if (embedded.Count == 0)
         {
-            return Task.FromResult(FixResult.Fail("Nothing to remove any more — this subtitle has no embedded fonts."));
+            return Task.FromResult(FixResult.NoChange(FixReason.NothingToRemove, "Nothing to remove any more — this subtitle has no embedded fonts."));
         }
 
         long before;
@@ -86,7 +86,7 @@ public sealed class SubtitleFontFixer : IFixer
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            return Task.FromResult(FixResult.Fail("Couldn't read file size for " + Path.GetFileName(issue.Path) + " — check that Jellyfin can read it.", ex.Message));
+            return Task.FromResult(FixResult.Fail(FixReason.AccessDenied, "Couldn't read file size for " + Path.GetFileName(issue.Path) + " — check that Jellyfin can read it.", ex.Message));
         }
 
         // Compute which fonts to keep based on current config, not what the scanner saw — the setting
@@ -119,7 +119,7 @@ public sealed class SubtitleFontFixer : IFixer
 
         if (droppedCount == 0)
         {
-            return Task.FromResult(FixResult.Fail("Nothing to remove any more — every embedded font is referenced by at least one style."));
+            return Task.FromResult(FixResult.NoChange(FixReason.NothingToRemove, "Nothing to remove any more — every embedded font is referenced by at least one style."));
         }
 
         if (config.DryRun)
@@ -161,7 +161,7 @@ public sealed class SubtitleFontFixer : IFixer
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             TryDelete(tmp);
-            return Task.FromResult(FixResult.Fail("Couldn't write " + Path.GetFileName(issue.Path) + " — check that Jellyfin has write access to the containing folder.", ex.Message));
+            return Task.FromResult(FixResult.Fail(FixReason.AccessDenied, "Couldn't write " + Path.GetFileName(issue.Path) + " — check that Jellyfin has write access to the containing folder.", ex.Message));
         }
 
         long after;
@@ -185,7 +185,7 @@ public sealed class SubtitleFontFixer : IFixer
             string.IsNullOrEmpty(forceFont) ? string.Empty : " and forced font \"" + forceFont + "\"",
             freed);
 
-        return Task.FromResult(new FixResult { Success = true, Message = msg, BytesFreed = freed });
+        return Task.FromResult(new FixResult { Success = true, Outcome = FixOutcome.Applied, Message = msg, BytesFreed = freed });
     }
 
     private static void TryDelete(string path)

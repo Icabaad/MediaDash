@@ -1,0 +1,66 @@
+/*
+ * ERRORS
+ *
+ * Errors: card-family accents on #mdErrorList, mdScanState transient status, Phase B Errors tab.
+ *
+ * Served via /MediaDash/Asset/errors.css by Api/PluginAssetController.cs
+ * (whitelist entry "errors.css"). Extracted in 06-FOLLOWUP-3-bulk-2 from
+ * configPage.html — ranges 783-807, 2474-2501 of the original inline <style> block
+ * (pre-06-FOLLOWUP-3-bulk-1 line numbers, post-jump.css state). Move is
+ * verbatim; comment headers preserved; @media blocks travel with their
+ * default-scheme counterparts so the pairing survives the split.
+ */
+
+/* Errors card family accents. */
+#MediaDashConfigPage #mdErrorList > .mdCard {
+    border-left: 4px solid var(--md-error-accent, var(--md-error));
+    margin-bottom: 12px;
+}
+#MediaDashConfigPage #mdErrorList > .mdCard[data-family="fixrun"] { --md-error-accent: #ef4444; }
+#MediaDashConfigPage #mdErrorList > .mdCard[data-family="recycle"] { --md-error-accent: #ec4899; }
+#MediaDashConfigPage #mdErrorList > .mdCard[data-family="filebrowser"] { --md-error-accent: #64748b; }
+
+/* "Last scan …" is already in the masthead. Hide the redundant mdScanState line
+   unless it's showing a transient scan/fix status (mdScanBusy class toggled by JS). */
+#MediaDashConfigPage #mdScanState {
+    display: none;
+}
+#MediaDashConfigPage #mdScanState.mdScanBusy {
+    display: block;
+    font: 600 13px 'IBM Plex Mono', monospace;
+    color: var(--md-ink);
+    padding: 12px 20px;
+    background: var(--md-inner);
+    border: 1px solid var(--md-border-inner);
+    border-radius: 12px;
+    margin-top: 16px;
+}
+
+
+/* ── Phase B: Errors tab ──────────────────────────────────────
+   Family-coloured 4px LEFT accent, 40px tinted disc, mono error prefix chip. */
+#MediaDashConfigPage #mdErrorList > * {
+    margin-bottom: 12px;
+}
+#MediaDashConfigPage #mdErrorsRefresh,
+#MediaDashConfigPage #mdErrorsCopy,
+#MediaDashConfigPage #mdBinRefresh,
+#MediaDashConfigPage #mdFileUp,
+#MediaDashConfigPage #mdFileRefresh,
+#MediaDashConfigPage #mdFileMkdir {
+    background: var(--md-neutral) !important;
+    border: 1px solid var(--md-border-btn) !important;
+    color: var(--md-ink) !important;
+    border-radius: 999px !important;
+    min-height: 40px;
+    padding: 8px 16px !important;
+}
+#MediaDashConfigPage #mdErrorsRetry {
+    background: var(--md-primary) !important;
+    color: var(--md-primary-ink) !important;
+    border: 0 !important;
+    border-radius: 999px !important;
+    min-height: 40px;
+    padding: 8px 16px !important;
+    font-weight: 700 !important;
+}

@@ -59,11 +59,80 @@ public sealed class TrackFixer : IFixer
         "mov_text", "tx3g", "webvtt"
     };
 
+    // Audio codecs the mp4/mov/ipod muxer accepts under -c copy. Same whitelist rationale as the
+    // subtitle set above — a blacklist misses vendor-specific codec-name aliases and future ffmpeg
+    // codec additions. Bug-pattern audit round 2 (2026-09-19): TranscodeFixer's Quality re-encode
+    // targets whatever container the user picks in Settings; when target=MP4 and source audio is
+    // TrueHD / DTS-HD MA / lossless PCM / bit-perfect FLAC (standard on 4K Blu-ray remuxes),
+    // `-c:a copy` under the mp4 muxer aborts with "codec not currently supported in container"
+    // and the whole re-encode fails. Zero safety net before this list existed — the fix silently
+    // failed every 30 min forever until the user gave up and switched target to MKV.
+    // Whitelist covers the codecs the mp4/ipod muxer handles cleanly across current ffmpeg
+    // releases (7.0+) — aac (universal), mp3, ac3/eac3 (Dolby Digital / +),  alac (Apple lossless
+    // stored natively in mp4), and opus (Jellyfin 10.9+, ffmpeg 4.4+). Everything else — truehd,
+    // dts family, dts-hd-ma, flac (limited support that keeps changing across ffmpeg builds),
+    // pcm_bluray, vorbis, speex, wmav*, ralf — is treated as incompatible.
+
+    // Subtitle codecs the Matroska (mkv/webm) muxer refuses under -c copy. Bug-pattern audit
+    // round 3 (2026-09-19): MKV is permissive — it accepts SRT, ASS/SSA, PGS, DVB, DVD subs — so
+    // this is a short blacklist rather than a whitelist. The two codecs listed are MP4-native
+    // timed-text formats: tx3g is 3GPP text (MP4/mov container native) and mov_text is MP4's
+    // internal timed-text format. MKV has no equivalent tag mapping and ffmpeg's matroska muxer
+    // aborts with "Subtitle codec <name> not supported in Matroska" under -c copy. Used by both
+    // TrackFixer's fold-in for MKV targets AND PlayabilityFixer rung 4's MKV re-encode, so
+    // sub-tracks in that shape drop cleanly instead of failing the whole remux.
+    private static readonly HashSet<string> MkvIncompatibleSubtitleCodecs = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "tx3g", "mov_text"
+    };
+
+    private static readonly HashSet<string> MkvFamilyExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "mkv", "webm"
+    };
+
+    // MPEG-TS family. Bug-pattern audit round 3 (2026-09-19): .ts / .m2ts / .mts sources hit
+    // PlayabilityFixer rung 1's `-map 0 -c copy` and abort with "Subtitle codec 17 is not
+    // supported" when a Blu-ray rip carries `hdmv_pgs_subtitle`. Rung 3's MKV coerce recovers
+    // but resets Jellyfin's watch history for the title. Adding the mpegts-family fold-in lets
+    // rung 1 succeed for the common .ts + PGS case (drop the PGS, keep the container) so the
+    // user's watch position survives the repair.
+    private static readonly HashSet<string> MpegTsFamilyExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "ts", "m2ts", "mts", "mpegts"
+    };
+
+    // Subtitle codecs the mpegts muxer refuses under -c copy. Small blacklist: mpegts natively
+    // supports dvb_subtitle / dvb_teletext only. Everything else (PGS, DVD, tx3g, mov_text,
+    // subrip, ass, ssa) requires transcoding to a supported codec — which `-c copy` won't do,
+    // so we drop them at fold-in time. Bitmap subs (PGS especially) are the common offender.
+    private static readonly HashSet<string> MpegTsIncompatibleSubtitleCodecs = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "hdmv_pgs_subtitle", "pgssub",
+        "dvd_subtitle", "dvdsub",
+        "hdmv_text_subtitle",
+        "mov_text", "tx3g",
+        "subrip", "srt",
+        "ass", "ssa",
+        "webvtt",
+        "xsub",
+        string.Empty
+    };
+
+    /// <summary>The audio codecs the mp4/mov/ipod muxer accepts under <c>-c copy</c>. See the
+    /// leading comment for the field for full rationale (bug-pattern audit round 2).</summary>
+    public static readonly HashSet<string> Mp4CompatibleAudioCodecs = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "aac", "mp3", "ac3", "eac3", "alac", "opus"
+    };
+
     private readonly FfprobeService _ffprobe;
     private readonly FfmpegExecutor _ffmpeg;
     private readonly OutputVerifier _verifier;
     private readonly LibraryGuard _guard;
     private readonly RecycleBin _recycleBin;
+    private readonly VerifiedReplacementService _replacement;
+    private readonly IPluginConfigurationProvider _configProvider;
     private readonly ILibraryMonitor _libraryMonitor;
     private readonly ILogger<TrackFixer> _logger;
 
@@ -74,7 +143,12 @@ public sealed class TrackFixer : IFixer
     /// <param name="ffmpeg">The ffmpeg executor.</param>
     /// <param name="verifier">The output verifier.</param>
     /// <param name="guard">The library path guard.</param>
-    /// <param name="recycleBin">The recycle bin.</param>
+    /// <param name="recycleBin">The recycle bin. Still used for the external subtitle sidecar
+    /// pass (separate effect, produces `AdditionalRecycled` rows for restore); the primary
+    /// source recycle now flows through <see cref="VerifiedReplacementService"/>.</param>
+    /// <param name="replacement">03-C: the shared verify → promote → dispose → commit protocol.</param>
+    /// <param name="configProvider">02-A snapshot provider. Used for the pre-commit policy
+    /// recheck so a dry-run flip mid-remux aborts the commit before touching the source.</param>
     /// <param name="libraryMonitor">Instance of the <see cref="ILibraryMonitor"/> interface.</param>
     /// <param name="logger">The logger.</param>
     public TrackFixer(
@@ -83,6 +157,8 @@ public sealed class TrackFixer : IFixer
         OutputVerifier verifier,
         LibraryGuard guard,
         RecycleBin recycleBin,
+        VerifiedReplacementService replacement,
+        IPluginConfigurationProvider configProvider,
         ILibraryMonitor libraryMonitor,
         ILogger<TrackFixer> logger)
     {
@@ -91,6 +167,8 @@ public sealed class TrackFixer : IFixer
         _verifier = verifier;
         _guard = guard;
         _recycleBin = recycleBin;
+        _replacement = replacement;
+        _configProvider = configProvider;
         _libraryMonitor = libraryMonitor;
         _logger = logger;
     }
@@ -104,18 +182,18 @@ public sealed class TrackFixer : IFixer
         var config = Plugin.Instance!.Configuration;
         if (!File.Exists(issue.Path))
         {
-            return FixResult.Fail("The file no longer exists; re-scan to refresh the list.");
+            return FixResult.Fail(FixReason.SourceMissing, "The file no longer exists; re-scan to refresh the list.");
         }
 
         if (!_guard.IsInsideLibrary(issue.Path))
         {
-            return FixResult.Fail("The file is outside your library folders; MediaDash will not touch it.");
+            return FixResult.Refused(FixReason.OutsideLibrary, "The file is outside your library folders; MediaDash will not touch it.");
         }
 
         var probe = await _ffprobe.ProbeAsync(issue.Path, cancellationToken).ConfigureAwait(false);
         if (probe?.Streams is null || probe.Error is not null)
         {
-            return FixResult.Fail("The file could not be analyzed; it may be broken.");
+            return FixResult.Fail(FixReason.ProbeUnavailable, "The file could not be analyzed; it may be broken.");
         }
 
         var removeIndexes = ComputeRemovableIndexes(probe, issue.Type, config);
@@ -123,7 +201,7 @@ public sealed class TrackFixer : IFixer
 
         if (removeIndexes.Count == 0 && externalFiles.Count == 0)
         {
-            return FixResult.Fail("Nothing to remove any more — the file may have changed since the scan. Re-scan to refresh.");
+            return FixResult.NoChange(FixReason.NothingToRemove, "Nothing to remove any more — the file may have changed since the scan. Re-scan to refresh.");
         }
 
         var originalSize = new FileInfo(issue.Path).Length;
@@ -153,29 +231,29 @@ public sealed class TrackFixer : IFixer
     {
         if (audioIssue.Type != IssueType.AudioLanguage || subtitleIssue.Type != IssueType.SubtitleLanguage)
         {
-            return FixResult.Fail("Combined pass requires exactly one AudioLanguage + one SubtitleLanguage issue.");
+            return FixResult.Refused(FixReason.InvalidCombinedRequest, "Combined pass requires exactly one AudioLanguage + one SubtitleLanguage issue.");
         }
 
         if (!string.Equals(audioIssue.Path, subtitleIssue.Path, StringComparison.OrdinalIgnoreCase))
         {
-            return FixResult.Fail("Combined pass requires both issues to point at the same file.");
+            return FixResult.Refused(FixReason.InvalidCombinedRequest, "Combined pass requires both issues to point at the same file.");
         }
 
         var config = Plugin.Instance!.Configuration;
         if (!File.Exists(audioIssue.Path))
         {
-            return FixResult.Fail("The file no longer exists; re-scan to refresh the list.");
+            return FixResult.Fail(FixReason.SourceMissing, "The file no longer exists; re-scan to refresh the list.");
         }
 
         if (!_guard.IsInsideLibrary(audioIssue.Path))
         {
-            return FixResult.Fail("The file is outside your library folders; MediaDash will not touch it.");
+            return FixResult.Refused(FixReason.OutsideLibrary, "The file is outside your library folders; MediaDash will not touch it.");
         }
 
         var probe = await _ffprobe.ProbeAsync(audioIssue.Path, cancellationToken).ConfigureAwait(false);
         if (probe?.Streams is null || probe.Error is not null)
         {
-            return FixResult.Fail("The file could not be analyzed; it may be broken.");
+            return FixResult.Fail(FixReason.ProbeUnavailable, "The file could not be analyzed; it may be broken.");
         }
 
         // Union of both categories' removeIndexes. Duplicates shouldn't happen (audio and subtitle
@@ -187,7 +265,7 @@ public sealed class TrackFixer : IFixer
 
         if (removeIndexes.Count == 0 && externalFiles.Count == 0)
         {
-            return FixResult.Fail("Nothing to remove any more — the file may have changed since the scan. Re-scan to refresh.");
+            return FixResult.NoChange(FixReason.NothingToRemove, "Nothing to remove any more — the file may have changed since the scan. Re-scan to refresh.");
         }
 
         var originalSize = new FileInfo(audioIssue.Path).Length;
@@ -259,13 +337,21 @@ public sealed class TrackFixer : IFixer
 
         if (removeIndexes.Count > 0)
         {
-            var tempPath = TranscodeFixer.SidecarPath(issue.Path, "tmp", ext);
-            var swapPath = TranscodeFixer.SidecarPath(issue.Path, "new", string.Empty);
-            var drive = RecycleBin.FindDriveForPath(issue.Path);
-            const long safetyMarginBytes = 500L * 1024 * 1024;
-            if (drive is not null && drive.AvailableFreeSpace < originalSize + safetyMarginBytes)
+            // Per-run GUID on both sidecars, matching TranscodeFixer post-P1: a hot-reload leaving
+            // an old ffmpeg mid-remux (past SweepOrphanSidecars' 5-min age guard) mustn't collide
+            // with a fresh run on the same target. Without the token, the fresh run's finally
+            // block below unconditionally File.Delete's tempPath — and if the old run had already
+            // promoted temp→swap and disposed the original, the delete lands on the user's only
+            // remaining copy. Substring keeps "mediadash.tmp" / "mediadash.new" so the sweep and
+            // LibraryGuard sidecar patterns still match for orphan cleanup.
+            var runToken = Guid.NewGuid().ToString("N")[..8];
+            var tempPath = TranscodeFixer.SidecarPath(issue.Path, "tmp." + runToken, ext);
+            // CLAUDE.md safety invariant 5: rebuild fixers require 2× source-size free. Same
+            // temp-alongside-original pattern as TranscodeFixer; fails closed if the drive can't
+            // be resolved.
+            if (!FreeSpaceGuard.HasEnoughFreeSpace(issue.Path, multiplier: 2))
             {
-                return FixResult.Fail("Not enough free disk space to rebuild this file (needs its own size plus about 500 MB free).");
+                return FixResult.Fail(FixReason.InsufficientSpace, "Not enough free disk space to rebuild this file (needs at least twice its own size free on the target drive).");
             }
 
             // Issue #39: users on multi-language Blu-ray remuxes (Breaking Bad 3xRus / Ger dubs,
@@ -297,17 +383,16 @@ public sealed class TrackFixer : IFixer
                 args.Add("-0:d");
             }
 
-            args.AddRange(["-c", "copy", "-avoid_negative_ts", "make_zero", tempPath]);
+            // R09 (2026-09-20): sidecar output tail is `.mediaDash.tmp` — pass -f explicitly.
+            // Track remux keeps the source container, so use the source ext as target format.
+            args.AddRange(["-c", "copy", "-avoid_negative_ts", "make_zero", "-f", TranscodeFixer.ContainerToFfmpegFormat(ext), tempPath]);
 
-            var originalDisposed = false;
-            var swapCompleted = false;
-            // F-202 / issue #31: capture source timestamps BEFORE any ffmpeg / move / recycle
-            // touches the file. Jellyfin's Recently Added widget sorts by DateModified — a
-            // fixer that bumps it treats every housekeeping rewrite as "newly added" and
-            // pollutes the row. Restore the source stamps after the final swap succeeds.
-            var srcInfo = new FileInfo(issue.Path);
-            var srcCreatedUtc = srcInfo.Exists ? srcInfo.CreationTimeUtc : DateTime.UtcNow;
-            var srcModifiedUtc = srcInfo.Exists ? srcInfo.LastWriteTimeUtc : DateTime.UtcNow;
+            // 03-C: capture source identity BEFORE ffmpeg runs so the pre-commit recheck can
+            // refuse a stale-source mutation. Length + mtime, not cryptographic identity.
+            var srcInfoForRequest = new FileInfo(issue.Path);
+            var expectedSourceLength = srcInfoForRequest.Exists ? srcInfoForRequest.Length : 0;
+            var expectedSourceMtimeTicks = srcInfoForRequest.Exists ? srcInfoForRequest.LastWriteTimeUtc.Ticks : 0;
+
             try
             {
                 // First pass suppresses the Ffmpeg.Timeout diagnostic: hitting the 30-min cap on a large
@@ -323,59 +408,72 @@ public sealed class TrackFixer : IFixer
 
                 if (error is not null)
                 {
-                    return FixResult.Fail("Rebuilding the file failed; the original is untouched. Details: " + TranscodeFixer.Truncate(error));
+                    return FixResult.Fail(FixReason.ProcessFailed, "Rebuilding the file failed; the original is untouched. Details: " + TranscodeFixer.Truncate(error));
                 }
 
                 var verifyError = await _verifier.VerifyAsync(probe, issue.Path, tempPath, cancellationToken).ConfigureAwait(false);
                 if (verifyError is not null)
                 {
-                    return FixResult.Fail("The rebuilt file failed verification; the original is untouched. Details: " + verifyError);
+                    return FixResult.Fail(FixReason.VerificationFailed, "The rebuilt file failed verification; the original is untouched. Details: " + verifyError);
                 }
 
-                // Move verified rebuild to a sidecar first, then dispose the original, then rename.
-                // Old order deleted the original before the move — a throw in File.Move plus the finally's
-                // temp cleanup left the user with nothing.
-                if (File.Exists(swapPath))
+                // 03-C: hand the verified remux to VerifiedReplacementService. Same-path swap
+                // (destination == source) — TrackFixer only ever rebuilds in place. External
+                // sidecar loop below is a separate effect (own `AdditionalRecycled` bookkeeping).
+                var request = new ReplacementRequest(
+                    SourcePath: issue.Path,
+                    OutputPath: tempPath,
+                    DestinationPath: issue.Path,
+                    ExpectedSourceLength: expectedSourceLength,
+                    ExpectedSourceMtimeUtcTicks: expectedSourceMtimeTicks,
+                    RecycleOriginal: disposal == DisposalMethod.RecycleBin,
+                    PreserveSourceTimestamps: true);
+
+                var replacementResult = await _replacement.ReplaceAsync(
+                    request,
+                    verifyOutput: _ => Task.FromResult<string?>(null),
+                    checkCurrentPolicy: () =>
+                    {
+                        var currentConfig = _configProvider.GetSnapshot();
+                        if (currentConfig.DryRun)
+                        {
+                            return PolicyDecision.Refuse(FixReason.TypeDisabled);
+                        }
+
+                        return PolicyDecision.Allow;
+                    },
+                    cancellationToken).ConfigureAwait(false);
+
+                if (!replacementResult.Applied)
                 {
-                    File.Delete(swapPath);
+                    if (replacementResult.Reason == FixReason.RecoveryRequired && replacementResult.RecoveryPath is not null)
+                    {
+                        Api.Diagnostics.Record(
+                            "Track.SwapAborted",
+                            "Track remux of '" + issue.Path + "' completed but the final rename failed. The rebuilt copy is preserved at '" + replacementResult.RecoveryPath + "' — rename it manually to '" + issue.Path + "'. Do NOT delete this file; it is currently your only copy of the content.");
+                        return FixResult.Fail(FixReason.RecoveryRequired, "The rebuilt copy is preserved at '" + replacementResult.RecoveryPath + "'; rename it to '" + issue.Path + "' manually. The original is no longer at its previous location.", replacementResult.TechnicalDetail);
+                    }
+
+                    if (replacementResult.Reason == FixReason.SourceChanged)
+                    {
+                        return FixResult.Fail(FixReason.SourceChanged, "The source file changed while it was being rebuilt; the rebuilt copy was discarded and the changed source was preserved.", replacementResult.TechnicalDetail);
+                    }
+
+                    if (replacementResult.Reason == FixReason.Cancelled)
+                    {
+                        return FixResult.Fail(FixReason.Cancelled, "Track rebuild was cancelled; the original is untouched.", replacementResult.TechnicalDetail);
+                    }
+
+                    return FixResult.Fail(replacementResult.Reason, "Track rebuild could not be committed: " + (replacementResult.TechnicalDetail ?? replacementResult.Reason.ToString()), replacementResult.TechnicalDetail);
                 }
 
-                File.Move(tempPath, swapPath);
-
-                if (disposal == DisposalMethod.RecycleBin)
-                {
-                    recyclePath = _recycleBin.MoveToBin(issue.Path);
-                }
-                else if (File.Exists(issue.Path))
-                {
-                    File.Delete(issue.Path);
-                }
-
-                originalDisposed = true;
-                File.Move(swapPath, issue.Path);
-                // F-202 / issue #31: restore source stamps on the new file. Do this AFTER the
-                // Move settles — setting stamps before the move loses them on some filesystems
-                // (SetFileInformationByHandle vs rename semantics).
-                try
-                {
-                    File.SetCreationTimeUtc(issue.Path, srcCreatedUtc);
-                    File.SetLastWriteTimeUtc(issue.Path, srcModifiedUtc);
-                }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-                {
-                    // Non-fatal: users on network shares / restricted-perms mounts sometimes can't
-                    // set file times — Linux `utimensat(2)` returns EPERM which surfaces as
-                    // UnauthorizedAccessException, NOT IOException (GitHub #59). Log the drift so
-                    // Jellyfin's Recently Added anomaly is traceable, don't fail the fix — the
-                    // file is already rebuilt and swapped by the time this runs.
-                    _logger.LogInformation("TrackFixer: could not restore source timestamps on '{Path}': {Message}", issue.Path, ex.Message);
-                }
-
-                swapCompleted = true;
+                recyclePath = replacementResult.RecyclePath;
                 freed += originalSize - new FileInfo(issue.Path).Length;
             }
             finally
             {
+                // Service takes ownership of tempPath once it promotes; on any pre-promote refusal
+                // tempPath stays where ffmpeg wrote it and this finally cleans it up.
                 if (File.Exists(tempPath))
                 {
                     try
@@ -385,27 +483,6 @@ public sealed class TrackFixer : IFixer
                     catch (IOException ex)
                     {
                         _logger.LogWarning(ex, "Could not delete temp remux file {Path}", tempPath);
-                    }
-                }
-
-                if (!swapCompleted && File.Exists(swapPath))
-                {
-                    if (originalDisposed)
-                    {
-                        Api.Diagnostics.Record(
-                            "Track.SwapAborted",
-                            "Track remux of '" + issue.Path + "' completed but the final rename failed. The rebuilt copy is preserved at '" + swapPath + "' — rename it manually to '" + issue.Path + "'. Do NOT delete this file; it is currently your only copy of the content.");
-                    }
-                    else
-                    {
-                        try
-                        {
-                            File.Delete(swapPath);
-                        }
-                        catch (IOException ex)
-                        {
-                            _logger.LogWarning(ex, "Could not delete swap sidecar {Path}", swapPath);
-                        }
                     }
                 }
             }
@@ -463,6 +540,7 @@ public sealed class TrackFixer : IFixer
         return new FixResult
         {
             Success = true,
+            Outcome = FixOutcome.Applied,
             Message = actionText,
             BytesFreed = Math.Max(0, freed),
             RecyclePath = recyclePath,
@@ -539,15 +617,41 @@ public sealed class TrackFixer : IFixer
     public static IReadOnlyList<FfprobeStreamInfo> ComputeMuxerIncompatibleSubtitleStreams(FfprobeData probe, string ext)
     {
         var normalized = (ext ?? string.Empty).TrimStart('.');
-        if (!Mp4FamilyExtensions.Contains(normalized) || probe.Streams is null)
+        if (probe.Streams is null)
         {
             return Array.Empty<FfprobeStreamInfo>();
         }
 
-        return probe.Streams
-            .Where(s => string.Equals(s.CodecType, "subtitle", StringComparison.OrdinalIgnoreCase)
-                && !Mp4CompatibleSubtitleCodecs.Contains(s.CodecName ?? string.Empty))
-            .ToList();
+        // Bug-pattern audit round 3 (2026-09-19): MKV target used to fall through here as
+        // "no incompatible subs" and PlayabilityFixer rung 4 + TrackFixer both hit ffmpeg's
+        // "Subtitle codec tx3g not supported in Matroska" mid-encode. MP4 stays on the
+        // whitelist (short list of what works); MKV uses the blacklist (short list of what
+        // doesn't) — different shapes, same predicate contract.
+        if (Mp4FamilyExtensions.Contains(normalized))
+        {
+            return probe.Streams
+                .Where(s => string.Equals(s.CodecType, "subtitle", StringComparison.OrdinalIgnoreCase)
+                    && !Mp4CompatibleSubtitleCodecs.Contains(s.CodecName ?? string.Empty))
+                .ToList();
+        }
+
+        if (MkvFamilyExtensions.Contains(normalized))
+        {
+            return probe.Streams
+                .Where(s => string.Equals(s.CodecType, "subtitle", StringComparison.OrdinalIgnoreCase)
+                    && MkvIncompatibleSubtitleCodecs.Contains(s.CodecName ?? string.Empty))
+                .ToList();
+        }
+
+        if (MpegTsFamilyExtensions.Contains(normalized))
+        {
+            return probe.Streams
+                .Where(s => string.Equals(s.CodecType, "subtitle", StringComparison.OrdinalIgnoreCase)
+                    && MpegTsIncompatibleSubtitleCodecs.Contains(s.CodecName ?? string.Empty))
+                .ToList();
+        }
+
+        return Array.Empty<FfprobeStreamInfo>();
     }
 
     /// <summary>
@@ -560,21 +664,53 @@ public sealed class TrackFixer : IFixer
     public static IReadOnlyList<int> ComputeMuxerIncompatibleSubtitleIndexes(FfprobeData probe, string ext)
         => ComputeMuxerIncompatibleSubtitleStreams(probe, ext).Select(s => s.Index).ToList();
 
-    private static List<string> GetExternalFiles(string detailsJson)
+    /// <summary>
+    /// Returns the first audio-codec name the mp4/mov/ipod muxer would reject under <c>-c copy</c>
+    /// for the given target extension. Callers use this as a pre-flight so TranscodeFixer can
+    /// refuse a Quality re-encode to MP4 cleanly BEFORE ffmpeg is invoked, instead of failing
+    /// mid-encode with a raw muxer error. Returns null for non-MP4 targets and for MP4 targets
+    /// where every audio codec is on the compatible list. Bug-pattern audit round 2 (2026-09-19).
+    /// </summary>
+    /// <param name="probe">The ffprobe result.</param>
+    /// <param name="ext">The target extension (with or without leading dot).</param>
+    /// <returns>The offending codec name (e.g. "truehd", "dts", "flac"), or null when the target
+    /// isn't MP4-family or all audio codecs would survive <c>-c copy</c>.</returns>
+    public static string? FirstMp4IncompatibleAudioCodec(FfprobeData probe, string ext)
     {
-        try
+        var normalized = (ext ?? string.Empty).TrimStart('.');
+        if (!Mp4FamilyExtensions.Contains(normalized) || probe.Streams is null)
         {
-            using var details = JsonDocument.Parse(detailsJson);
-            if (details.RootElement.TryGetProperty("externalFiles", out var files) && files.ValueKind == JsonValueKind.Array)
-            {
-                return files.EnumerateArray().Select(f => f.GetString()).Where(f => !string.IsNullOrEmpty(f)).Select(f => f!).ToList();
-            }
-        }
-        catch (JsonException)
-        {
+            return null;
         }
 
-        return [];
+        foreach (var stream in probe.Streams)
+        {
+            if (string.Equals(stream.CodecType, "audio", StringComparison.OrdinalIgnoreCase)
+                && !Mp4CompatibleAudioCodecs.Contains(stream.CodecName ?? string.Empty))
+            {
+                return string.IsNullOrEmpty(stream.CodecName) ? "unknown" : stream.CodecName;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Exposes the MP4-family extension set so sibling fixers can gate MP4-only logic
+    /// without duplicating the constant. Bug-pattern audit round 2 (2026-09-19).</summary>
+    /// <param name="ext">The target extension (with or without leading dot).</param>
+    /// <returns>True when the extension is one of the mp4/mov/ipod-family containers.</returns>
+    public static bool IsMp4FamilyExtension(string ext)
+        => Mp4FamilyExtensions.Contains((ext ?? string.Empty).TrimStart('.'));
+
+    // 01-C: routes through IssueDetailsReader so a non-object root or wrong-typed
+    // externalFiles field returns an empty list rather than partially parsing. Parsing
+    // success is not authorization — every downstream external-file operation still runs
+    // through IsSelfReferentialSubtitle + LibraryGuard.
+    private static List<string> GetExternalFiles(string detailsJson)
+    {
+        return IssueDetailsReader.TryReadSubtitleCleanup(detailsJson, out var details) && details is not null
+            ? new List<string>(details.ExternalFiles)
+            : new List<string>();
     }
 
     private static string BuildActionText(Issue issue, int embeddedCount, int externalCount, DisposalMethod disposal)

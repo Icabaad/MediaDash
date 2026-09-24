@@ -1,0 +1,14 @@
+/*
+ * Accessibility overrides. Served via /MediaDash/Asset/a11y.css by
+ * Api/PluginAssetController.cs (whitelist entry "a11y.css"). See package-06
+ * follow-up (3): CSS split smoke test — this file is the first physical
+ * <link href> to prove the pipeline before the bulk 2803-line style-block
+ * move. If the link fails to load, keyboard focus on the Settings "Save
+ * changes" pill degrades to no visible outline (the pre-06-FOLLOWUP-4
+ * state) — the UI stays functional, the a11y affordance regresses.
+ */
+
+#MediaDashConfigPage .mdSetSaveTop:focus-visible {
+    outline: 2px solid var(--md-primary) !important;
+    outline-offset: 2px;
+}

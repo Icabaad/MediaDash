@@ -11,6 +11,7 @@ namespace Jellyfin.Plugin.MediaDash.Tests;
 
 // Field-report spec §3.3 + §10 step 2. FileHasher + file_hashes round-trip; cache should
 // short-circuit the second call so no re-read happens after we've moved the file's bytes.
+[Collection("MediaDashDb")]
 public sealed class FileHasherTests
 {
     [Fact]
@@ -22,7 +23,7 @@ public sealed class FileHasherTests
         {
             File.WriteAllBytes(filePath, Encoding.UTF8.GetBytes("hello world"));
             var db = new MediaDashDb(dbPath);
-            var hasher = new FileHasher(db, NullLogger<FileHasher>.Instance);
+            var hasher = new FileHasher(db.Probes, NullLogger<FileHasher>.Instance);
 
             var hash1 = await hasher.HashAsync(filePath, CancellationToken.None);
             Assert.NotNull(hash1);
@@ -62,7 +63,7 @@ public sealed class FileHasherTests
         {
             File.WriteAllBytes(filePath, Encoding.UTF8.GetBytes("alpha"));
             var db = new MediaDashDb(dbPath);
-            var hasher = new FileHasher(db, NullLogger<FileHasher>.Instance);
+            var hasher = new FileHasher(db.Probes, NullLogger<FileHasher>.Instance);
 
             var first = await hasher.HashAsync(filePath, CancellationToken.None);
             Assert.NotNull(first);
@@ -97,7 +98,7 @@ public sealed class FileHasherTests
         try
         {
             var db = new MediaDashDb(dbPath);
-            var hasher = new FileHasher(db, NullLogger<FileHasher>.Instance);
+            var hasher = new FileHasher(db.Probes, NullLogger<FileHasher>.Instance);
             var result = await hasher.HashAsync(Path.Combine(Path.GetTempPath(), "definitely-does-not-exist-" + Path.GetRandomFileName()), CancellationToken.None);
             Assert.Null(result);
         }

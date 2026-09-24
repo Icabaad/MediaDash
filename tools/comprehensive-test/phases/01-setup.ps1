@@ -84,9 +84,13 @@ function Invoke-Phase-Setup {
         # DryRun ON, no window, no pause. Language allow-lists set to ["eng"] so
         # Multi Audio (fra/deu) and Sub Heavy (fra/deu subs) trigger.
         # Trickplay threshold lowered so the padded fixture (~11 MB) triggers.
-        # FixMode fields NOT touched — defaults are DetectOnly which is what
-        # scanners need. (Touching EmbeddedCoverFixMode via PATCH triggers 500
-        # from the JSON binder — see GH-TBD.)
+        # ManualApprove is the serialized enum name. DetectOnly refuses approved
+        # fixes, while Automatic can consume fixtures before their assertions.
+        $manualModes = @{}
+        (Get-MediaDashConfig).PSObject.Properties | Where-Object Name -Like '*FixMode' | ForEach-Object {
+            $manualModes[$_.Name] = 'ManualApprove'
+        }
+        Set-MediaDashConfig $manualModes
         Set-MediaDashConfig @{
             DryRun = $true
             PauseDuringPlayback = $false
@@ -99,7 +103,7 @@ function Invoke-Phase-Setup {
             # Default is 100 MB — filters out samples/trailers/extras. Our fixtures
             # are short synthetic clips (30-50 MB); lower to 10 so QualityScanner
             # actually looks at them.
-            MinScanFileSizeMb = 10
+            MinScanFileSizeMb = 0
         }
         $cfg = Get-MediaDashConfig
         Assert-Equal $true $cfg.DryRun "DryRun should be ON"
@@ -111,8 +115,22 @@ function Invoke-Phase-Setup {
         # already has a Queued or Dismissed row. Without this reset, previous runs'
         # approved/dismissed issues silently suppress current-run detection on the same
         # fixtures — scanner tests then find 0 issues even though the scanner ran.
+        #
+        # ConfigChangeRescanner (hosted service, plan §04) subscribes to ConfigurationChanged
+        # and schedules a debounced (750ms) targeted rescan when the language allowlists /
+        # thresholds change. The prior "Set safe defaults" test just wrote those fields, so
+        # a rescan is queued. Wait for that rescan to fully drain (start + finish) BEFORE
+        # Reset — otherwise Reset wipes the DB mid-scan and races the rescanner's writes.
+        # Poll IsScanning true→false with a small ceiling; the rescanner's scan on 103 movies
+        # typically completes in < 15s under DetectOnly modes.
+        $rescanTimeout = [DateTime]::UtcNow.AddSeconds(30)
+        while ([DateTime]::UtcNow -lt $rescanTimeout) {
+            $s = Invoke-JfApi -Method GET -Path "/MediaDash/Status"
+            if (-not $s.IsScanning) { break }
+            Start-Sleep -Milliseconds 500
+        }
         Invoke-JfApi -Method POST -Path "/MediaDash/Reset" -IgnoreErrors | Out-Null
-        Start-Sleep -Seconds 1
+        Start-Sleep -Milliseconds 500
     }
 
     Invoke-Test "First MediaDash scan completes and produces issues" {

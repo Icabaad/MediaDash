@@ -365,23 +365,13 @@ public sealed partial class MediaSorterScanner : IScanner
             return label + " target folder '" + normalized + "' is not inside any Jellyfin library. MediaDash will not move files outside your libraries — set it under one of the folders in Dashboard → Libraries.";
         }
 
-        // Real permission check: try to create-and-delete a probe file. Property flags on Windows lie about
-        // write permission (ReadOnly attribute vs. ACLs) and Linux modes vary; only an actual write is honest.
-        try
-        {
-            var probe = Path.Combine(normalized, ".mediadash-write-probe-" + Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture));
-            File.WriteAllBytes(probe, []);
-            File.Delete(probe);
-        }
-        catch (UnauthorizedAccessException)
-        {
-            return "Jellyfin cannot write to the " + label + " target folder '" + normalized + "'. Grant the user Jellyfin runs as (typically 'jellyfin' on Linux) read+write permission on that folder.";
-        }
-        catch (IOException ex)
-        {
-            return label + " target folder '" + normalized + "' is not writable: " + ex.Message;
-        }
-
+        // MD-009: scans must not mutate library contents. Removed the write-probe (CreateFile +
+        // Delete) that used to run on every scan of every configured target — it violated the
+        // global dry-run/no-local-change guarantee and could leave a `.mediadash-write-probe-*`
+        // orphan behind if the process crashed between the two calls. The real write happens in
+        // MediaSorterFixer during a fix run, which reports permission failures with a specific
+        // per-file error. Users with a broken target now see the file-move failure at fix time
+        // instead of a scan-time probe leak.
         return null;
     }
 

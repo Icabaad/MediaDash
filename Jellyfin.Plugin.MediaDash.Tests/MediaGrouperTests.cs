@@ -34,6 +34,36 @@ public class MediaGrouperTests
     }
 
     [Theory]
+    // Bug-pattern audit round 3 (2026-09-19) — the two-arg overload reports whether a NON-YEAR
+    // sequel marker was removed. This signal is what lets EmitMovieGroupIssues distinguish
+    // franchise sequels (collapse) from same-title remakes (split by production year). Year-only
+    // strip does not count.
+    [InlineData("Iron Man 2", true)]                                   // trailing digit
+    [InlineData("Iron Man III", true)]                                 // roman
+    [InlineData("Kill Bill Vol. 1", true)]                             // "Vol. 1" reads as trailing num
+    [InlineData("The Lord of the Rings: The Fellowship", true)]        // colon subtitle
+    [InlineData("Blade Runner (1982)", false)]                         // year only — solo movie
+    [InlineData("The Thing (2011)", false)]                            // year only — a REMAKE
+    [InlineData("Fright Night [1985]", false)]                         // year in brackets, still year-only
+    [InlineData("Halloween", false)]                                   // no marker at all
+    [InlineData("Toy Story 3 (2010)", true)]                           // number + year → sequel wins
+    public void StripFranchiseSuffix_TwoArg_ReportsSequelMarker(string input, bool expectSequel)
+    {
+        MediaGrouperScanner.StripFranchiseSuffix(input, out var had);
+        Assert.Equal(expectSequel, had);
+    }
+
+    [Fact]
+    public void StripFranchiseSuffix_TwoArg_MatchesSingleArgStem()
+    {
+        // Regression guard: the two-arg overload must return the same stem as the single-arg
+        // path so existing callers see no behavior change beyond the new signal.
+        var oneArg = MediaGrouperScanner.StripFranchiseSuffix("The Godfather Part II (1974)");
+        var twoArg = MediaGrouperScanner.StripFranchiseSuffix("The Godfather Part II (1974)", out _);
+        Assert.Equal(oneArg, twoArg);
+    }
+
+    [Theory]
     [InlineData("My.Show.S01E08.1080p", "My.Show")]
     [InlineData("The Office S03E14", "The Office")]
     [InlineData("Some Show - 2x05 - Episode Title", "Some Show")]

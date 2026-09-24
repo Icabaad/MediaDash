@@ -20,19 +20,19 @@ public sealed class FfprobeService
     private static readonly JsonSerializerOptions JsonOptions = new();
 
     private readonly IMediaEncoder _mediaEncoder;
-    private readonly MediaDashDb _db;
+    private readonly ProbeCacheStore _probes;
     private readonly ILogger<FfprobeService> _logger;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="FfprobeService"/> class.
     /// </summary>
     /// <param name="mediaEncoder">Instance of the <see cref="IMediaEncoder"/> interface, used to locate the server's bundled ffprobe.</param>
-    /// <param name="db">The plugin database for probe caching.</param>
+    /// <param name="probes">Probe-cache store (05-C.4) — backs probe_cache and decode_cache.</param>
     /// <param name="logger">Instance of the <see cref="ILogger{FfprobeService}"/> interface.</param>
-    public FfprobeService(IMediaEncoder mediaEncoder, MediaDashDb db, ILogger<FfprobeService> logger)
+    public FfprobeService(IMediaEncoder mediaEncoder, ProbeCacheStore probes, ILogger<FfprobeService> logger)
     {
         _mediaEncoder = mediaEncoder;
-        _db = db;
+        _probes = probes;
         _logger = logger;
     }
 
@@ -56,7 +56,7 @@ public sealed class FfprobeService
         var size = fileInfo.Length;
         var mtimeTicks = fileInfo.LastWriteTimeUtc.Ticks;
 
-        var cached = _db.GetCachedProbe(path, size, mtimeTicks);
+        var cached = _probes.GetCachedProbe(path, size, mtimeTicks);
         if (cached is not null)
         {
             return Deserialize(cached, path);
@@ -71,7 +71,7 @@ public sealed class FfprobeService
         var data = Deserialize(json, path);
         if (data is not null)
         {
-            _db.StoreProbe(path, size, mtimeTicks, json);
+            _probes.StoreProbe(path, size, mtimeTicks, json);
         }
 
         return data;
@@ -93,7 +93,7 @@ public sealed class FfprobeService
             return null;
         }
 
-        var cached = _db.GetCachedDecode(path, fileInfo.Length, fileInfo.LastWriteTimeUtc.Ticks);
+        var cached = _probes.GetCachedDecode(path, fileInfo.Length, fileInfo.LastWriteTimeUtc.Ticks);
         if (cached is not null)
         {
             return cached.Length == 0 ? null : cached;
@@ -141,7 +141,7 @@ public sealed class FfprobeService
         }
 
         var result = string.IsNullOrWhiteSpace(error) ? null : error;
-        _db.StoreDecode(path, fileInfo.Length, fileInfo.LastWriteTimeUtc.Ticks, result ?? string.Empty);
+        _probes.StoreDecode(path, fileInfo.Length, fileInfo.LastWriteTimeUtc.Ticks, result ?? string.Empty);
         return result;
     }
 

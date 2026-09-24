@@ -27,6 +27,16 @@ public interface IScanner
     bool AlwaysUnscoped => false;
 
     /// <summary>
+    /// Gets the additional issue types this scanner emits alongside <see cref="Type"/> (MD-008).
+    /// Default is none. Multi-type scanners (TranscodeLogScanner produces both HeavyTranscode and
+    /// FailedTranscode) override this so <see cref="ScheduledTasks.ScanTask"/> can (a) run the
+    /// scanner when ANY of its produced types is enabled and (b) group returned issues by
+    /// <c>Issue.Type</c> for independent atomic replacement — otherwise the secondary type's rows
+    /// get misclassified as the primary type and its Off/Detect/Auto mode is silently ignored.
+    /// </summary>
+    IReadOnlyCollection<IssueType> AdditionalTypes => System.Array.Empty<IssueType>();
+
+    /// <summary>
     /// Scans the given library items and returns all detected issues.
     /// </summary>
     /// <param name="items">The media items to inspect.</param>

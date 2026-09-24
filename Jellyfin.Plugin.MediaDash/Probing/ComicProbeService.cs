@@ -23,13 +23,13 @@ public sealed class ComicProbeService
         ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif"
     };
 
-    private readonly MediaDashDb _db;
+    private readonly ProbeCacheStore _probes;
 
     /// <summary>Initializes a new instance of the <see cref="ComicProbeService"/> class.</summary>
-    /// <param name="db">The MediaDash database.</param>
-    public ComicProbeService(MediaDashDb db)
+    /// <param name="probes">Probe-cache store (05-C.4) — backs format_probe_cache.</param>
+    public ComicProbeService(ProbeCacheStore probes)
     {
-        _db = db;
+        _probes = probes;
     }
 
     /// <summary>Probes a comic file, using the format_probe_cache.</summary>
@@ -55,14 +55,14 @@ public sealed class ComicProbeService
             return Task.FromResult(new ComicProbeResult(false, "missing"));
         }
 
-        var cached = _db.GetCachedFormatProbe(path, info.Length, info.LastWriteTimeUtc.Ticks);
+        var cached = _probes.GetCachedFormatProbe(path, info.Length, info.LastWriteTimeUtc.Ticks);
         if (cached is not null)
         {
             return Task.FromResult(new ComicProbeResult(cached.Value.Ok, cached.Value.Reason));
         }
 
         var result = Probe(path);
-        _db.StoreFormatProbe(path, info.Length, info.LastWriteTimeUtc.Ticks, result.Ok, result.Reason);
+        _probes.StoreFormatProbe(path, info.Length, info.LastWriteTimeUtc.Ticks, result.Ok, result.Reason);
         return Task.FromResult(result);
     }
 

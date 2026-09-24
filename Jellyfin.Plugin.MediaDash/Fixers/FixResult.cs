@@ -13,6 +13,20 @@ public sealed class FixResult
     public bool Success { get; set; }
 
     /// <summary>
+    /// Gets or sets the typed classification of what happened. Defaults to
+    /// <see cref="FixOutcome.Unspecified"/> while producers are migrated in 01-B;
+    /// scheduling policy (<see cref="FixResultPolicy"/>) treats Unspecified as
+    /// "unclassified — never impersonate a terminal outcome".
+    /// </summary>
+    internal FixOutcome Outcome { get; set; } = FixOutcome.Unspecified;
+
+    /// <summary>
+    /// Gets or sets the typed reason accompanying <see cref="Outcome"/>. See
+    /// <see cref="FixReason"/>. Defaults to <see cref="FixReason.None"/>.
+    /// </summary>
+    internal FixReason Reason { get; set; } = FixReason.None;
+
+    /// <summary>
     /// Gets or sets the plain-language description of what happened.
     /// </summary>
     public string Message { get; set; } = string.Empty;
@@ -57,7 +71,9 @@ public sealed class FixResult
     public bool WasDryRun { get; set; }
 
     /// <summary>
-    /// Creates a failure result.
+    /// Creates a failure result. Legacy shape used by not-yet-migrated producers — leaves
+    /// <see cref="Outcome"/> at <see cref="FixOutcome.Unspecified"/>. Prefer the typed
+    /// overload <see cref="Fail(FixReason, string, string?)"/> in new/updated code.
     /// </summary>
     /// <param name="message">Why the fix failed (plain language).</param>
     /// <param name="technicalDetail">Raw technical text (ffmpeg stderr, exception message).
@@ -69,7 +85,53 @@ public sealed class FixResult
         => new() { Success = false, Message = message, TechnicalDetail = technicalDetail };
 
     /// <summary>
-    /// Creates a dry-run result describing what would have happened.
+    /// Creates a <see cref="FixOutcome.Failed"/> result tagged with a typed reason. Scheduling
+    /// policy consults <see cref="Reason"/>, not <paramref name="message"/>.
+    /// </summary>
+    /// <param name="reason">Typed classification of why the fix failed.</param>
+    /// <param name="message">Plain-language description (still shown to the user).</param>
+    /// <param name="technicalDetail">Optional raw technical text.</param>
+    /// <returns>The result.</returns>
+    internal static FixResult Fail(FixReason reason, string message, string? technicalDetail = null)
+        => new() { Success = false, Outcome = FixOutcome.Failed, Reason = reason, Message = message, TechnicalDetail = technicalDetail };
+
+    /// <summary>
+    /// Creates a <see cref="FixOutcome.Refused"/> result: a hard precondition failed, so the
+    /// fixer would not act (DRM, LibraryGuard, unsupported format, collision, invalid request).
+    /// </summary>
+    /// <param name="reason">Typed classification of the refusal.</param>
+    /// <param name="message">Plain-language explanation.</param>
+    /// <param name="technicalDetail">Optional raw technical text.</param>
+    /// <returns>The result.</returns>
+    internal static FixResult Refused(FixReason reason, string message, string? technicalDetail = null)
+        => new() { Success = false, Outcome = FixOutcome.Refused, Reason = reason, Message = message, TechnicalDetail = technicalDetail };
+
+    /// <summary>
+    /// Creates a <see cref="FixOutcome.NoChange"/> result: the scanner condition is no longer
+    /// present or nothing needed doing. Not a failure — the queue advances so the retry loop
+    /// stops.
+    /// </summary>
+    /// <param name="reason">Typed classification of the no-op.</param>
+    /// <param name="message">Plain-language explanation.</param>
+    /// <returns>The result.</returns>
+    internal static FixResult NoChange(FixReason reason, string message)
+        => new() { Success = false, Outcome = FixOutcome.NoChange, Reason = reason, Message = message };
+
+    /// <summary>
+    /// Creates a <see cref="FixOutcome.Deferred"/> result: the fixer chose to try again later
+    /// (provider quota, transient contention). Stays queued.
+    /// </summary>
+    /// <param name="reason">Typed classification of the deferral.</param>
+    /// <param name="message">Plain-language explanation.</param>
+    /// <param name="technicalDetail">Optional raw technical text.</param>
+    /// <returns>The result.</returns>
+    internal static FixResult Deferred(FixReason reason, string message, string? technicalDetail = null)
+        => new() { Success = false, Outcome = FixOutcome.Deferred, Reason = reason, Message = message, TechnicalDetail = technicalDetail };
+
+    /// <summary>
+    /// Creates a dry-run result describing what would have happened. Sets
+    /// <see cref="Outcome"/> to <see cref="FixOutcome.Preview"/> so migrated consumers can
+    /// distinguish a successful preview from a real mutation.
     /// </summary>
     /// <param name="message">The planned action.</param>
     /// <param name="bytesFreed">The bytes that would be freed.</param>
@@ -78,6 +140,7 @@ public sealed class FixResult
     {
         Success = true,
         WasDryRun = true,
+        Outcome = FixOutcome.Preview,
         // Field report A10: users read the old "DRY RUN — would have: moved X → Y" and their eye
         // latched onto "moved" past-tense, believing the file actually moved. Lead with the fact
         // that nothing changed so that framing sticks before the action verb arrives.

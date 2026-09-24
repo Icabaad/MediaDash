@@ -1,4 +1,4 @@
-﻿# helpers.ps1 — Jellyfin auth, HTTP wrappers, MediaDash-specific helpers.
+# helpers.ps1 — Jellyfin auth, HTTP wrappers, MediaDash-specific helpers.
 # Consumed via dot-source from run-full-tests.ps1.
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -118,6 +118,14 @@ function Set-MediaDashConfig {
     foreach ($k in $Patch.Keys) { $cfg | Add-Member -MemberType NoteProperty -Name $k -Value $Patch[$k] -Force }
     $json = $cfg | ConvertTo-Json -Depth 10 -Compress
     Invoke-JfApi -Method POST -Path "/Plugins/$($Script:RunState.PluginId.Replace('-',''))/Configuration" -Body $json | Out-Null
+    # ConfigChangeRescanner has a 750ms debounce. Drain it before a subsequent
+    # Reset/manual scan so that a queued config scan cannot invalidate the test.
+    Start-Sleep -Milliseconds 1500
+    Wait-For -TimeoutSec 600 -Description 'configuration rescan to drain' -Predicate {
+        $tasks = Invoke-JfApi -Method GET -Path '/ScheduledTasks'
+        $worker = $tasks | Where-Object Key -eq 'MediaDashScan' | Select-Object -First 1
+        return ($worker -and $worker.State -eq 'Idle')
+    } | Out-Null
 }
 
 function Save-MediaDashConfigSnapshot {
@@ -135,33 +143,43 @@ function Restore-MediaDashConfigSnapshot {
     }
 }
 
+function Start-MediaDashTask {
+    param([string]$Key, [string]$Route, [switch]$Wait, [int]$TimeoutSec)
+    $before = $null
+    if ($Wait) {
+        $before = Wait-For -TimeoutSec $TimeoutSec -Description "$Key to be idle before starting" -Predicate {
+            $tasks = Invoke-JfApi -Method GET -Path '/ScheduledTasks'
+            $worker = $tasks | Where-Object Key -eq $Key | Select-Object -First 1
+            if ($worker -and $worker.State -eq 'Idle') { return $worker }
+            return $false
+        }
+    }
+    Invoke-JfApi -Method POST -Path $Route | Out-Null
+    if ($Wait) {
+        # A fast task may finish between polls. A changed execution timestamp proves it ran;
+        # observing Idle alone does not. Rejected requests and failed executions are failures.
+        $finished = Wait-For -TimeoutSec $TimeoutSec -Description "$Key to complete a new execution" -Predicate {
+            $tasks = Invoke-JfApi -Method GET -Path '/ScheduledTasks'
+            $worker = $tasks | Where-Object Key -eq $Key | Select-Object -First 1
+            if ($worker -and $worker.State -eq 'Idle' -and $worker.LastExecutionResult -and
+                $worker.LastExecutionResult.EndTimeUtc -ne $before.LastExecutionResult.EndTimeUtc) { return $worker }
+            return $false
+        }
+        if ($finished.LastExecutionResult.Status -ne 'Completed') {
+            throw "$Key execution ended with $($finished.LastExecutionResult.Status)"
+        }
+    }
+}
+
 function Start-MediaDashScan {
     param([switch]$Wait, [int]$TimeoutSec = 600)
-    # Endpoint is /MediaDash/Scan (not /Scan/Run) per MediaDashController.cs:335.
-    Invoke-JfApi -Method POST -Path "/MediaDash/Scan" -IgnoreErrors | Out-Null
-    if ($Wait) {
-        # Give the task manager a moment to actually flip IsScanning=true before we start polling
-        Start-Sleep -Milliseconds 500
-        Wait-For -TimeoutSec $TimeoutSec -Description "MediaDash scan to finish" -Predicate {
-            $s = Invoke-JfApi -Method GET -Path "/MediaDash/Status"
-            return (-not $s.IsScanning)
-        } | Out-Null
-    }
+    Start-MediaDashTask -Key 'MediaDashScan' -Route '/MediaDash/Scan' -Wait:$Wait -TimeoutSec $TimeoutSec
 }
 
 function Start-MediaDashFix {
     param([switch]$Wait, [int]$TimeoutSec = 1800)
-    # Endpoint is /MediaDash/Fix (not /Fix/Run) per MediaDashController.cs:435.
-    Invoke-JfApi -Method POST -Path "/MediaDash/Fix" -IgnoreErrors | Out-Null
-    if ($Wait) {
-        Start-Sleep -Milliseconds 500
-        Wait-For -TimeoutSec $TimeoutSec -Description "MediaDash fix run to finish" -Predicate {
-            $s = Invoke-JfApi -Method GET -Path "/MediaDash/Status"
-            return (-not $s.IsFixing)
-        } | Out-Null
-    }
+    Start-MediaDashTask -Key 'MediaDashFix' -Route '/MediaDash/Fix' -Wait:$Wait -TimeoutSec $TimeoutSec
 }
-
 function Get-MediaDashIssues {
     param([string]$Type = $null, [string]$Status = $null)
     $q = @()

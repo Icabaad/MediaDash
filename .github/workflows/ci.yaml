@@ -11,13 +11,62 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: ubuntu-latest
+    strategy:
+      # Do not let one OS silently mask a failure on the other. 00-B fixed the
+      # local harness's false-pass problem; this fixes the CI-level equivalent.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Dashboard lifecycle and regression tests
+        run: node --test tools/comprehensive-test/ui-lifecycle-self-tests.js tools/comprehensive-test/ui-regression-self-tests.js
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
       - name: Build
         run: dotnet build Jellyfin.Plugin.MediaDash.sln --configuration Release
       - name: Test
-        run: dotnet test Jellyfin.Plugin.MediaDash.sln --configuration Release --no-build
+        run: dotnet test Jellyfin.Plugin.MediaDash.sln --configuration Release --no-build --logger "trx;LogFileName=results.trx" --results-directory TestResults/${{ matrix.os }}
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dotnet-test-results-${{ matrix.os }}
+          path: TestResults/${{ matrix.os }}/**/*.trx
+          if-no-files-found: warn
+
+  harness-self-tests:
+    # Runs the PowerShell self-test scripts written in 00-B. They stub network,
+    # browser, and file dependencies so no real Jellyfin is required. Runs on
+    # both OSes because the harness truth-fixes (Get-RunVerdict, phase-id
+    # validation, Assert-SafeLiveTarget) are portable.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Harness self-tests (comprehensive-test)
+        shell: pwsh
+        run: pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools/comprehensive-test/self-tests.ps1
+      - name: Scheduled task wait self-tests
+        shell: pwsh
+        run: pwsh -NoProfile -NonInteractive -File tools/comprehensive-test/task-wait-self-tests.ps1
+
+  validator-self-tests:
+    # Windows-only: validate-outputs.ps1 currently uses `cmd /c` to invoke
+    # ffmpeg with -xerror, which is a Windows-only invocation. Linux port is
+    # tracked separately (not in 00-B scope). Mark this gate Windows-only
+    # rather than silently skipping.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validator self-tests (repair-test)
+        shell: pwsh
+        run: pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools/repair-test/validator-self-tests.ps1

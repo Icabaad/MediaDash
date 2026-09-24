@@ -32,6 +32,28 @@ function Invoke-Browse {
     return @{ Output = ($lines -join "`n"); ExitCode = $LASTEXITCODE }
 }
 
+# Wraps Invoke-Browse so callers that plan to interpret the output are forced
+# to first see a nonzero exit as an assertion failure. Previously a browse
+# binary that exited 1 with body "browser failed" could produce misleading UI
+# assertions because callers only touched .Output.
+function Invoke-BrowseChecked {
+    param([string]$Bin, [string[]]$BrowseArgs, [switch]$AllowEmpty)
+    $r = Invoke-Browse -Bin $Bin -BrowseArgs $BrowseArgs
+    if ($r.ExitCode -ne 0) {
+        throw [TestAssertionFailedException]::new(
+            "browse exited $($r.ExitCode)",
+            "exit 0",
+            "exit $($r.ExitCode); output: $($r.Output)")
+    }
+    if (-not $AllowEmpty -and [string]::IsNullOrWhiteSpace($r.Output)) {
+        throw [TestAssertionFailedException]::new(
+            "browse returned empty output",
+            "non-empty output",
+            "(empty)")
+    }
+    return $r
+}
+
 function Invoke-Phase-Ui {
     Start-Phase "UI — config page + tabs + no JS console errors"
 
@@ -44,29 +66,41 @@ function Invoke-Phase-Ui {
     Write-Log "    using browse: $browse"
 
     Invoke-Test "Login page loads and login succeeds" {
-        Invoke-Browse $browse @("goto", "$($Script:RunState.JellyfinUrl)/web/index.html") | Out-Null
+        # Every browser interaction goes through Invoke-BrowseChecked so a broken
+        # browser (exit 1) can't slip past unnoticed — the wrapper throws
+        # TestAssertionFailedException and Invoke-Test records the FAIL.
+        Invoke-BrowseChecked $browse @("goto", "$($Script:RunState.JellyfinUrl)/web/index.html") -AllowEmpty | Out-Null
         Start-Sleep -Seconds 2
-        Invoke-Browse $browse @("wait", "--networkidle") | Out-Null
+        Invoke-BrowseChecked $browse @("wait", "--networkidle") -AllowEmpty | Out-Null
         # Try login form — Jellyfin sometimes lands directly on home if there's a persisted session
-        $snap = (Invoke-Browse $browse @("snapshot", "-i")).Output
+        $snap = (Invoke-BrowseChecked $browse @("snapshot", "-i")).Output
         if ($snap -match 'textbox.*User') {
-            Invoke-Browse $browse @("fill", "@e1", $Script:RunState.AdminUser) | Out-Null
-            Invoke-Browse $browse @("fill", "@e2", $Script:RunState.AdminPass) | Out-Null
-            Invoke-Browse $browse @("click", "@e4") | Out-Null
+            Invoke-BrowseChecked $browse @("fill", "@e1", $Script:RunState.AdminUser) -AllowEmpty | Out-Null
+            Invoke-BrowseChecked $browse @("fill", "@e2", $Script:RunState.AdminPass) -AllowEmpty | Out-Null
+            Invoke-BrowseChecked $browse @("click", "@e4") -AllowEmpty | Out-Null
             Start-Sleep -Seconds 3
         }
+        # Assert we ended up on an authenticated page (something other than the login form).
+        $post = (Invoke-BrowseChecked $browse @("snapshot", "-i")).Output
+        Assert-True ($post -notmatch 'textbox.*User' -or $post -match 'button.*Sign\s*Out' -or $post -match 'link.*Dashboard') `
+            "after login we should not still be looking at a fresh username textbox"
     }
 
     Invoke-Test "MediaDash config page loads without JS errors" {
-        Invoke-Browse $browse @("goto", "$($Script:RunState.JellyfinUrl)/web/index.html#!/configurationpage?name=MediaDash") | Out-Null
-        Invoke-Browse $browse @("wait", "--networkidle") | Out-Null
+        Invoke-BrowseChecked $browse @("goto", "$($Script:RunState.JellyfinUrl)/web/index.html#!/configurationpage?name=MediaDash") -AllowEmpty | Out-Null
+        Invoke-BrowseChecked $browse @("wait", "--networkidle") -AllowEmpty | Out-Null
         Start-Sleep -Seconds 3
-        $console = (Invoke-Browse $browse @("console", "--errors")).Output
+        $console = (Invoke-BrowseChecked $browse @("console", "--errors") -AllowEmpty).Output
         # Filter out benign warnings — the Jellyfin dashboard emits some third-party console warnings
         $realErrors = $console -split "`n" | Where-Object {
             $_ -match "error" -and
             $_ -notmatch "favicon" -and
-            $_ -notmatch "DevTools"
+            $_ -notmatch "DevTools" -and
+            # Jellyfin core WebSocket handshake to /socket briefly 403s during page load in headless
+            # Chrome (the token isn't accepted for the /socket subprotocol until the auth cookie is
+            # fully populated). Not caused by MediaDash — same error appears on any Jellyfin plugin
+            # config page in headless mode. Filter to keep the assertion trained on MediaDash bugs.
+            $_ -notmatch "WebSocket connection to 'ws://[^']*/socket"
         }
         if ($realErrors.Count -gt 0) {
             Write-Log "    JS console errors:"
@@ -76,35 +110,42 @@ function Invoke-Phase-Ui {
     }
 
     Invoke-Test "MediaDashConfigPage element is present" {
-        $r = (Invoke-Browse $browse @("js", "document.querySelector('#MediaDashConfigPage') ? 'YES' : 'NO'")).Output
+        $r = (Invoke-BrowseChecked $browse @("js", "document.querySelector('#MediaDashConfigPage') ? 'YES' : 'NO'")).Output
         Assert-Match "YES" $r "MediaDashConfigPage container should mount"
     }
 
     Invoke-Test "Overview tab renders and includes system + drive widgets" {
         # Default landing is Overview. Verify key children.
-        $sys = (Invoke-Browse $browse @("js", "document.querySelector('#mdSystem') ? 'YES' : 'NO'")).Output
+        $sys = (Invoke-BrowseChecked $browse @("js", "document.querySelector('#mdSystem') ? 'YES' : 'NO'")).Output
         Assert-Match "YES" $sys "#mdSystem should render"
-        $drives = (Invoke-Browse $browse @("js", "document.querySelector('#mdDrives') ? 'YES' : 'NO'")).Output
+        $drives = (Invoke-BrowseChecked $browse @("js", "document.querySelector('#mdDrives') ? 'YES' : 'NO'")).Output
         Assert-Match "YES" $drives "#mdDrives should render"
     }
 
     Invoke-Test "Library breakdown card renders (or shows empty state gracefully)" {
-        $libHost = (Invoke-Browse $browse @("js", "document.querySelector('#mdLibraryBreakdown') ? 'YES' : 'NO'")).Output
+        $libHost = (Invoke-BrowseChecked $browse @("js", "document.querySelector('#mdLibraryBreakdown') ? 'YES' : 'NO'")).Output
         Assert-Match "YES" $libHost "#mdLibraryBreakdown container should exist"
     }
 
     Invoke-Test "Issues tab is clickable and shows filter chips" {
-        Invoke-Browse $browse @("js", "var b=document.querySelector('[data-tab=issues]');b&&b.click();'ok'") | Out-Null
+        Invoke-BrowseChecked $browse @("js", "var b=document.querySelector('[data-tab=issues]');b&&b.click();'ok'") | Out-Null
         Start-Sleep -Seconds 2
-        $totals = (Invoke-Browse $browse @("js", "document.querySelector('#mdIssueTotals')?document.querySelector('#mdIssueTotals').children.length:0")).Output
+        $totals = (Invoke-BrowseChecked $browse @("js", "document.querySelector('#mdIssueTotals')?document.querySelector('#mdIssueTotals').children.length:0")).Output
         Write-Log "    Issue type chips: $totals"
+        # Assert we actually saw a numeric count from the DOM (nonzero) — previously we
+        # only logged and never asserted, so a browser that returned garbage still passed.
+        Assert-Match '^\s*\d+' $totals "Issues tab should expose #mdIssueTotals children count"
     }
 
     Invoke-Test "Recycle bin tab loads without crash" {
-        Invoke-Browse $browse @("js", "var b=document.querySelector('[data-tab=recycle]');b&&b.click();'ok'") | Out-Null
+        Invoke-BrowseChecked $browse @("js", "var b=document.querySelector('[data-tab=recycle]');b&&b.click();'ok'") | Out-Null
         Start-Sleep -Seconds 2
-        $console = (Invoke-Browse $browse @("console", "--errors")).Output
-        $realErrors = $console -split "`n" | Where-Object { $_ -match "error" -and $_ -notmatch "favicon" }
-        # Snapshot count only — errors on a specific tab are the actual concern
+        $console = (Invoke-BrowseChecked $browse @("console", "--errors") -AllowEmpty).Output
+        $realErrors = $console -split "`n" | Where-Object {
+            $_ -match "error" -and
+            $_ -notmatch "favicon" -and
+            $_ -notmatch "WebSocket connection to 'ws://[^']*/socket"
+        }
+        Assert-Equal 0 $realErrors.Count "Recycle bin tab should not raise JS console errors"
     }
 }

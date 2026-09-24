@@ -48,33 +48,65 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
     public static Plugin? Instance { get; private set; }
 
     /// <summary>
-    /// Gets or sets the path of the file the currently-running scan or fix is working on, or null when idle.
-    /// Read by the /Status endpoint so the dashboard can show what's happening under the progress bar.
-    /// Never a load-bearing field — best-effort human readout only.
+    /// Gets or sets the DI-owned <see cref="ScheduledTasks.RunState"/> instance. Attached by
+    /// <see cref="ScheduledTasks.ScanTask"/> / <see cref="ScheduledTasks.FixTask"/> at construction
+    /// so the legacy <see cref="CurrentActivity"/> / <see cref="ScanScannersDone"/> facades below
+    /// can forward to it without needing to inject a service into every scanner class in the tree
+    /// (<see cref="Scanners.ProbingScannerBase"/> writes <c>CurrentActivity</c> per file).
+    /// Null in unit-test contexts that don't spin up the full DI graph.
     /// </summary>
-    public static string? CurrentActivity { get; set; }
+    internal static ScheduledTasks.RunState? AttachedRunState { get; set; }
 
     /// <summary>
-    /// Gets or sets the display label of the scanner or fixer currently owning <see cref="CurrentActivity"/>
-    /// (e.g. "DuplicateScanner", "TrackFixer"). Rendered next to the path as "{Label} — {Path}" so users
-    /// can see *what* is running, not just what file it's chewing on. Null when idle.
+    /// Gets or sets the DI-owned <see cref="Api.DiagnosticService"/> instance. Attached by
+    /// the service's own constructor (02-C) so the legacy static <see cref="Api.Diagnostics"/>
+    /// facade forwards Record/Attach/Recent/Clear operations to the injected owner. Null before
+    /// the DI graph resolves it (early startup, unit-test contexts) — the static facade holds
+    /// state in its own ring buffer until the first Attach call installs the service.
     /// </summary>
-    public static string? CurrentActivityLabel { get; set; }
+    internal static Api.DiagnosticService? AttachedDiagnosticService { get; set; }
+
+    /// <summary>
+    /// Gets or sets the path of the file the currently-running scan or fix is working on, or null when idle.
+    /// Read by the /Status endpoint so the dashboard can show what's happening under the progress bar.
+    /// 02-A facade: forwards to <see cref="ScheduledTasks.RunState"/>. Writers land on the currently-
+    /// running slot (Fix wins over Scan when both are live); readers aggregate across both slots.
+    /// </summary>
+    public static string? CurrentActivity
+    {
+        get => AttachedRunState?.GetAggregatedCurrentPath();
+        set => AttachedRunState?.SetCurrentPathFromLegacy(value);
+    }
+
+    /// <summary>
+    /// Gets or sets the display label of the scanner or fixer currently owning <see cref="CurrentActivity"/>.
+    /// 02-A facade forwarding to <see cref="ScheduledTasks.RunState"/>.
+    /// </summary>
+    public static string? CurrentActivityLabel
+    {
+        get => AttachedRunState?.GetAggregatedCurrentLabel();
+        set => AttachedRunState?.SetCurrentLabelFromLegacy(value);
+    }
 
     /// <summary>
     /// Gets or sets the number of scanners that have completed in the currently-running scan run,
-    /// or null when idle. Set by <see cref="ScheduledTasks.ScanTask"/> so the dashboard can render
-    /// "N / M scanners done" alongside the progress bar (same shape as fix runs' items ratio).
-    /// Cleared to null at scan end. Best-effort readout only — not load-bearing.
+    /// or null when idle. 02-A facade forwarding to <see cref="ScheduledTasks.RunState"/>.
     /// </summary>
-    public static int? ScanScannersDone { get; set; }
+    public static int? ScanScannersDone
+    {
+        get => AttachedRunState?.GetScanScannersDone();
+        set => AttachedRunState?.SetScanScannersDoneFromLegacy(value);
+    }
 
     /// <summary>
-    /// Gets or sets the total number of scanners that will run in the currently-running scan,
-    /// or null when idle. Captured at scan start after Off-type filtering. Together with
-    /// <see cref="ScanScannersDone"/> drives the client-side "N / M scanners done" caption.
+    /// Gets or sets the total number of scanners that will run in the currently-running scan.
+    /// 02-A facade forwarding to <see cref="ScheduledTasks.RunState"/>.
     /// </summary>
-    public static int? ScanScannersTotal { get; set; }
+    public static int? ScanScannersTotal
+    {
+        get => AttachedRunState?.GetScanScannersTotal();
+        set => AttachedRunState?.SetScanScannersTotalFromLegacy(value);
+    }
 
     /// <summary>
     /// Gets or sets the summary of the most-recently-completed fix run. The dashboard compares

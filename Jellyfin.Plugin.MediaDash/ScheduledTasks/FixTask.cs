@@ -56,63 +56,57 @@ public sealed class FixTask : IScheduledTask
 
     internal static readonly TimeSpan FixInterval = TimeSpan.FromMinutes(30);
 
-    private readonly MediaDashDb _db;
-    private readonly IEnumerable<IFixer> _fixers;
+    private readonly IssueStore _issues;
     private readonly RecycleBin _recycleBin;
     private readonly ISessionManager _sessionManager;
     private readonly Analytics.AnalyticsReporter _analytics;
     private readonly LibraryGuard _libraryGuard;
+    private readonly RunState _runState;
+    private readonly IPluginConfigurationProvider _configProvider;
+    private readonly FixExecutor _executor;
+    private readonly FixResultRecorder _recorder;
     private readonly ILogger<FixTask> _logger;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="FixTask"/> class.
     /// </summary>
-    /// <param name="db">The plugin database.</param>
-    /// <param name="fixers">All registered fixers.</param>
+    /// <param name="issues">Issue-table store (05-C.2). FixTask only touches issues directly; history/queue writes go through the recorder.</param>
     /// <param name="recycleBin">The recycle bin.</param>
     /// <param name="sessionManager">Instance of the <see cref="ISessionManager"/> interface.</param>
     /// <param name="analytics">The opt-in analytics reporter.</param>
     /// <param name="libraryGuard">Library guard, used to enumerate library roots when sweeping orphan sidecars.</param>
+    /// <param name="runState">The shared run-state holder (02-A).</param>
+    /// <param name="configProvider">Configuration snapshot provider (02-A).</param>
+    /// <param name="executor">Per-operation executor (04-C). Owns consent recheck, fixer dispatch, sharing-retry and exception translation.</param>
+    /// <param name="recorder">Transactional history + status recorder (04-B). Executor's output feeds directly into <see cref="FixResultRecorder.Record"/>.</param>
     /// <param name="logger">The logger.</param>
-    public FixTask(MediaDashDb db, IEnumerable<IFixer> fixers, RecycleBin recycleBin, ISessionManager sessionManager, Analytics.AnalyticsReporter analytics, LibraryGuard libraryGuard, ILogger<FixTask> logger)
+    public FixTask(
+        IssueStore issues,
+        RecycleBin recycleBin,
+        ISessionManager sessionManager,
+        Analytics.AnalyticsReporter analytics,
+        LibraryGuard libraryGuard,
+        RunState runState,
+        IPluginConfigurationProvider configProvider,
+        FixExecutor executor,
+        FixResultRecorder recorder,
+        ILogger<FixTask> logger)
     {
-        _db = db;
-        _fixers = fixers;
+        _issues = issues;
         _recycleBin = recycleBin;
         _sessionManager = sessionManager;
         _analytics = analytics;
         _libraryGuard = libraryGuard;
+        _runState = runState;
+        _configProvider = configProvider;
+        _executor = executor;
+        _recorder = recorder;
         _logger = logger;
+        // 02-A: bridge the DI singleton to Plugin.AttachedRunState so the legacy Plugin.CurrentActivity /
+        // ScanScannersDone/Total facades on Plugin.cs reach this same instance. Idempotent — ScanTask
+        // does the same on its own resolution.
+        Plugin.AttachedRunState = runState;
     }
-
-    /// <summary>
-    /// Gets or sets a value indicating whether the next run skips the initial server-idle check.
-    /// Set by the dashboard's "Run fixes now" button — the person clicking it is themselves an active session,
-    /// so the check would otherwise refuse to start. Only affects the first check; the per-file activity check
-    /// still runs so a manual run yields to a viewer that appeared after the run began.
-    /// </summary>
-    internal static bool BypassIdleCheckOnce { get; set; }
-
-    /// <summary>
-    /// Gets or sets a value indicating whether the currently-running manual fix run should ignore per-file
-    /// activity checks. Flipped by the "Ignore activity for this run" button in the dashboard when the user
-    /// wants the queue to drain regardless of viewers. Reset at the start of every run.
-    /// </summary>
-    internal static bool IgnoreActivityForCurrentRun { get; set; }
-
-    /// <summary>
-    /// Gets or sets a human-readable reason the current fix run is paused, or null when the run is not paused.
-    /// Only set on manual runs — scheduled runs still break out of the loop and requeue.
-    /// </summary>
-    internal static string? PauseReason { get; set; }
-
-    /// <summary>
-    /// Gets or sets a value indicating whether we've already emitted the "consider Low system
-    /// impact mode" hint this plugin lifetime. Prevents diagnostic-spam on every mid-run pause
-    /// for a user who already saw the hint. Reset only when the plugin reloads (Jellyfin restart
-    /// / plugin upgrade). Exposed internal so tests can reset it between cases.
-    /// </summary>
-    internal static bool LowImpactHintEmitted { get; set; }
 
     /// <inheritdoc />
     public string Name => I18n.I18nCatalog.GetHtml(System.Globalization.CultureInfo.CurrentUICulture.Name, "task.fix.name", "Apply approved fixes");
@@ -129,11 +123,8 @@ public sealed class FixTask : IScheduledTask
     /// <inheritdoc />
     public async Task ExecuteAsync(IProgress<double> progress, CancellationToken cancellationToken)
     {
-        var config = Plugin.Instance!.Configuration;
-        var isManualRun = BypassIdleCheckOnce;
-        BypassIdleCheckOnce = false;
-        IgnoreActivityForCurrentRun = false;
-        PauseReason = null;
+        var config = _configProvider.GetSnapshot();
+        var isManualRun = _runState.ConsumeBypassIdleCheck(RunRole.Fix);
 
         if (config.PauseDuringPlayback && !isManualRun && IdleCheck.IsServerBusy(_sessionManager))
         {
@@ -142,14 +133,33 @@ public sealed class FixTask : IScheduledTask
             return;
         }
 
+        if (!_runState.TryBegin(RunRole.Fix))
+        {
+            _logger.LogInformation("Skipping fix run: another fix is already running in this process.");
+            progress.Report(100);
+            return;
+        }
+
+        try
+        {
+            await ExecuteFixBodyAsync(config, isManualRun, progress, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _runState.Complete(RunRole.Fix);
+        }
+    }
+
+    private async Task ExecuteFixBodyAsync(PluginConfiguration config, bool isManualRun, IProgress<double> progress, CancellationToken cancellationToken)
+    {
         // Manual-scan review grace. A user who just clicked "Scan" is presumed to be on the Issues
-        // tab actively reviewing. Skip the opportunistic scheduled fix pass while ScanTask says
+        // tab actively reviewing. Skip the opportunistic scheduled fix pass while RunState says
         // the last manual scan is still inside its ten-minute grace, otherwise auto-fix mutates
         // rows out from under the reviewer. isManualRun (explicit "Run fixes now") bypasses —
         // the user's opt-in is a stronger signal than the grace. Scheduled scans don't set the
         // timestamp, so this is a no-op for auto-only users. Producer is ScanTask.ExecuteAsync;
         // shape tests in ScanTaskManualScanGraceTests.
-        if (!isManualRun && ScanTask.ManualScanCompletedUtc is { } lastManualScan)
+        if (!isManualRun && _runState.PeekManualScanCompleted() is { } lastManualScan)
         {
             var elapsed = DateTime.UtcNow - lastManualScan;
             if (elapsed < ScanTask.ManualScanReviewGrace)
@@ -219,7 +229,7 @@ public sealed class FixTask : IScheduledTask
                 Api.Diagnostics.Record("FixTask.RecycleBinFull", msg);
                 if (isManualRun)
                 {
-                    PauseReason = msg;
+                    _runState.SetPauseReason(RunRole.Fix, msg);
                 }
 
                 progress.Report(100);
@@ -237,12 +247,18 @@ public sealed class FixTask : IScheduledTask
             Api.Diagnostics.Record("FixTask.BinVolumeCriticallyFull", floorMsg);
             if (isManualRun)
             {
-                PauseReason = floorMsg;
+                _runState.SetPauseReason(RunRole.Fix, floorMsg);
             }
 
             progress.Report(100);
             return;
         }
+
+        // Track the exact IDs this pass moves from Detected to Queued so the consent rollback below
+        // can revert only auto-queued rows. Any row a user manually approved via /Issues/{id}/Approve
+        // is intentionally absent from this list and stays Queued regardless of its blocking-warning
+        // flags — manual approval is a stronger signal than the type's default mode.
+        var autoQueuedIds = new List<long>();
 
         foreach (var type in FixableTypes)
         {
@@ -276,10 +292,11 @@ public sealed class FixTask : IScheduledTask
                 // Detected so the user can still approve them manually from the Issues tab —
                 // manual approval is a stronger signal than the type's default mode.
                 double? gate = type == Data.IssueType.Duplicate ? config.DuplicateAutoFixConfidence : null;
-                var queued = _db.QueueDetectedIssues(type, gate);
-                if (queued > 0)
+                var justQueued = _issues.QueueDetectedIssues(type, gate);
+                if (justQueued.Count > 0)
                 {
-                    _logger.LogInformation("Auto-queued {Count} {Type} issues", queued, type);
+                    autoQueuedIds.AddRange(justQueued);
+                    _logger.LogInformation("Auto-queued {Count} {Type} issues", justQueued.Count, type);
                 }
             }
         }
@@ -288,8 +305,10 @@ public sealed class FixTask : IScheduledTask
         // for blocking warnings (bitmap-subtitle removals, low-space overrides, etc.), so it
         // over-queues those rows. Revert them here before the fixer picks them up: consent-
         // gated data loss requires an explicit manual Approve from the Issues tab, even when
-        // the type's mode is Automatic. Pairs with Issue.HasBlockingWarnings.
-        var reverted = _db.RollbackAutoQueuedBlockingWarnings();
+        // the type's mode is Automatic. Pairs with Issue.HasBlockingWarnings. Passing the exact
+        // auto-queued ID set makes sure a concurrently-manually-approved blocking-warning row
+        // is NOT swept up by this pass (its ID isn't in the list).
+        var reverted = _issues.RollbackAutoQueuedBlockingWarnings(autoQueuedIds);
         if (reverted > 0)
         {
             _logger.LogInformation(
@@ -308,13 +327,58 @@ public sealed class FixTask : IScheduledTask
         // TrickplayOptimize last because BIF must match the final video).
         // Tiebreaker: smallest files first so early re-encodes free disk space for the bigger ones
         // behind them. Missing files sort to the front (size 0) so they fail fast.
-        var allQueued = _db.GetIssues(status: IssueStatus.Queued).ToList();
+        var allQueued = _issues.GetIssues(status: IssueStatus.Queued).ToList();
         var offCount = allQueued.Count(i => config.GetFixMode(i.Type) == FixMode.Off);
+        // Per-fixer disable list from the "Fix order" dialog (icon next to the up/down arrows).
+        // Independent of FixMode: the scanner still runs and the row still surfaces on Issues,
+        // but the fixer skips this type until the user re-enables it (or Reset to default clears
+        // the whole list). String-compared against the enum name; unknown entries no-op.
+        var disabled = config.FixerDisabled ?? Array.Empty<string>();
+        // Scope the queue to the currently-enabled libraries — an issue that was approved while its
+        // library was ticked, then had its library unticked in Settings, must NOT be fixed. Without
+        // this the fix loop would run against the old scope and mutate files the user has since
+        // told MediaDash to leave alone. Empty EnabledLibraries falls back to "every library"
+        // (same convention as scanners), so the common all-libraries case still passes through.
+        // Pattern mirrors ScanTask's item-scoping block; the location prefixes already end with a
+        // separator so StartsWith is a boundary match, not a prefix collision.
+        var enabledLocations = _libraryGuard.GetEnabledLibraryLocations(config.EnabledLibraries);
+        // 02-B: unified type-level gate via FixPolicyEvaluator. Every queued row already carries
+        // an explicit user Approve (that's what Queued *means* here — auto-queued rows arrived
+        // through QueueDetectedIssues, which respects restored_paths at the DB layer, so a
+        // Scheduled intent here is equivalent to Approved for policy purposes). Library scope
+        // still checked separately because IsInEnabledLocations is the shared guard.
         var queue = allQueued
-            .Where(i => config.GetFixMode(i.Type) != FixMode.Off)
+            .Where(i => LibraryGuard.IsInEnabledLocations(i.Path, enabledLocations))
+            .Where(i => FixPolicyEvaluator.Evaluate(
+                config,
+                i.Type,
+                i.Status,
+                FixIntent.Approved,
+                withinEnabledLibrary: true,
+                autoQueueRestoredBlocked: false,
+                hasApprovedCompanionOnPath: false).Allowed)
             .OrderBy(i => FixerRank(i.Type))
             .ThenBy(GetFileSizeOrZero)
             .ToList();
+        // scopedOut: type is authorized but library is out of scope — the reason surfaces
+        // separately in the log so users can distinguish "type off" from "library disabled".
+        var scopedOut = allQueued.Count(i =>
+            FixPolicyEvaluator.Evaluate(
+                config,
+                i.Type,
+                i.Status,
+                FixIntent.Approved,
+                withinEnabledLibrary: true,
+                autoQueueRestoredBlocked: false,
+                hasApprovedCompanionOnPath: false).Allowed
+            && !LibraryGuard.IsInEnabledLocations(i.Path, enabledLocations));
+
+        if (scopedOut > 0)
+        {
+            _logger.LogInformation(
+                "Skipping {Count} queued issue(s) whose library is no longer enabled in Settings → Libraries; they stay queued and will run again if the library is re-enabled.",
+                scopedOut);
+        }
 
         // Nothing to fix — the scanner hasn't produced anything actionable since we last drained,
         // and auto-queue above found nothing new. Silent skip so a page-left-open user doesn't see
@@ -339,55 +403,34 @@ public sealed class FixTask : IScheduledTask
         // "nothing to remove" if it ran second. Instead, we claim the AudioLanguage /
         // SubtitleLanguage issues as companions of the transcode issue and mark them Fixed
         // when the transcode succeeds.
-        // transcodeCompanions maps the TRANSCODE issue id → its companion track issues on the
-        // same path. transcodeCompanionIds is every claimed track issue id — the main loop skips
-        // those, and the combined-pairs block below also excludes them so a track pair can't be
-        // routed twice.
-        var transcodeCompanions = BuildTranscodeCompanions(queue);
-        var transcodeCompanionIds = new HashSet<long>(transcodeCompanions.SelectMany(kv => kv.Value.Select(i => i.Id)));
+        // 04-A: FixPlanBuilder is the single source of truth for grouping (transcode-with-tracks,
+        // audio+subtitle combined pair, single). 04-C: the main loop iterates plans directly —
+        // companions never come up as their own iteration because plans emit at most one entry
+        // per primary. That kills two skip-set checks (transcodeCompanionIds, combinedPartners)
+        // the pre-refactor loop had to run per queue item.
+        var plans = FixPlanBuilder.Build(
+            queue,
+            FixerRank,
+            GetFileSizeOrZero,
+            StringComparer.OrdinalIgnoreCase);
 
-        if (transcodeCompanions.Count > 0)
+        var transcodePlanCount = plans.Count(p => p.Kind == PlannedFixKind.TranscodeWithTracks);
+        var transcodeCompanionCount = plans
+            .Where(p => p.Kind == PlannedFixKind.TranscodeWithTracks)
+            .Sum(p => p.Companions.Count);
+        var trackPairPlanCount = plans.Count(p => p.Kind == PlannedFixKind.TrackPair);
+
+        if (transcodePlanCount > 0)
         {
             _logger.LogInformation(
                 "Transcode-companion routing: {Files} file(s) have transcode + track issues queued — the transcode's re-encode already drops unwanted tracks, so {Companions} track issue(s) will be resolved by the transcode pass instead of a separate remux.",
-                transcodeCompanions.Count,
-                transcodeCompanionIds.Count);
+                transcodePlanCount,
+                transcodeCompanionCount);
         }
 
-        // Combined-pass detection: same file with BOTH AudioLanguage AND SubtitleLanguage queued.
-        // The TrackFixer can drop both categories in ONE ffmpeg remux instead of two back-to-back
-        // (which would read the source twice and produce two intermediate bin entries). Cuts wall
-        // time roughly in half on TV episodes and 60–70% on Blu-ray remuxes. Users hit this every
-        // time they set both AllowedAudioLanguages and AllowedSubtitleLanguages tightly on a multi-
-        // language rip.
-        // combinedPairs maps the AUDIO issue id → SUBTITLE partner issue on the same path.
-        // combinedPartners is every SUBTITLE issue that's been paired — the main loop skips those
-        // (they get handled as the audio side's companion, not on their own).
-        // Issues already claimed by transcodeCompanions above are excluded so the transcode
-        // routing wins the tie: the transcode will drop the tracks anyway, and running a combined
-        // remux first would just re-do work that's about to happen inside the transcode.
-        var combinedPairs = new Dictionary<long, Issue>();
-        var combinedPartners = new HashSet<long>();
+        if (trackPairPlanCount > 0)
         {
-            var trackPairs = queue
-                .Where(i => (i.Type == IssueType.AudioLanguage || i.Type == IssueType.SubtitleLanguage)
-                            && !transcodeCompanionIds.Contains(i.Id))
-                .GroupBy(i => i.Path, StringComparer.OrdinalIgnoreCase);
-            foreach (var pathGroup in trackPairs)
-            {
-                var audio = pathGroup.FirstOrDefault(i => i.Type == IssueType.AudioLanguage);
-                var subtitle = pathGroup.FirstOrDefault(i => i.Type == IssueType.SubtitleLanguage);
-                if (audio is not null && subtitle is not null)
-                {
-                    combinedPairs[audio.Id] = subtitle;
-                    combinedPartners.Add(subtitle.Id);
-                }
-            }
-        }
-
-        if (combinedPairs.Count > 0)
-        {
-            _logger.LogInformation("Combined-pass eligible: {Count} file(s) have both AudioLanguage and SubtitleLanguage queued — running as one ffmpeg per file instead of two.", combinedPairs.Count);
+            _logger.LogInformation("Combined-pass eligible: {Count} file(s) have both AudioLanguage and SubtitleLanguage queued — running as one ffmpeg per file instead of two.", trackPairPlanCount);
         }
 
         // Run tallies live here (not thread-local per fixer) so the after-run summary can call out the
@@ -423,7 +466,7 @@ public sealed class FixTask : IScheduledTask
                 offCount + " approved issue(s) will not run because their type is set to 'Off' in Settings. The other " + queue.Count + " will run.");
         }
 
-        for (var i = 0; i < queue.Count; i++)
+        for (var i = 0; i < plans.Count; i++)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
@@ -436,7 +479,7 @@ public sealed class FixTask : IScheduledTask
                 Api.Diagnostics.Record("FixTask.BinVolumeCriticallyFull", midRunFloorMsg);
                 if (isManualRun)
                 {
-                    PauseReason = midRunFloorMsg;
+                    _runState.SetPauseReason(RunRole.Fix, midRunFloorMsg);
                 }
 
                 break;
@@ -470,36 +513,36 @@ public sealed class FixTask : IScheduledTask
                     Api.Diagnostics.Record("FixTask.RecycleBinFull", msg);
                     if (isManualRun)
                     {
-                        PauseReason = msg;
+                        _runState.SetPauseReason(RunRole.Fix, msg);
                     }
 
                     break;
                 }
             }
 
-            if (config.PauseDuringPlayback && !IgnoreActivityForCurrentRun && IdleCheck.IsServerBusy(_sessionManager))
+            if (config.PauseDuringPlayback && !_runState.FixIgnoreActivity && IdleCheck.IsServerBusy(_sessionManager))
             {
                 // Discoverability hint for the reported "MediaDash pinned my HDD" class: if we're
                 // pausing mid-run because a user showed up, and Low system impact mode is OFF, this
                 // is the exact machine profile the setting was built for. One nudge per plugin
                 // lifetime — spamming a user who's already dismissed it is worse than silence.
-                TryEmitLowImpactHint(config.LowSystemImpactMode);
+                TryEmitLowImpactHint(_runState, config.LowSystemImpactMode);
 
                 if (isManualRun)
                 {
                     // Manual run: the user is standing at the dashboard waiting for this to finish, so pause
                     // rather than break. Re-poll every 30 s. The user can bail out via Stop, unstick the loop
-                    // by flipping IgnoreActivityForCurrentRun, or wait for the viewer to finish.
-                    PauseReason = "Paused: someone is watching. Click 'Ignore activity' to resume anyway.";
+                    // by flipping _runState.FixIgnoreActivity, or wait for the viewer to finish.
+                    _runState.SetPauseReason(RunRole.Fix, "Paused: someone is watching. Click 'Ignore activity' to resume anyway.");
                     _logger.LogInformation("Fix run paused for viewer activity; waiting for idle or ignore-flag.");
                     while (config.PauseDuringPlayback
-                        && !IgnoreActivityForCurrentRun
+                        && !_runState.FixIgnoreActivity
                         && IdleCheck.IsServerBusy(_sessionManager))
                     {
                         await Task.Delay(TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
                     }
 
-                    PauseReason = null;
+                    _runState.SetPauseReason(RunRole.Fix, null);
                     _logger.LogInformation("Fix run resuming.");
                 }
                 else
@@ -509,331 +552,62 @@ public sealed class FixTask : IScheduledTask
                 }
             }
 
-            var issue = queue[i];
+            var plan = plans[i];
+            var primary = plan.Primary;
+            var slot = 100.0 / plans.Count;
+            progress.Report(i * slot);
+            // Synchronous IProgress: Progress<T> queues callbacks and can reorder reports, leading
+            // to a jittery bar.
+            var itemProgress = new SynchronousProgress(fraction => progress.Report((i + Math.Clamp(fraction, 0, 1)) * slot));
 
-            // Re-check status against the DB before applying — the queue snapshot is minutes to hours
-            // old on big libraries, and a user who pressed "Ignore" mid-run expects the file to be
-            // skipped. Without this, the fix runs on stale intent and the user's ignore is silently lost.
-            var currentStatus = _db.GetIssueStatus(issue.Id);
-            if (currentStatus != IssueStatus.Queued)
-            {
-                _logger.LogInformation("Skipping {Path}: status changed to {Status} since queue snapshot.", issue.Path, currentStatus?.ToString() ?? "gone");
-                continue;
-            }
-
-            if (issue.Type == IssueType.MissingSubtitles && subtitleProviderQuotaExhausted)
+            // Provider quota short-circuit: MissingSubtitleFixer emits Deferred/ProviderQuota when
+            // OpenSubtitles' free-tier download limit is hit. Every remaining MissingSubtitles
+            // issue in this run will hit the same wall, so skip them silently and log the count
+            // at end-of-run rather than firing the fixer just to have it defer again.
+            if (primary.Type == IssueType.MissingSubtitles && subtitleProviderQuotaExhausted)
             {
                 subtitleQuotaSkipped++;
                 continue;
             }
 
-            // Combined-pass: skip subtitle issues that were paired to an audio issue on the same
-            // path — they'll be processed together with the audio side in one ffmpeg pass. This
-            // runs BEFORE the fixer lookup so the "no fixer" branch doesn't trigger.
-            if (combinedPartners.Contains(issue.Id))
+            // Library-scope recheck stays in FixTask (recomputed per-item from the CURRENT config
+            // snapshot so a user unticking a library mid-run takes effect on the next item). The
+            // executor consumes the bool result — this keeps ILibraryManager out of the executor's
+            // DI graph, which in turn keeps FixExecutor trivially constructible in unit tests.
+            var currentEnabledLocations = _libraryGuard.GetEnabledLibraryLocations(_configProvider.GetSnapshot().EnabledLibraries);
+            var withinEnabledLibrary = LibraryGuard.IsInEnabledLocations(primary.Path, currentEnabledLocations);
+
+            // 04-C: hand the plan to the executor. Executor owns per-item consent recheck,
+            // combined-pair partner status refresh, fixer dispatch (with sharing-violation
+            // retry), and exception → typed FixResult translation. Returns null when the
+            // operation should be silently skipped (no fixer registered, primary's status
+            // changed mid-run, policy re-check refused). Silent skips write no history and
+            // do not tick the attempted / succeeded / failed counters.
+            var execution = await _executor.ExecuteAsync(plan, withinEnabledLibrary, itemProgress, cancellationToken).ConfigureAwait(false);
+            if (execution is null)
             {
                 continue;
             }
-
-            // Transcode-companion: skip Audio/SubtitleLanguage issues whose file also has a
-            // transcode-family issue queued. The transcode's re-encode (see TranscodeFixer.BuildArgs)
-            // already drops unwanted tracks via the language allow-list, so running a separate
-            // TrackFixer pass is either wasted IO (if it runs first) or a "nothing to remove"
-            // failure (if it runs second). The transcode issue's own iteration below writes the
-            // companion's history row and flips its status via transcodeCompanions.
-            if (transcodeCompanionIds.Contains(issue.Id))
-            {
-                continue;
-            }
-
-            var fixer = _fixers.FirstOrDefault(f => f.CanFix(issue.Type));
-            if (fixer is null)
-            {
-                continue;
-            }
-
-            var itemIndex = i;
-            var slot = 100.0 / queue.Count;
-            progress.Report(itemIndex * slot);
-            Plugin.CurrentActivityLabel = fixer.GetType().Name;
-            Plugin.CurrentActivity = issue.Path;
-            // Synchronous IProgress: Progress<T> queues callbacks and can reorder reports, leading to a jittery bar.
-            var itemProgress = new SynchronousProgress(fraction => progress.Report((itemIndex + Math.Clamp(fraction, 0, 1)) * slot));
 
             attempted++;
-            // Combined-pass detection is decided outside the try so both branches share the same
-            // exception handling below (OperationCanceled, UnauthorizedAccess, IOException, etc.).
-            var isCombinedPair = issue.Type == IssueType.AudioLanguage
-                && combinedPairs.TryGetValue(issue.Id, out var subtitlePartner)
-                && fixer is Fixers.TrackFixer;
-            var partner = isCombinedPair ? combinedPairs[issue.Id] : null;
-            try
+            _recorder.Record(plan, execution, DateTime.UtcNow);
+
+            if (execution.Result.Success && !execution.Result.WasDryRun)
             {
-                Fixers.FixResult result;
-                if (isCombinedPair)
-                {
-                    // One ffmpeg pass drops both categories at once; the caller records TWO history
-                    // rows (one per source issue) below so both bin-tab and Issues-tab views are
-                    // consistent.
-                    result = await ((Fixers.TrackFixer)fixer!).FixCombinedAsync(issue, partner!, itemProgress, cancellationToken).ConfigureAwait(false);
-                }
-                else
-                {
-                    result = await RunFixWithSharingRetryAsync(fixer, issue, itemProgress, cancellationToken).ConfigureAwait(false);
-                }
+                succeeded++;
+            }
+            else if (!execution.Result.Success)
+            {
+                RecordFailure(execution.Result.Message);
+                _logger.LogWarning("Fix failed for {Path}: {Message}", primary.Path, execution.Result.Message);
 
-                _db.AddHistory(new HistoryEntry
+                if (primary.Type == IssueType.MissingSubtitles && execution.Result.Reason == FixReason.ProviderQuota)
                 {
-                    IssueId = issue.Id,
-                    Type = issue.Type,
-                    Path = issue.Path,
-                    Action = result.Message,
-                    BytesFreed = result.Success && !result.WasDryRun ? result.BytesFreed : 0,
-                    RecyclePath = result.RecyclePath,
-                    FixedAtUtc = DateTime.UtcNow,
-                    WasDryRun = result.WasDryRun,
-                    Success = result.Success
-                });
-
-                // Second history row for the subtitle partner in a combined pass — same bin path,
-                // same message, so both bin-tab rows link back to the same file and both
-                // Issues-tab rows have their own record. Only emitted on success; failure surfaces
-                // through the audio issue's history row already.
-                if (isCombinedPair && result.Success && partner is not null)
-                {
-                    _db.AddHistory(new HistoryEntry
-                    {
-                        IssueId = partner.Id,
-                        Type = partner.Type,
-                        Path = partner.Path,
-                        Action = result.Message,
-                        BytesFreed = 0,
-                        RecyclePath = result.RecyclePath,
-                        FixedAtUtc = DateTime.UtcNow,
-                        WasDryRun = result.WasDryRun,
-                        Success = true
-                    });
-                    if (!result.WasDryRun)
-                    {
-                        _db.UpdateIssueStatus(partner.Id, IssueStatus.Fixed);
-                    }
-                }
-
-                // Transcode-companion resolution: when a transcode-family issue with companion
-                // audio/subtitle-language issues succeeds, each companion was resolved
-                // implicitly by the re-encode's map-filter (TranscodeFixer.BuildArgs). Emit a
-                // history row per companion so the Issues-tab audit trail is complete, and flip
-                // the companion to Fixed. Matches the combined-pass symmetry above: history is
-                // written on any success (including dry-run), status flip only on real runs so
-                // the queue survives dry-run inspection.
-                if (result.Success && transcodeCompanions.TryGetValue(issue.Id, out var claimedCompanions))
-                {
-                    foreach (var companion in claimedCompanions)
-                    {
-                        _db.AddHistory(new HistoryEntry
-                        {
-                            IssueId = companion.Id,
-                            Type = companion.Type,
-                            Path = companion.Path,
-                            Action = "Resolved by transcode pass: " + result.Message,
-                            BytesFreed = 0,
-                            RecyclePath = result.RecyclePath,
-                            FixedAtUtc = DateTime.UtcNow,
-                            WasDryRun = result.WasDryRun,
-                            Success = true
-                        });
-                        if (!result.WasDryRun)
-                        {
-                            _db.UpdateIssueStatus(companion.Id, IssueStatus.Fixed);
-                        }
-                    }
-                }
-
-                // Per-sidecar history rows so the Recycle Bin tab renders a Restore button next to each
-                // recycled sidecar. Without these, external subtitle files / pre-strip audio originals
-                // show "no history" and dead-end the user.
-                if (result.Success && !result.WasDryRun && result.AdditionalRecycled is { Count: > 0 })
-                {
-                    foreach (var extra in result.AdditionalRecycled)
-                    {
-                        _db.AddHistory(new HistoryEntry
-                        {
-                            IssueId = issue.Id,
-                            Type = issue.Type,
-                            Path = extra.OriginalPath,
-                            Action = extra.Action,
-                            BytesFreed = 0,
-                            RecyclePath = extra.RecyclePath,
-                            FixedAtUtc = DateTime.UtcNow,
-                            WasDryRun = false,
-                            Success = true
-                        });
-                    }
-                }
-
-                if (result.Success && !result.WasDryRun)
-                {
-                    succeeded++;
-                    _db.UpdateIssueStatus(issue.Id, IssueStatus.Fixed);
-                }
-                else if (!result.Success)
-                {
-                    RecordFailure(result.Message);
-                    _logger.LogWarning("Fix failed for {Path}: {Message}", issue.Path, result.Message);
-
-                    // Stale failure: the file was renamed/rebuilt/removed by an external tool (Sonarr, Radarr,
-                    // manual edit) between the scan and this fix run. Retrying every 30 minutes won't help —
-                    // move the issue out of Queued so the loop stops. Next scan re-detects if still applicable.
-                    // F-206: only advance status when NOT in dry-run. During dry-run the row must stay Queued
-                    // so the user can re-approve after inspecting; flipping to Fixed silently loses the queue.
-                    if (IsStaleFailure(result.Message) && !config.DryRun)
-                    {
-                        _db.UpdateIssueStatus(issue.Id, IssueStatus.Fixed);
-                    }
-
-                    if (issue.Type == IssueType.MissingSubtitles && IsSubtitleProviderQuotaExhausted(result.Message))
-                    {
-                        subtitleProviderQuotaExhausted = true;
-                    }
+                    subtitleProviderQuotaExhausted = true;
                 }
             }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch (UnauthorizedAccessException ex)
-            {
-                RecordFailure("Permission denied");
-                // Very common on Linux servers where library files aren't owned by the jellyfin user.
-                // Not a plugin bug — surface it with an actionable message and record the failed attempt
-                // in History so the user sees it alongside successful fixes.
-                _logger.LogWarning(ex, "Permission denied fixing {Path}", issue.Path);
-                var message = "Jellyfin lacks write access to " + issue.Path + ". Check that the file (and its folder) is owned by or read+writable by the user Jellyfin runs as (typically 'jellyfin' on Linux).";
-                Api.Diagnostics.Record("FixTask.PermissionDenied", message);
-                _db.AddHistory(new HistoryEntry
-                {
-                    IssueId = issue.Id,
-                    Type = issue.Type,
-                    Path = issue.Path,
-                    Action = "Fix failed — permission denied. " + issue.Path + " isn't writable by the Jellyfin user.",
-                    BytesFreed = 0,
-                    FixedAtUtc = DateTime.UtcNow,
-                    WasDryRun = false,
-                    Success = false
-                });
-            }
-            catch (System.IO.FileNotFoundException ex)
-            {
-                // The file went missing between the scan and this fix. Same treatment as message-based
-                // stale failures: mark Fixed so the 15-min retry stops chasing a ghost; next scan re-detects.
-                RecordFailure("File went missing between scan and fix");
-                _logger.LogInformation(ex, "File missing at fix time: {Path}", issue.Path);
-                Api.Diagnostics.Record("FixTask.FileMissing", issue.Path + ": " + ex.Message);
-                _db.AddHistory(new HistoryEntry
-                {
-                    IssueId = issue.Id,
-                    Type = issue.Type,
-                    Path = issue.Path,
-                    Action = "Fix skipped — the file went missing between scan and fix. Re-scan to refresh.",
-                    BytesFreed = 0,
-                    FixedAtUtc = DateTime.UtcNow,
-                    WasDryRun = false,
-                    Success = false
-                });
-                _db.UpdateIssueStatus(issue.Id, IssueStatus.Fixed);
-            }
-            catch (System.IO.DirectoryNotFoundException ex)
-            {
-                RecordFailure("File went missing between scan and fix");
-                _logger.LogInformation(ex, "Directory missing at fix time: {Path}", issue.Path);
-                Api.Diagnostics.Record("FixTask.FileMissing", issue.Path + ": " + ex.Message);
-                _db.AddHistory(new HistoryEntry
-                {
-                    IssueId = issue.Id,
-                    Type = issue.Type,
-                    Path = issue.Path,
-                    Action = "Fix skipped — the containing folder went missing between scan and fix. Re-scan to refresh.",
-                    BytesFreed = 0,
-                    FixedAtUtc = DateTime.UtcNow,
-                    WasDryRun = false,
-                    Success = false
-                });
-                _db.UpdateIssueStatus(issue.Id, IssueStatus.Fixed);
-            }
-            catch (System.IO.IOException ex) when (IsSharingViolation(ex))
-            {
-                // RunFixWithSharingRetryAsync already retried 3× over ~7.5s. If it still throws, whatever
-                // holds the file is long-lived — surface as a lock error, not a "disk error".
-                RecordFailure("File was held open by another process (likely Jellyfin trickplay / chapter thumbs / active playback)");
-                _logger.LogWarning(ex, "File held open after retries: {Path}", issue.Path);
-                Api.Diagnostics.Record("FixTask.FileLocked", issue.Path + ": still held open after 3 retries (~7.5s). " + ex.Message);
-                _db.AddHistory(new HistoryEntry
-                {
-                    IssueId = issue.Id,
-                    Type = issue.Type,
-                    Path = issue.Path,
-                    Action = "Fix failed — file was locked by another process even after retrying. " + ex.Message,
-                    BytesFreed = 0,
-                    FixedAtUtc = DateTime.UtcNow,
-                    WasDryRun = false,
-                    Success = false
-                });
-            }
-            catch (System.IO.IOException ex) when (IsDiskFull(ex))
-            {
-                RecordFailure("Not enough free disk space");
-                _logger.LogWarning(ex, "Disk full while fixing {Path}", issue.Path);
-                Api.Diagnostics.Record("FixTask.DiskFull", issue.Path + ": " + ex.Message);
-                _db.AddHistory(new HistoryEntry
-                {
-                    IssueId = issue.Id,
-                    Type = issue.Type,
-                    Path = issue.Path,
-                    Action = "Fix failed — the drive ran out of space mid-fix. Free some space and it'll retry on the next run.",
-                    BytesFreed = 0,
-                    FixedAtUtc = DateTime.UtcNow,
-                    WasDryRun = false,
-                    Success = false
-                });
-            }
-            catch (System.IO.IOException ex)
-            {
-                RecordFailure("I/O error");
-                _logger.LogWarning(ex, "I/O error fixing {Path}", issue.Path);
-                Api.Diagnostics.Record("FixTask.IOError", issue.Path + ": " + ex.Message);
-                _db.AddHistory(new HistoryEntry
-                {
-                    IssueId = issue.Id,
-                    Type = issue.Type,
-                    Path = issue.Path,
-                    Action = "Fix failed — " + ex.Message,
-                    BytesFreed = 0,
-                    FixedAtUtc = DateTime.UtcNow,
-                    WasDryRun = false,
-                    Success = false
-                });
-            }
-            catch (Exception ex)
-            {
-                RecordFailure("Unexpected error");
-                _logger.LogError(ex, "Unexpected error fixing {Path}", issue.Path);
-                Api.Diagnostics.Record("FixTask", $"{issue.Path}: {ex.Message}");
-                // Write a History row for unexpected exceptions too — without this the user sees the
-                // diagnostic but has no audit trail of which issue actually failed.
-                _db.AddHistory(new HistoryEntry
-                {
-                    IssueId = issue.Id,
-                    Type = issue.Type,
-                    Path = issue.Path,
-                    Action = "Fix failed — unexpected error: " + ex.Message,
-                    BytesFreed = 0,
-                    FixedAtUtc = DateTime.UtcNow,
-                    WasDryRun = false,
-                    Success = false
-                });
-            }
 
-            progress.Report((i + 1) * 100.0 / queue.Count);
+            progress.Report((i + 1) * slot);
         }
 
         // Both maintenance passes below physically delete files on disk (retention purge of the
@@ -849,7 +623,10 @@ public sealed class FixTask : IScheduledTask
             // (SIGKILL, container restart, Jellyfin crash) where the fixer's finally couldn't clean up.
             try
             {
-                var orphans = _libraryGuard.SweepOrphanSidecars();
+                // FU-1 (2026-09-19): scope the sweep to the same EnabledLibraries the queue
+                // selection above respects. Without this, an owned sidecar in a library the
+                // user excluded from MediaDash still got deleted by end-of-run maintenance.
+                var orphans = _libraryGuard.SweepOrphanSidecars(config.EnabledLibraries);
                 if (orphans.Count > 0)
                 {
                     var freed = orphans.Sum(o => o.Bytes);
@@ -894,48 +671,9 @@ public sealed class FixTask : IScheduledTask
         progress.Report(100);
     }
 
-    // Windows sharing/lock violations (HRESULTs 0x80070020, 0x80070021) show up when Jellyfin's own
-    // subsystems still hold a read handle on a library file we're about to move/delete — trickplay
-    // generation, chapter thumbnails, cover-art extraction, an active playback session, or a
-    // sibling MediaDash scanner's ffprobe whose child process handle the OS hasn't finalised yet.
-    // Almost always clears within a second or two. Delete / Move / rename are all idempotent on
-    // failure (source still there, target absent), so re-running the fixer's FixAsync is safe.
-    // ponytail: three tries with progressive backoff. If it still fails, the file really is held
-    // by something long-lived (a running transcode) — surface the IOException as before.
-    private static async Task<FixResult> RunFixWithSharingRetryAsync(IFixer fixer, Issue issue, IProgress<double> progress, CancellationToken cancellationToken)
-    {
-        int[] delaysMs = [500, 2000, 5000];
-        for (var attempt = 0; ; attempt++)
-        {
-            try
-            {
-                return await fixer.FixAsync(issue, progress, cancellationToken).ConfigureAwait(false);
-            }
-            catch (System.IO.IOException ex) when (attempt < delaysMs.Length && IsSharingViolation(ex))
-            {
-                await Task.Delay(delaysMs[attempt], cancellationToken).ConfigureAwait(false);
-            }
-        }
-    }
-
-    private static bool IsSharingViolation(System.IO.IOException ex)
-    {
-        var code = ex.HResult & 0xFFFF;
-        // 32 = ERROR_SHARING_VIOLATION, 33 = ERROR_LOCK_VIOLATION (Windows). Linux EBUSY (16) also
-        // manifests as IOException when another process holds an exclusive lock (rare but real on
-        // networked filesystems like SMB and cifs), so include it too.
-        return code == 32 || code == 33 || code == 16;
-    }
-
-    // Distinguishes real ENOSPC / ERROR_DISK_FULL from other IOExceptions so the Errors tab shows
-    // "drive full" only when it actually is. Users kept seeing "disk error" on files that were
-    // really sharing violations (post-retry exhaustion) or missing paths (Sonarr/Radarr moves).
-    internal static bool IsDiskFull(System.IO.IOException ex)
-    {
-        var code = ex.HResult & 0xFFFF;
-        // Windows: 112 ERROR_DISK_FULL, 39 ERROR_HANDLE_DISK_FULL. Linux: 28 ENOSPC.
-        return code == 112 || code == 39 || code == 28;
-    }
+    // 04-C: RunFixWithSharingRetryAsync + MarkFixed + IsSharingViolation + IsDiskFull moved into
+    // FixExecutor (which owns the sharing retry loop, exception translation and per-op recording
+    // via FixResultRecorder). FixTaskDiskFullTests now targets FixExecutor.IsDiskFull.
 
     /// <summary>
     /// Parses the configured fix-window strings. Both empty returns false (no window). Any invalid
@@ -1006,29 +744,12 @@ public sealed class FixTask : IScheduledTask
         return (inside, timeUntilClose);
     }
 
-    // Failures that mean "the underlying state moved between scan and fix". Retrying is guaranteed to
-    // hit the same wall until a fresh scan re-detects (or doesn't). Exposed internal for direct testing.
-    internal static bool IsStaleFailure(string message)
-    {
-        if (string.IsNullOrEmpty(message))
-        {
-            return false;
-        }
-
-        return message.Contains("no longer exists", StringComparison.OrdinalIgnoreCase)
-            || message.Contains("Nothing to remove any more", StringComparison.OrdinalIgnoreCase)
-            // Playability re-verify saw the file healed since scan — same intent as "state changed", stop the 15-min retry loop.
-            || message.Contains("plays fine now", StringComparison.OrdinalIgnoreCase)
-            // MediaGrouper / MediaSorter target conflict — needs manual resolution, retrying never helps.
-            || message.Contains("same name already exists", StringComparison.OrdinalIgnoreCase)
-            // LibraryGuard refused: library was renamed / removed / paths drifted after the scan
-            // enqueued the issue. Every fixer's refusal message contains one of these two phrases
-            // (grep for LibraryGuard.IsInsideLibrary call sites). Without this, the fix scheduler
-            // retries every 30 min and spams the Errors tab with a fresh row per attempt. If the
-            // library is later re-added, a fresh scan re-emits the issue (Fixed rows don't suppress).
-            || message.Contains("outside your library", StringComparison.OrdinalIgnoreCase)
-            || message.Contains("not inside a configured library", StringComparison.OrdinalIgnoreCase);
-    }
+    // Deleted in 01-B: IsStaleFailure(string). The scheduler now consults
+    // FixResultPolicy.GetQueueDisposition(FixOutcome, FixReason) — see the caller of MarkFixed
+    // in RunFixQueueAsync. Every fixer produces a typed Outcome+Reason so the phrase-matching
+    // classifier has no internal callers. The retained phrase inventory now lives as a
+    // presentation-only documentation test (FixTaskStaleFailureTests) that checks the same
+    // canonical wording still appears in the fixer source files where a user will read it.
 
     // Reads free space on the bin volume; returns true when it's below the floor. Reason string is
     // set only when true, phrased for direct display in the dashboard's pause banner.
@@ -1061,25 +782,15 @@ public sealed class FixTask : IScheduledTask
         }
     }
 
-    // Whether the fixer's reason indicates the subtitle provider is out of downloads for now.
-    // Matches OpenSubtitles' free-tier "download limit reached" and API "download quota" wording;
-    // both signal that every remaining MissingSubtitles issue in this run will fail the same way.
-    // ponytail: string match, upgrade to a provider-typed error only if a second provider joins.
-    internal static bool IsSubtitleProviderQuotaExhausted(string message)
-    {
-        if (string.IsNullOrEmpty(message))
-        {
-            return false;
-        }
-
-        return message.Contains("download limit reached", StringComparison.OrdinalIgnoreCase)
-            || message.Contains("download quota", StringComparison.OrdinalIgnoreCase);
-    }
+    // Deleted in 01-B: IsSubtitleProviderQuotaExhausted(string). MissingSubtitleFixer now parses
+    // the provider exception at the third-party boundary (its LooksLikeProviderQuota helper) and
+    // returns FixResult.Deferred(FixReason.ProviderQuota, ...). The scheduler tests result.Reason
+    // directly; no phrase matching survives inside FixTask.
 
     // Fold a specific error message into a short reason-family so 142 permission-denied failures collapse to
     // a single bucket in the summary. Anything unrecognised is capped at 60 chars so long ffmpeg errors
     // don't turn the alert into a wall of text.
-    private static string BucketReason(string message)
+    internal static string BucketReason(string message)
     {
         if (string.IsNullOrEmpty(message))
         {
@@ -1169,13 +880,20 @@ public sealed class FixTask : IScheduledTask
     /// OFF and we haven't already emitted the hint this plugin lifetime. Returns true if the
     /// hint was emitted on this call, false if it was already emitted or the setting is on.
     /// Called from the mid-run per-file activity check — that's the exact signal that this
-    /// machine is being used for daily work while a fix runs.
+    /// machine is being used for daily work while a fix runs. The one-shot latch lives on
+    /// <see cref="RunState"/> so a fresh instance in a test does not inherit a previous test's flip.
     /// </summary>
+    /// <param name="runState">The shared run-state holder.</param>
     /// <param name="lowSystemImpactMode">The current LowSystemImpactMode config value.</param>
     /// <returns>True if the hint was recorded on this call.</returns>
-    internal static bool TryEmitLowImpactHint(bool lowSystemImpactMode)
+    internal static bool TryEmitLowImpactHint(RunState runState, bool lowSystemImpactMode)
     {
-        if (lowSystemImpactMode || LowImpactHintEmitted)
+        if (lowSystemImpactMode)
+        {
+            return false;
+        }
+
+        if (!runState.TryEmitLowImpactHint())
         {
             return false;
         }
@@ -1183,57 +901,21 @@ public sealed class FixTask : IScheduledTask
         Api.Diagnostics.Record(
             "FixTask.LowImpactHint",
             "Fix run paused because someone started using the server. If MediaDash's ffmpeg is making this machine unresponsive (spinning HDDs pinned at 100 %, general lag), turn on Settings → Safety → Low system impact mode. Encodes take longer in exchange but the disk and CPU stay usable for daily work.");
-        LowImpactHintEmitted = true;
         return true;
     }
 
     /// <summary>
     /// Groups every queued transcode-family issue (Quality / HeavyTranscode / FailedTranscode)
     /// with any AudioLanguage / SubtitleLanguage issue on the same path so those track issues
-    /// can be resolved as companions of the transcode. TranscodeFixer.BuildArgs already filters
-    /// mapped audio + subtitle streams by the configured language allow-lists during the
-    /// re-encode, so the unwanted tracks are dropped incidentally and no separate remux is
-    /// needed. Returns the transcode-issue-id → companion-list map; callers derive the
-    /// companion-id set from the values. If a path has multiple transcode-family issues (rare
-    /// but possible: Quality + FailedTranscode co-detected), the first by natural queue order
-    /// wins — the second stays a standalone entry and picks up the tracks on a later run if the
-    /// first left them behind.
+    /// can be resolved as companions of the transcode. 04-A: the grouping logic itself lives in
+    /// <see cref="FixPlanBuilder.BuildTranscodeCompanionMap"/>; this method stays as a thin
+    /// forwarding wrapper so existing direct-call tests keep exercising the same behaviour
+    /// through a single entry point.
     /// </summary>
     /// <param name="queue">The current fix-run queue after Off-type filtering and rank ordering.</param>
     /// <returns>Map of transcode issue id → companion audio/subtitle issues on the same path.</returns>
     internal static Dictionary<long, List<Issue>> BuildTranscodeCompanions(IReadOnlyList<Issue> queue)
-    {
-        var result = new Dictionary<long, List<Issue>>();
-        var pathGroups = queue
-            .Where(i => i.Type is IssueType.Quality
-                                  or IssueType.HeavyTranscode
-                                  or IssueType.FailedTranscode
-                                  or IssueType.AudioLanguage
-                                  or IssueType.SubtitleLanguage)
-            .GroupBy(i => i.Path, StringComparer.OrdinalIgnoreCase);
-        foreach (var pathGroup in pathGroups)
-        {
-            var transcode = pathGroup.FirstOrDefault(i => i.Type is IssueType.Quality
-                                                                   or IssueType.HeavyTranscode
-                                                                   or IssueType.FailedTranscode);
-            if (transcode is null)
-            {
-                continue;
-            }
-
-            var companions = pathGroup
-                .Where(i => i.Type is IssueType.AudioLanguage or IssueType.SubtitleLanguage)
-                .ToList();
-            if (companions.Count == 0)
-            {
-                continue;
-            }
-
-            result[transcode.Id] = companions;
-        }
-
-        return result;
-    }
+        => FixPlanBuilder.BuildTranscodeCompanionMap(queue, StringComparer.OrdinalIgnoreCase);
 
     private static int FixerRank(Data.IssueType type)
     {

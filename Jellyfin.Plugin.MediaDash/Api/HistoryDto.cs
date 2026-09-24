@@ -85,7 +85,14 @@ public sealed class HistoryDto
             FixedAtUtc = entry.FixedAtUtc,
             WasDryRun = entry.WasDryRun,
             Success = entry.Success,
-            CanRestore = !entry.Restored && !string.IsNullOrEmpty(entry.RecyclePath) && System.IO.File.Exists(entry.RecyclePath)
+            // Directory-recycled entries (orphan cleanup, Files-tab folder delete) go through the
+            // same RestoreFromHistory endpoint, which already accepts both file and directory
+            // paths via `File.Exists || Directory.Exists`. Mirror that here — otherwise the UI
+            // hides the Restore button on a directory history row even though the server would
+            // happily restore it, stranding the entry.
+            CanRestore = !entry.Restored
+                && !string.IsNullOrEmpty(entry.RecyclePath)
+                && (System.IO.File.Exists(entry.RecyclePath) || System.IO.Directory.Exists(entry.RecyclePath))
         };
     }
 }

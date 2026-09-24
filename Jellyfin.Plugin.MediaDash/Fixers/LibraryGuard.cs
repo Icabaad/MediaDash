@@ -101,6 +101,24 @@ public sealed class LibraryGuard
     }
 
     /// <summary>
+    /// Returns the location prefixes (trailing-separator normalised) of every library the user has
+    /// currently enabled via <c>PluginConfiguration.EnabledLibraries</c>. Empty or null
+    /// <paramref name="enabledLibraries"/> yields every library's locations, matching the historical
+    /// "empty = all" convention used by scanners. Callers use this list for cheap
+    /// <c>StartsWith</c> scope checks against issue paths — mirrors the pattern already established
+    /// in <see cref="Jellyfin.Plugin.MediaDash.ScheduledTasks.ScanTask"/>.
+    /// </summary>
+    /// <param name="enabledLibraries">Enabled library IDs from plugin configuration.</param>
+    /// <returns>Location prefixes, each ending with a directory separator so <c>StartsWith</c> boundary-matches.</returns>
+    public IReadOnlyList<string> GetEnabledLibraryLocations(string[]? enabledLibraries)
+    {
+        return Scanners.VirtualFolderIdentity.GetEnabledFolders(_libraryManager, enabledLibraries)
+            .SelectMany(f => f.Locations)
+            .Select(l => Path.TrimEndingDirectorySeparator(l) + Path.DirectorySeparatorChar)
+            .ToList();
+    }
+
+    /// <summary>
     /// Checks whether a folder is itself a configured library root. Sweep-style deletes must
     /// refuse to touch a library root — treating it as an "empty per-movie folder" would try to
     /// recycle every movie underneath.
@@ -138,12 +156,25 @@ public sealed class LibraryGuard
     /// from a crash or a hard-killed plugin instance where <c>TranscodeFixer.FixAsync</c>'s finally
     /// block didn't get to run.
     /// </summary>
+    /// <param name="enabledLibraries">Enabled library IDs from plugin configuration. Null or
+    /// empty falls through to every library (historical behavior); a non-empty list scopes the
+    /// sweep to just those libraries so a sidecar in an excluded library isn't touched.</param>
     /// <returns>Path and byte-count of each deleted orphan, empty on a clean library.</returns>
-    public IReadOnlyList<(string Path, long Bytes)> SweepOrphanSidecars()
+    public IReadOnlyList<(string Path, long Bytes)> SweepOrphanSidecars(string[]? enabledLibraries = null)
     {
         var deleted = new List<(string, long)>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var root in _libraryManager.GetVirtualFolders().SelectMany(f => f.Locations))
+        // Bug-pattern audit round 4 FU-1 (2026-09-19): the sweep walked every library root
+        // regardless of the user's EnabledLibraries setting. Owned sidecars sitting in a
+        // library the user had explicitly excluded from MediaDash's scope were still deleted
+        // by maintenance. The advertised scope has to hold end-to-end — queue selection now
+        // respects it (round 1 fix), the sweep must too. Empty/null enabledLibraries falls
+        // through to every library, matching the historical "empty = all" convention every
+        // scanner uses.
+        var scopedRoots = Scanners.VirtualFolderIdentity
+            .GetEnabledFolders(_libraryManager, enabledLibraries)
+            .SelectMany(f => f.Locations);
+        foreach (var root in scopedRoots)
         {
             if (!Directory.Exists(root))
             {
@@ -187,6 +218,17 @@ public sealed class LibraryGuard
                         continue;
                     }
 
+                    // Review P1-1: never delete a preserved swap-recovery copy. TranscodeFixer /
+                    // TrackFixer rename the sidecar to a *.mediadash-recover-* pattern when the
+                    // original has been disposed but the final rename failed — that file is the
+                    // user's only remaining copy of the content. Belt-and-braces check: sweep
+                    // patterns above already exclude that infix, but if a legacy `.mediadash.new`
+                    // sidecar drifts across a build with a preserve marker, we still stop.
+                    if (SwapRecoveryHelper.IsRecoveryCopy(path))
+                    {
+                        continue;
+                    }
+
                     try
                     {
                         var size = new FileInfo(path).Length;
@@ -203,6 +245,35 @@ public sealed class LibraryGuard
         }
 
         return deleted;
+    }
+
+    /// <summary>
+    /// Cheap prefix membership test used by <see cref="Jellyfin.Plugin.MediaDash.ScheduledTasks.FixTask"/>
+    /// to scope its queue to currently-enabled libraries. Empty or null <paramref name="path"/>
+    /// short-circuits to true — issues without a path are surfaced elsewhere in the pipeline and
+    /// scoping them here would silently swallow them. Callers must pre-normalise
+    /// <paramref name="enabledLocations"/> with a trailing separator (see
+    /// <see cref="GetEnabledLibraryLocations"/>) so <c>StartsWith</c> is a boundary check.
+    /// </summary>
+    /// <param name="path">The candidate path.</param>
+    /// <param name="enabledLocations">Normalised location prefixes from <see cref="GetEnabledLibraryLocations"/>.</param>
+    /// <returns>True when the path sits inside one of the enabled locations, or is empty.</returns>
+    public static bool IsInEnabledLocations(string? path, IReadOnlyList<string> enabledLocations)
+    {
+        if (string.IsNullOrEmpty(path))
+        {
+            return true;
+        }
+
+        for (var i = 0; i < enabledLocations.Count; i++)
+        {
+            if (path.StartsWith(enabledLocations[i], StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     internal static bool IsUnder(string fullPath, string root)

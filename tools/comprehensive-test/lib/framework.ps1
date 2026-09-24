@@ -427,3 +427,110 @@ function Write-Summary {
 # ═════════════════════════════════════════════════════════════════════════════
 
 function Start-Phase { param([string]$Description) Write-Log "◆ $Description" }
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Verdict — pure function that turns run state into a final PASS/FAIL/ERROR
+# decision + exit code + reason. Self-tests call this directly with a synthetic
+# run state to prove the accounting can't silently accept broken runs.
+#
+# Rules (in order):
+#   1. Any phase raised an unhandled exception before any test recorded → ERROR.
+#   2. Any test with result FAIL or ERROR → FAIL / ERROR respectively.
+#   3. A required phase was selected but did not report any test result → FAIL
+#      (a phase silently exiting early is a bug we've been paged for before).
+#   4. Zero tests recorded overall → FAIL (a run that "passed" without asserting
+#      anything is the exact false positive this harness has to stop shipping).
+#   5. Otherwise → PASS.
+# Returns [pscustomobject] @{ Verdict, ExitCode, Reason }.
+# ═════════════════════════════════════════════════════════════════════════════
+
+function Get-RunVerdict {
+    param(
+        [Parameter(Mandatory)]$RunState,
+        [string[]]$RequiredPhasesRun = @()
+    )
+
+    if ($RunState.PhaseExceptions -and $RunState.PhaseExceptions.Count -gt 0 -and $RunState.TotalTests -eq 0) {
+        $msg = ($RunState.PhaseExceptions | ForEach-Object { "$($_.Phase): $($_.Message)" }) -join '; '
+        return [pscustomobject]@{ Verdict = 'ERROR'; ExitCode = 2; Reason = "Phase exception before any test ran: $msg" }
+    }
+    if ($RunState.TestsErrored -gt 0) {
+        return [pscustomobject]@{ Verdict = 'ERROR'; ExitCode = 2; Reason = "$($RunState.TestsErrored) test(s) errored" }
+    }
+    if ($RunState.TestsFailed -gt 0) {
+        return [pscustomobject]@{ Verdict = 'FAIL'; ExitCode = 1; Reason = "$($RunState.TestsFailed) test(s) failed" }
+    }
+    foreach ($required in $RequiredPhasesRun) {
+        if ($RunState.PhasesRun -notcontains $required) {
+            return [pscustomobject]@{ Verdict = 'FAIL'; ExitCode = 1; Reason = "Required phase '$required' did not run" }
+        }
+        $ran = $false
+        # If PhaseCounters is present it's an authoritative "phase X recorded N results" map.
+        if ($RunState.PSObject.Properties['PhaseCounters'] -and $RunState.PhaseCounters.ContainsKey($required)) {
+            $ran = ($RunState.PhaseCounters[$required] -gt 0)
+        } else {
+            $ran = $true  # legacy path: presence in PhasesRun is treated as evidence.
+        }
+        if (-not $ran) {
+            return [pscustomobject]@{ Verdict = 'FAIL'; ExitCode = 1; Reason = "Required phase '$required' produced no test results" }
+        }
+    }
+    if ($RunState.TotalTests -eq 0) {
+        return [pscustomobject]@{ Verdict = 'FAIL'; ExitCode = 1; Reason = 'No tests were recorded' }
+    }
+    return [pscustomobject]@{ Verdict = 'PASS'; ExitCode = 0; Reason = "$($RunState.TestsPassed) test(s) passed" }
+}
+
+# Records a phase-level exception both as an ERROR test result (so counters are
+# truthful) and on RunState.PhaseExceptions so Get-RunVerdict can see it even if
+# no tests ran in the affected phase.
+function Record-PhaseException {
+    param([Parameter(Mandatory)][string]$Phase, [Parameter(Mandatory)]$ErrorRecord)
+    $msg = if ($ErrorRecord.Exception) { $ErrorRecord.Exception.Message } else { [string]$ErrorRecord }
+    $stack = if ($ErrorRecord.ScriptStackTrace) { $ErrorRecord.ScriptStackTrace } else { '' }
+    if (-not $Script:RunState.PSObject.Properties['PhaseExceptions']) {
+        $Script:RunState | Add-Member -MemberType NoteProperty -Name PhaseExceptions -Value @()
+    }
+    $Script:RunState.PhaseExceptions = @($Script:RunState.PhaseExceptions) + @([pscustomobject]@{ Phase = $Phase; Message = $msg; Stack = $stack; At = (Get-Date).ToUniversalTime().ToString('o') })
+    $priorPhase = $Script:RunState.CurrentPhase
+    $Script:RunState.CurrentPhase = $Phase
+    try {
+        Write-TestResult -Phase $Phase -Name "phase-exception" -Result 'ERROR' -DurationMs 0 -Notes ("$msg`n$stack")
+    } finally {
+        $Script:RunState.CurrentPhase = $priorPhase
+    }
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Live-target guard — refuse to mutate anything that isn't localhost:8099. Used
+# by phases that hit destructive fix endpoints. Fixture path check is scoped to
+# the manifest supplied at call time. Redirects to non-loopback hosts abort.
+# ═════════════════════════════════════════════════════════════════════════════
+
+function Assert-SafeLiveTarget {
+    param(
+        [Parameter(Mandatory)][string]$Url,
+        [string[]]$AllowedFixturePaths = @(),
+        [string]$FixturePath = ''
+    )
+    $u = $null
+    try { $u = [Uri]::new($Url) } catch { throw "Refuse: '$Url' is not a well-formed URI" }
+    $loopback = @('localhost','127.0.0.1','::1')
+    if ($u.Host -notin $loopback) {
+        throw "Refuse: target host '$($u.Host)' is not loopback. This harness never mutates non-loopback."
+    }
+    if ($u.Port -ne 8099) {
+        throw "Refuse: target port $($u.Port) is not the sandbox port (8099). Production is 8096; the throwaway VM is 8099."
+    }
+    if ($FixturePath) {
+        $normalized = [IO.Path]::GetFullPath($FixturePath)
+        $ok = $false
+        foreach ($allowed in $AllowedFixturePaths) {
+            $rooted = [IO.Path]::GetFullPath($allowed)
+            if ($normalized.StartsWith($rooted, [StringComparison]::OrdinalIgnoreCase)) { $ok = $true; break }
+        }
+        if (-not $ok) {
+            throw "Refuse: fixture path '$FixturePath' is not inside any allowed manifest root."
+        }
+    }
+}

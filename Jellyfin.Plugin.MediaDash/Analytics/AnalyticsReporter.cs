@@ -47,19 +47,19 @@ public sealed class AnalyticsReporter
 
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(15) };
 
-    private readonly MediaDashDb _db;
+    private readonly HistoryStore _history;
     private readonly IServerApplicationHost _appHost;
     private readonly ILogger<AnalyticsReporter> _logger;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="AnalyticsReporter"/> class.
     /// </summary>
-    /// <param name="db">The plugin DB, used to aggregate the current month's history.</param>
+    /// <param name="history">History-table store (05-C.3), used to aggregate the current month's history.</param>
     /// <param name="appHost">Application host, used for the Jellyfin version string.</param>
     /// <param name="logger">The logger.</param>
-    public AnalyticsReporter(MediaDashDb db, IServerApplicationHost appHost, ILogger<AnalyticsReporter> logger)
+    public AnalyticsReporter(HistoryStore history, IServerApplicationHost appHost, ILogger<AnalyticsReporter> logger)
     {
-        _db = db;
+        _history = history;
         _appHost = appHost;
         _logger = logger;
     }
@@ -85,7 +85,7 @@ public sealed class AnalyticsReporter
             var monthStart = new DateTime(now.Year, now.Month, 1, 0, 0, 0, DateTimeKind.Utc);
             var monthEnd = monthStart.AddMonths(1);
             var installId = ComputeMonthlyInstallId(_appHost.SystemId, monthStart);
-            var aggregate = _db.GetMonthAggregate(monthStart, monthEnd);
+            var aggregate = _history.GetMonthAggregate(monthStart, monthEnd);
 
             var pluginVersion = Plugin.Instance?.Version?.ToString(3) ?? string.Empty;
             var jellyfinVersion = _appHost.ApplicationVersionString ?? string.Empty;

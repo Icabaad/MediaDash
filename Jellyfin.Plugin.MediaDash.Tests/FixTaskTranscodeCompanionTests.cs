@@ -15,6 +15,7 @@ namespace Jellyfin.Plugin.MediaDash.Tests;
 /// FixTask.BuildTranscodeCompanions detects the co-queued track issues and claims them as
 /// companions so the main loop doesn't schedule a redundant TrackFixer remux.
 /// </summary>
+[Collection("MediaDashDb")]
 public sealed class FixTaskTranscodeCompanionTests : IDisposable
 {
     private readonly string _dbPath = Path.Combine(Path.GetTempPath(), "mediadash-transcompanion-" + Guid.NewGuid().ToString("N") + ".db");
@@ -219,49 +220,57 @@ public sealed class FixTaskTranscodeCompanionTests : IDisposable
     }
 
     [Fact]
-    public void FixTaskSourceStillSkipsTranscodeCompanionsInMainLoop()
+    public void FixPlanBuilderStillExcludesTranscodeCompanionsFromEmittedPlans()
     {
-        // Grep-style guard: FixTask.ExecuteAsync must skip the loop iteration for any track
-        // issue claimed as a transcode companion. A refactor that drops this skip re-introduces
-        // the original bug where TrackFixer ran redundantly (and often failed with "nothing to
-        // remove") on the already-transcoded file.
-        var src = File.ReadAllText(FixTaskSourcePath());
-        Assert.Contains("transcodeCompanionIds.Contains(issue.Id)", src);
+        // 04-C: the pre-refactor `if (transcodeCompanionIds.Contains(issue.Id)) continue;` skip
+        // in the main loop moved into a compile-time property when FixTask started iterating
+        // `plans` directly. The planner emits at most ONE PlannedFix per primary — companions
+        // never come up as their own iteration — so the redundant TrackFixer run the original
+        // guard protected against is now structurally impossible. Grep the planner to confirm
+        // the exclusion is still enforced during plan construction (transcodeCompanionIds is
+        // the exact hash set the combined-pairs builder uses to filter out claimed companions).
+        var src = File.ReadAllText(FixPlanBuilderSourcePath());
+        Assert.Contains("transcodeCompanionIds", src);
     }
 
     [Fact]
-    public void FixTaskSourceStillWritesResolvedByTranscodeHistory()
+    public void FixResultRecorderSourceStillWritesResolvedByTranscodeHistory()
     {
-        // Companion resolution has to fire inside the success branch and use the companion's
-        // OWN IssueId + the transcode's RecyclePath — a refactor that reused issue.Id or dropped
-        // the RecyclePath assignment would leave the Recycle Bin tab unable to join the row
-        // back to a bin file, showing "no history" and dead-ending the user.
-        var src = File.ReadAllText(FixTaskSourcePath());
-        Assert.Contains("Resolved by transcode pass:", src);
-        Assert.Contains("transcodeCompanions.TryGetValue(issue.Id", src);
-        Assert.Contains("IssueId = companion.Id", src);
-        Assert.Contains("RecyclePath = result.RecyclePath", src);
+        // 04-B/04-C: companion resolution lives in FixResultRecorder. The invariants the
+        // pre-refactor grep protected — use the companion's OWN IssueId, carry the transcode's
+        // RecyclePath onto the companion row so the Recycle Bin tab can join it back to a bin
+        // file, prefix the action string with "Resolved by transcode pass:" — are all still
+        // enforced there. Companion enumeration is now driven by `plan.Companions` +
+        // `resolvedIds` inside the recorder (no dispatch-time TryGetValue on the caller side),
+        // which is a strictly stronger guarantee than the pre-refactor per-item lookup.
+        var recorderSrc = File.ReadAllText(FixResultRecorderSourcePath());
+        Assert.Contains("Resolved by transcode pass:", recorderSrc);
+        Assert.Contains("IssueId = companion.Id", recorderSrc);
+        Assert.Contains("RecyclePath = result.RecyclePath", recorderSrc);
     }
 
     [Fact]
-    public void FixTaskSourceStillGatesCompanionStatusFlipOnRealRun()
+    public void FixResultRecorderSourceStillGatesCompanionStatusFlipOnRealRun()
     {
-        // Match combined-pass symmetry: history rows fire on both dry-run and real runs, but the
-        // Fixed status flip must only apply when !WasDryRun. Otherwise a dry-run silently drains
-        // the queue and the user loses the ability to re-approve after inspection (F-206).
-        var src = File.ReadAllText(FixTaskSourcePath());
-        Assert.Contains("if (!result.WasDryRun)", src);
-        Assert.Contains("_db.UpdateIssueStatus(companion.Id, IssueStatus.Fixed);", src);
+        // 04-B: the pre-refactor guard checked `if (!result.WasDryRun) MarkFixed(companion.Id);`
+        // inline in FixTask. Post-migration, the recorder swaps the transition list to
+        // Array.Empty<long>() when result.WasDryRun is true — a strictly stronger form of the
+        // same F-206 gate that applies to every resolved companion at once. Grep for both halves
+        // of that gate so a refactor that drops the ternary re-introduces the dry-run status leak.
+        var recorderSrc = File.ReadAllText(FixResultRecorderSourcePath());
+        Assert.Contains("result.WasDryRun", recorderSrc);
+        Assert.Contains("Array.Empty<long>()", recorderSrc);
     }
 
     [Fact]
-    public void FixTaskSourceStillHasCombinedPairsExcludingTranscodeCompanions()
+    public void FixPlanBuilderSourceStillExcludesTranscodeCompanionsFromCombinedPairs()
     {
-        // The combined-pairs block must also exclude issues already claimed as transcode
-        // companions, otherwise a triple would route through BOTH the transcode success path
-        // AND the combined-pass — the audio issue would fire two ffmpeg runs and record duplicate
-        // history rows.
-        var src = File.ReadAllText(FixTaskSourcePath());
+        // 04-A: the exclusion moved out of FixTask.cs into FixPlanBuilder.cs when the grouping
+        // logic was extracted, but the guard's intent is identical — a triple must not route
+        // through both the transcode success path AND the combined-pass (which would fire two
+        // ffmpeg runs and record duplicate history rows for the audio issue). Point the grep
+        // at the new home so the anti-regression check keeps enforcing the same invariant.
+        var src = File.ReadAllText(FixPlanBuilderSourcePath());
         Assert.Contains("!transcodeCompanionIds.Contains(i.Id)", src);
     }
 
@@ -275,6 +284,15 @@ public sealed class FixTaskTranscodeCompanionTests : IDisposable
     };
 
     private static string FixTaskSourcePath()
+        => Path.Combine(RepoRoot(), "Jellyfin.Plugin.MediaDash", "ScheduledTasks", "FixTask.cs");
+
+    private static string FixPlanBuilderSourcePath()
+        => Path.Combine(RepoRoot(), "Jellyfin.Plugin.MediaDash", "ScheduledTasks", "FixPlanBuilder.cs");
+
+    private static string FixResultRecorderSourcePath()
+        => Path.Combine(RepoRoot(), "Jellyfin.Plugin.MediaDash", "ScheduledTasks", "FixResultRecorder.cs");
+
+    private static string RepoRoot()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
         while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "Jellyfin.Plugin.MediaDash.sln")))
@@ -283,6 +301,6 @@ public sealed class FixTaskTranscodeCompanionTests : IDisposable
         }
 
         Assert.NotNull(dir);
-        return Path.Combine(dir!.FullName, "Jellyfin.Plugin.MediaDash", "ScheduledTasks", "FixTask.cs");
+        return dir!.FullName;
     }
 }

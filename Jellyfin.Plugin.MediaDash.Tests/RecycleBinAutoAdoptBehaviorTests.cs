@@ -47,8 +47,10 @@ public class RecycleBinAutoAdoptBehaviorTests
         // Users upgrading from a prior build have the diagnostic persisted in their SQLite
         // table. Startup must remove those so the Errors tab isn't polluted with rows that no
         // longer describe reality (the batches have been auto-adopted by the new pass).
-        var src = File.ReadAllText(RepoFile("Jellyfin.Plugin.MediaDash", "Api", "Diagnostics.cs"));
-        var start = src.IndexOf("public static void PurgeObsolete", StringComparison.Ordinal);
+        // 02-C: the actual sweep implementation moved to DiagnosticService.PurgeObsolete; the
+        // static Diagnostics.PurgeObsolete facade forwards to it. Grep the service source.
+        var src = File.ReadAllText(RepoFile("Jellyfin.Plugin.MediaDash", "Api", "DiagnosticService.cs"));
+        var start = src.IndexOf("public void PurgeObsolete", StringComparison.Ordinal);
         Assert.True(start > 0);
         var body = ExtractMethodBody(src, start);
         Assert.Contains("RecycleBin.LegacyBatchNeedsReview", body);

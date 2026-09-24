@@ -55,6 +55,14 @@ public sealed class SuspiciousFileScanner : IScanner
     /// <inheritdoc />
     public IssueType Type => IssueType.MalwareRisk;
 
+    /// <inheritdoc />
+    // MD-007: this scanner emits executable/script paths that never match ScanTask's media-only
+    // scannedPaths list, so the default scoped-delete branch used to leave prior Detected rows in
+    // place and every scoped scan appended another duplicate. Opting out of scoped replacement is
+    // safe because RunScanAsync already walks every currently-enabled library root each run —
+    // the returned set IS the authoritative snapshot for MalwareRisk under the current scope.
+    public bool AlwaysUnscoped => true;
+
     /// <summary>
     /// Returns true when a file path's extension is on the suspicious list. Extracted for direct unit-testing.
     /// </summary>

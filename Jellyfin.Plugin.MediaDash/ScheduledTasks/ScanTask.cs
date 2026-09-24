@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Data.Enums;
+using Jellyfin.Plugin.MediaDash.Configuration;
 using Jellyfin.Plugin.MediaDash.Data;
 using Jellyfin.Plugin.MediaDash.Scanners;
 using MediaBrowser.Controller.Entities;
@@ -30,6 +31,8 @@ public sealed class ScanTask : IScheduledTask
     private readonly IEnumerable<IScanner> _scanners;
     private readonly MediaDashDb _db;
     private readonly ISessionManager _sessionManager;
+    private readonly RunState _runState;
+    private readonly IPluginConfigurationProvider _configProvider;
     private readonly ILogger<ScanTask> _logger;
 
     /// <summary>
@@ -39,32 +42,30 @@ public sealed class ScanTask : IScheduledTask
     /// <param name="scanners">All registered scanners.</param>
     /// <param name="db">The plugin database.</param>
     /// <param name="sessionManager">Instance of the <see cref="ISessionManager"/> interface.</param>
+    /// <param name="runState">The shared run-state holder (02-A).</param>
+    /// <param name="configProvider">Configuration snapshot provider (02-A).</param>
     /// <param name="logger">Instance of the <see cref="ILogger{ScanTask}"/> interface.</param>
-    public ScanTask(ILibraryManager libraryManager, IEnumerable<IScanner> scanners, MediaDashDb db, ISessionManager sessionManager, ILogger<ScanTask> logger)
+    public ScanTask(
+        ILibraryManager libraryManager,
+        IEnumerable<IScanner> scanners,
+        MediaDashDb db,
+        ISessionManager sessionManager,
+        RunState runState,
+        IPluginConfigurationProvider configProvider,
+        ILogger<ScanTask> logger)
     {
         _libraryManager = libraryManager;
         _scanners = scanners;
         _db = db;
         _sessionManager = sessionManager;
+        _runState = runState;
+        _configProvider = configProvider;
         _logger = logger;
+        // 02-A: bridge the DI singleton to Plugin.AttachedRunState so the legacy Plugin.CurrentActivity /
+        // ScanScannersDone/Total facades (still used by ProbingScannerBase and the older tests) reach
+        // this same instance. Idempotent — FixTask's ctor also does this on first resolution.
+        Plugin.AttachedRunState = runState;
     }
-
-    /// <summary>
-    /// Gets or sets a value indicating whether the next run skips the server-idle check.
-    /// Set by the dashboard's "Scan now" button — the person clicking it is themselves an active session.
-    /// </summary>
-    internal static bool BypassIdleCheckOnce { get; set; }
-
-    /// <summary>
-    /// Gets or sets when the most recent USER-triggered scan finished (UTC). The opportunistic
-    /// scheduled <see cref="FixTask"/> checks this against <see cref="ManualScanReviewGrace"/> and
-    /// skips its run when we're still inside the grace window — otherwise a user who hits "Scan"
-    /// and starts reviewing the Issues tab watches issues auto-fix out from under them mid-review.
-    /// The explicit "Run fixes now" button bypasses via <see cref="FixTask.BypassIdleCheckOnce"/>
-    /// so users can opt out of the grace at any time. Reset to <c>null</c> when the run wasn't
-    /// manual — scheduled scans DON'T grant the grace period (there's no user to protect).
-    /// </summary>
-    internal static DateTime? ManualScanCompletedUtc { get; set; }
 
     /// <inheritdoc />
     public string Name => I18n.I18nCatalog.GetHtml(System.Globalization.CultureInfo.CurrentUICulture.Name, "task.scan.name", "Scan libraries for issues");
@@ -81,15 +82,38 @@ public sealed class ScanTask : IScheduledTask
     /// <inheritdoc />
     public async Task ExecuteAsync(IProgress<double> progress, CancellationToken cancellationToken)
     {
-        var bypassIdleCheck = BypassIdleCheckOnce;
-        BypassIdleCheckOnce = false;
-        if (Plugin.Instance!.Configuration.PauseDuringPlayback && !bypassIdleCheck && IdleCheck.IsServerBusy(_sessionManager))
+        var bypassIdleCheck = _runState.ConsumeBypassIdleCheck(RunRole.Scan);
+        // 02-A: capture a coherent snapshot once at run start so a config save mid-scan can't
+        // flip the idle policy or Off-type filter halfway through. Later per-item checks that
+        // legitimately want to observe drift (ScanTask has none today; FixTask has them at
+        // line ~575) re-call the provider.
+        var runConfig = _configProvider.GetSnapshot();
+        if (runConfig.PauseDuringPlayback && !bypassIdleCheck && IdleCheck.IsServerBusy(_sessionManager))
         {
             _logger.LogInformation("Skipping scheduled scan: someone is watching or was recently active.");
             progress.Report(100);
             return;
         }
 
+        if (!_runState.TryBegin(RunRole.Scan))
+        {
+            _logger.LogInformation("Skipping scheduled scan: another scan is already running in this process.");
+            progress.Report(100);
+            return;
+        }
+
+        try
+        {
+            await ExecuteScanBodyAsync(bypassIdleCheck, runConfig, progress, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _runState.Complete(RunRole.Scan);
+        }
+    }
+
+    private async Task ExecuteScanBodyAsync(bool bypassIdleCheck, PluginConfiguration runConfig, IProgress<double> progress, CancellationToken cancellationToken)
+    {
         // ponytail: widened for v0.9 to include non-video kinds (music, audiobook, book, comic)
         var items = _libraryManager.GetItemList(new InternalItemsQuery
         {
@@ -211,7 +235,7 @@ public sealed class ScanTask : IScheduledTask
         }
 
         var scanIsScoped = false;
-        var enabledLibraries = Plugin.Instance!.Configuration.EnabledLibraries;
+        var enabledLibraries = runConfig.EnabledLibraries;
         if (enabledLibraries.Length > 0)
         {
             scanIsScoped = true;
@@ -261,8 +285,24 @@ public sealed class ScanTask : IScheduledTask
         // Without this filter every registered scanner ran on every scheduled scan regardless of the
         // user's settings — field reports of PlayabilityScanner / AudioLanguageScanner chewing CPU
         // while the user had only EmbeddedCoverArt enabled trace to here.
-        var config = Plugin.Instance!.Configuration;
-        var scanners = _scanners.Where(s => config.GetFixMode(s.Type) != Configuration.FixMode.Off).ToList();
+        // MD-008: a scanner runs when ANY of its produced types is enabled, not just its primary
+        // one. Otherwise a multi-type scanner (TranscodeLogScanner produces both HeavyTranscode
+        // and FailedTranscode) is skipped whenever the primary type is Off — silently disabling
+        // the secondary feature.
+        var scanners = _scanners.Where(s => AnyProducedTypeEnabled(s, runConfig)).ToList();
+
+        // Targeted-rescan filter (issue #64). ConfigChangeRescanner arms this via RunState so a
+        // single-setting edit only re-runs the scanner(s) that read that setting, not the whole
+        // library sweep. Consumed once — a scheduled sweep after the config edit runs everything.
+        var typeFilter = _runState.ConsumeNextScanTypeFilter();
+        if (typeFilter is not null && typeFilter.Count > 0)
+        {
+            scanners = scanners
+                .Where(s => typeFilter.Contains(s.Type) || s.AdditionalTypes.Any(t => typeFilter.Contains(t)))
+                .ToList();
+            _logger.LogInformation("MediaDash scan narrowed to {Count} scanner(s) via NextRunTypeFilter: {Types}", scanners.Count, string.Join(", ", typeFilter));
+        }
+
         _logger.LogInformation("MediaDash scan starting: {ItemCount} items, {ScannerCount} scanners ({SkippedCount} skipped as Off)", items.Count, scanners.Count, _scanners.Count() - scanners.Count);
         // Publish the run counts so the dashboard can render "N / M scanners done" alongside the
         // progress bar (same shape as fix runs' "N / M items left"). Cleared to null in the finally
@@ -285,7 +325,31 @@ public sealed class ScanTask : IScheduledTask
                 Plugin.CurrentActivityLabel = scanner.GetType().Name;
                 Plugin.CurrentActivity = null;
 
-                var issues = await scanner.ScanAsync(items, scannerProgress, cancellationToken).ConfigureAwait(false);
+                // MD-006: per-scanner exception boundary. ProbingScannerBase already isolates
+                // per-file probe failures, but a scanner-level exception (host-API drift, network
+                // parser blowing up, LINQ NRE in an aggregation step) used to escape here and
+                // abort the whole scan — every later scanner skipped, their prior Detected rows
+                // left stale for another cycle. Now: rethrow cancellation, diagnose everything
+                // else with the scanner's type + message, keep the earlier scanners' results
+                // (we don't touch the DB when we didn't get issues), and move on.
+                IReadOnlyList<Data.Issue>? issues = null;
+                try
+                {
+                    issues = await scanner.ScanAsync(items, scannerProgress, cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "MediaDash scanner {Type} failed; continuing with remaining scanners.", scanner.Type);
+                    Api.Diagnostics.Record(
+                        "ScanTask." + scanner.GetType().Name + ".Failed",
+                        "Scanner " + scanner.GetType().Name + " (" + scanner.Type + ") threw " + ex.GetType().Name + ": " + ex.Message + ". Its prior Detected rows are left in place; the next scan will retry. Every other scanner in this run continues normally.");
+                    Plugin.ScanScannersDone = i + 1;
+                    continue;
+                }
 
                 // Feed the doomed-file set from scanners whose fix deletes the file, so later
                 // probing scanners can skip it. Duplicate (loser copies) is by far the biggest
@@ -303,7 +367,40 @@ public sealed class ScanTask : IScheduledTask
                 // opt out of the scoped-delete branch — otherwise stale rows sit in the DB forever when the
                 // user has EnabledLibraries set, because scannedPaths only contains video file paths.
                 var pathsForReplace = scanner.AlwaysUnscoped ? null : scannedPaths;
-                _db.ReplaceDetectedIssues(scanner.Type, issues, pathsForReplace);
+
+                // MD-008: group by Issue.Type and persist each group under its own type so
+                // multi-type scanners (TranscodeLogScanner) don't misclassify secondary rows as
+                // the primary type. Also replaces the primary type's rows even when the scanner
+                // emits nothing of that type this run (empty list = "no findings, wipe stale").
+                var groupedByType = issues.GroupBy(iss => iss.Type).ToDictionary(g => g.Key, g => (IReadOnlyList<Data.Issue>)g.ToList());
+                var typesToReplace = new List<Data.IssueType> { scanner.Type };
+                typesToReplace.AddRange(scanner.AdditionalTypes);
+
+                var persistFailed = false;
+                foreach (var typeToReplace in typesToReplace)
+                {
+                    var groupIssues = groupedByType.TryGetValue(typeToReplace, out var g) ? g : (IReadOnlyList<Data.Issue>)System.Array.Empty<Data.Issue>();
+                    try
+                    {
+                        _db.ReplaceDetectedIssues(typeToReplace, groupIssues, pathsForReplace);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        _logger.LogWarning(ex, "Persisting scanner {Type} results failed; retaining prior Detected rows.", typeToReplace);
+                        Api.Diagnostics.Record(
+                            "ScanTask." + scanner.GetType().Name + ".PersistFailed",
+                            "Failed to persist scanner " + scanner.GetType().Name + " (" + typeToReplace + ") results: " + ex.GetType().Name + ": " + ex.Message + ". Prior Detected rows for this type are retained; next successful scan will refresh them.");
+                        persistFailed = true;
+                        break;
+                    }
+                }
+
+                if (persistFailed)
+                {
+                    Plugin.ScanScannersDone = i + 1;
+                    continue;
+                }
+
                 _logger.LogInformation("MediaDash scanner {Type} found {Count} issues", scanner.Type, issues.Count);
                 Plugin.ScanScannersDone = i + 1;
             }
@@ -322,7 +419,7 @@ public sealed class ScanTask : IScheduledTask
         // restore). Cheap: at most a couple stats per recent history row.
         try
         {
-            Plugin.RedownloadWarnings = Api.RedownloadDetector.Detect(_db, TimeSpan.FromDays(30));
+            Plugin.RedownloadWarnings = Api.RedownloadDetector.Detect(_db.History, TimeSpan.FromDays(30));
             if (Plugin.RedownloadWarnings.Count > 0)
             {
                 _logger.LogInformation("MediaDash detected {Count} file(s) that appear to have been replaced after a successful re-encode.", Plugin.RedownloadWarnings.Count);
@@ -338,7 +435,7 @@ public sealed class ScanTask : IScheduledTask
         // set the timestamp — there's no user to shield from an opportunistic fix run.
         if (bypassIdleCheck)
         {
-            ManualScanCompletedUtc = DateTime.UtcNow;
+            _runState.RecordManualScanCompleted();
         }
 
         progress.Report(100);
@@ -409,5 +506,27 @@ public sealed class ScanTask : IScheduledTask
                 TimeOfDayTicks = TimeSpan.Zero.Ticks
             }
         ];
+    }
+
+    // MD-008: returns true if the scanner's primary type OR any AdditionalTypes are enabled.
+    // A multi-type scanner (TranscodeLogScanner produces both HeavyTranscode and FailedTranscode)
+    // must run when either mode is set, otherwise setting the primary type to Off silently
+    // disables the secondary feature.
+    private static bool AnyProducedTypeEnabled(Scanners.IScanner scanner, Configuration.PluginConfiguration config)
+    {
+        if (config.GetFixMode(scanner.Type) != Configuration.FixMode.Off)
+        {
+            return true;
+        }
+
+        foreach (var extraType in scanner.AdditionalTypes)
+        {
+            if (config.GetFixMode(extraType) != Configuration.FixMode.Off)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

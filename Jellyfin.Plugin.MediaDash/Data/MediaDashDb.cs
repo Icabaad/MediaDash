@@ -13,23 +13,17 @@ namespace Jellyfin.Plugin.MediaDash.Data;
 /// </summary>
 public sealed class MediaDashDb
 {
-    // Bump when a semantic change to the decode check would make old cache entries misleading.
-    // v1: -xerror + exit-code-only in the decode check (2026-07-20) — previous stderr-noise-as-error entries invalidated.
-    // v3: history.acknowledged column for redownload-warning acknowledgement (2026-08-17).
-    // v4: issues.confidence column for the duplicate confidence ladder (2026-08-22).
-    // v5: restored_paths table for auto-fix veto after user restore (2026-08-25).
-    // v6: purge decode_cache after HasTruncationMarker "Truncating packet" fix (2026-08-31) — cached
-    //     stderr from pre-fix ffmpeg runs poisoned every scan into re-flagging the same file.
-    private const int SchemaVersion = 6;
+    // Kept for source-compat with any external caller that read this const from MediaDashDb before
+    // 05-C.2 relocated it onto MediaDashSchema. Same value, same semantics; delete once no in-tree
+    // reference points at MediaDashDb.RestoredPathAnyType.
+    internal const int RestoredPathAnyType = MediaDashSchema.RestoredPathAnyType;
 
-    // Sentinel used in restored_paths.type when the restore came from a manifest-only bin entry
-    // (RecycleBin/Items/Restore). We don't know which IssueType triggered the original recycle in
-    // that case — the manifest sidecar only stores the origin path. Blocking auto-queue for ALL
-    // types at that path is the safe default: the user restored the file, so they don't want any
-    // scanner to auto-fix it again. Manual approval from the Issues tab still works.
-    internal const int RestoredPathAnyType = -1;
-
-    private readonly string _connectionString;
+    private readonly MediaDashConnectionFactory _connectionFactory;
+    private readonly IssueStore _issues;
+    private readonly HistoryStore _history;
+    private readonly ProbeCacheStore _probes;
+    private readonly DiagnosticStore _diagnostics;
+    private readonly RestoreOperationStore _restoreOps;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="MediaDashDb"/> class.
@@ -46,7 +40,13 @@ public sealed class MediaDashDb
     /// <param name="dbPath">Full path of the SQLite database file.</param>
     internal MediaDashDb(string dbPath)
     {
-        _connectionString = new SqliteConnectionStringBuilder { DataSource = dbPath }.ToString();
+        _connectionFactory = new MediaDashConnectionFactory(
+            new SqliteConnectionStringBuilder { DataSource = dbPath }.ToString());
+        _issues = new IssueStore(_connectionFactory);
+        _history = new HistoryStore(_connectionFactory);
+        _probes = new ProbeCacheStore(_connectionFactory);
+        _diagnostics = new DiagnosticStore(_connectionFactory);
+        _restoreOps = new RestoreOperationStore(_connectionFactory);
 
         SqliteConnection connection;
         try
@@ -66,104 +66,23 @@ public sealed class MediaDashDb
             throw new InvalidOperationException(msg, ex);
         }
 
-        using var db = connection;
-        using var cmd = db.CreateCommand();
-        cmd.CommandText = """
-            PRAGMA journal_mode = WAL;
+        using (var db = connection)
+        {
+            MediaDashSchema.CreateTables(db);
+            MediaDashSchema.Migrate(db);
+        }
 
-            CREATE TABLE IF NOT EXISTS issues (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                type INTEGER NOT NULL,
-                item_id TEXT NOT NULL,
-                path TEXT NOT NULL,
-                details TEXT NOT NULL DEFAULT '{}',
-                suggested_fix TEXT NOT NULL DEFAULT '',
-                size_savings INTEGER NOT NULL DEFAULT 0,
-                status INTEGER NOT NULL DEFAULT 0,
-                detected_at_utc INTEGER NOT NULL,
-                confidence REAL NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_issues_type_status ON issues(type, status);
-
-            CREATE TABLE IF NOT EXISTS probe_cache (
-                path TEXT PRIMARY KEY,
-                size INTEGER NOT NULL,
-                mtime_utc INTEGER NOT NULL,
-                probed_at_utc INTEGER NOT NULL,
-                json TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS decode_cache (
-                path TEXT PRIMARY KEY,
-                size INTEGER NOT NULL,
-                mtime_utc INTEGER NOT NULL,
-                checked_at_utc INTEGER NOT NULL,
-                error TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS format_probe_cache (
-                path TEXT PRIMARY KEY,
-                size INTEGER NOT NULL,
-                mtime_utc INTEGER NOT NULL,
-                probed_at_utc INTEGER NOT NULL,
-                ok INTEGER NOT NULL,
-                reason TEXT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS file_hashes (
-                path TEXT NOT NULL,
-                size INTEGER NOT NULL,
-                mtime INTEGER NOT NULL,
-                hash TEXT NOT NULL,
-                PRIMARY KEY (path, size, mtime)
-            );
-
-            CREATE TABLE IF NOT EXISTS history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                issue_id INTEGER NOT NULL,
-                type INTEGER NOT NULL,
-                path TEXT NOT NULL,
-                action TEXT NOT NULL,
-                bytes_freed INTEGER NOT NULL DEFAULT 0,
-                recycle_path TEXT NULL,
-                fixed_at_utc INTEGER NOT NULL,
-                dry_run INTEGER NOT NULL DEFAULT 0,
-                restored INTEGER NOT NULL DEFAULT 0,
-                success INTEGER NOT NULL DEFAULT 1,
-                acknowledged INTEGER NOT NULL DEFAULT 0
-            );
-
-            CREATE TABLE IF NOT EXISTS diagnostics (
-                source TEXT NOT NULL,
-                message_hash INTEGER NOT NULL,
-                message TEXT NOT NULL,
-                count INTEGER NOT NULL DEFAULT 1,
-                at_utc INTEGER NOT NULL,
-                last_at_utc INTEGER NOT NULL,
-                PRIMARY KEY (source, message_hash)
-            );
-            CREATE INDEX IF NOT EXISTS idx_diagnostics_last_at_utc ON diagnostics(last_at_utc);
-
-            CREATE TABLE IF NOT EXISTS plugin_state (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS restored_paths (
-                path TEXT NOT NULL,
-                type INTEGER NOT NULL,
-                restored_at_utc INTEGER NOT NULL,
-                PRIMARY KEY (path, type)
-            );
-            """;
-        cmd.ExecuteNonQuery();
-
-        MigrateSchema(db);
+        // 05-B: any Pending restore_operations row is orphan work from a process that died mid-
+        // restore. Convert to NeedsReview so a subsequent restore of the same bin entry can
+        // proceed only after a human looks at the leftover state. Idempotent; a fresh install has
+        // no rows to reconcile so this is a cheap no-op. 05-C.6: delegated to
+        // RestoreOperationStore, which opens its own connection through the shared factory.
+        _restoreOps.ReconcilePendingRestoresAtStartup();
 
         // Wire the persistent diagnostics buffer to this DB. Previously the buffer was in-memory
         // only; recorded errors vanished on every plugin reload / update. Attach reloads persisted
-        // rows into the buffer and installs the DB reference so future Record calls write through.
-        Api.Diagnostics.Attach(this);
+        // rows into the buffer and installs the store reference so future Record calls write through.
+        Api.Diagnostics.Attach(_diagnostics);
 
         // Startup self-heal: obsolete diagnostics that the current build no longer emits get
         // purged from disk here so upgrades don't leave the Errors tab full of stale flags for
@@ -185,157 +104,39 @@ public sealed class MediaDashDb
     /// </summary>
     public static string? DataDirectory { get; private set; }
 
-    // Each step below is idempotent by design (DELETE on empty table is a no-op; column probes precede
-    // any ALTER TABLE; back-fills use conditional WHERE). PRAGMA user_version is only advanced after
-    // every step succeeds, so a crash mid-migration re-runs cleanly on next boot. Do not restructure
-    // this method into an all-or-nothing transaction without preserving that invariant, or
-    // upgrades from pre-v1 installs will start failing on transient IO errors.
-    private static void MigrateSchema(SqliteConnection connection)
-    {
-        using var getVersion = connection.CreateCommand();
-        getVersion.CommandText = "PRAGMA user_version";
-        var current = Convert.ToInt32(getVersion.ExecuteScalar() ?? 0, CultureInfo.InvariantCulture);
-        if (current >= SchemaVersion)
-        {
-            return;
-        }
+    // Exposed for future 05-C sub-substeps: when a method moves from MediaDashDb to a dedicated
+    // store, the store's ctor takes this factory and opens its own connections. Internal so it
+    // stays inside the plugin assembly.
+    internal MediaDashConnectionFactory ConnectionFactory => _connectionFactory;
 
-        if (current < 1)
-        {
-            using var clearDecode = connection.CreateCommand();
-            clearDecode.CommandText = "DELETE FROM decode_cache";
-            clearDecode.ExecuteNonQuery();
-        }
+    // 05-C.2: single owner of the `issues` table. Facade methods below forward here; consumers
+    // that only touch issues (fixers, ScanTask, FixTask, FixExecutor, ConfigChangeRescanner, the
+    // controller's issue endpoints) inject IssueStore directly via DI and skip this facade.
+    // Exposed so PluginServiceRegistrator can hand the same instance to those consumers.
+    internal IssueStore Issues => _issues;
 
-        if (current < 2)
-        {
-            // Add the success column on an existing v1 database. A fresh install already gets the column
-            // via CREATE TABLE above; guard the ALTER so it doesn't blow up with "duplicate column name".
-            var hasSuccess = false;
-            using (var probe = connection.CreateCommand())
-            {
-                probe.CommandText = "PRAGMA table_info(history)";
-                using var pr = probe.ExecuteReader();
-                while (pr.Read())
-                {
-                    if (string.Equals(pr.GetString(1), "success", StringComparison.Ordinal))
-                    {
-                        hasSuccess = true;
-                        break;
-                    }
-                }
-            }
+    // 05-C.3: single owner of the `history` table (except RecordFixOutcome, which stays here
+    // because it's the cross-store transaction that atomically writes history AND updates issues
+    // in one SQLite tx). Same DI factory pattern as IssueStore — consumers migrate one family at
+    // a time.
+    internal HistoryStore History => _history;
 
-            if (!hasSuccess)
-            {
-                using var addColumn = connection.CreateCommand();
-                addColumn.CommandText = "ALTER TABLE history ADD COLUMN success INTEGER NOT NULL DEFAULT 1";
-                addColumn.ExecuteNonQuery();
+    // 05-C.4: single owner of the four probe-cache tables (probe_cache, file_hashes,
+    // format_probe_cache, decode_cache). Consumed by FfprobeService / FileHasher /
+    // BookProbeService / ComicProbeService. Cache-only — no cross-store atomicity concerns.
+    internal ProbeCacheStore Probes => _probes;
 
-                // Back-fill legacy rows by parsing the action string. FixTask's catch handlers historically
-                // prefixed failure messages with "Fix failed"; other fixer-returned failures don't share the
-                // prefix, but they're rare and any mistake here only mis-labels a History filter chip.
-                using var backfill = connection.CreateCommand();
-                backfill.CommandText = "UPDATE history SET success = 0 WHERE action LIKE 'Fix failed%'";
-                backfill.ExecuteNonQuery();
-            }
-        }
+    // 05-C.5: single owner of the `diagnostics` table. Consumed by DiagnosticService (and, via
+    // that service, the Api.Diagnostics static bridge + MediaDashController /Errors endpoints).
+    // The plugin_state / GetState / SetState pair stays on MediaDashDb — extracting a 2-method
+    // store with 2 non-diagnostic consumers would be speculative and worsen the dep graph.
+    internal DiagnosticStore Diagnostics => _diagnostics;
 
-        if (current < 3)
-        {
-            var hasAck = false;
-            using (var probe = connection.CreateCommand())
-            {
-                probe.CommandText = "PRAGMA table_info(history)";
-                using var pr = probe.ExecuteReader();
-                while (pr.Read())
-                {
-                    if (string.Equals(pr.GetString(1), "acknowledged", StringComparison.Ordinal))
-                    {
-                        hasAck = true;
-                        break;
-                    }
-                }
-            }
-
-            if (!hasAck)
-            {
-                using var addColumn = connection.CreateCommand();
-                addColumn.CommandText = "ALTER TABLE history ADD COLUMN acknowledged INTEGER NOT NULL DEFAULT 0";
-                addColumn.ExecuteNonQuery();
-            }
-        }
-
-        if (current < 4)
-        {
-            // Add issues.confidence for the duplicate confidence ladder. Nullable so pre-migration
-            // rows (all non-Duplicate types + already-detected Duplicate rows) still queue normally
-            // — the auto-queue gate treats NULL as "not confidence-gated" (see QueueDetectedIssues).
-            var hasConfidence = false;
-            using (var probe = connection.CreateCommand())
-            {
-                probe.CommandText = "PRAGMA table_info(issues)";
-                using var pr = probe.ExecuteReader();
-                while (pr.Read())
-                {
-                    if (string.Equals(pr.GetString(1), "confidence", StringComparison.OrdinalIgnoreCase))
-                    {
-                        hasConfidence = true;
-                        break;
-                    }
-                }
-            }
-
-            if (!hasConfidence)
-            {
-                using var addColumn = connection.CreateCommand();
-                addColumn.CommandText = "ALTER TABLE issues ADD COLUMN confidence REAL NULL";
-                addColumn.ExecuteNonQuery();
-            }
-        }
-
-        if (current < 5)
-        {
-            // restored_paths tracks every (path, type) tuple a user has restored from the recycle
-            // bin. FixTask's auto-queue step filters against this table so a restored file never
-            // gets auto-fixed again — the user explicitly reversed the fix; treat that as a strong
-            // "don't touch this" signal. Manual approval from the Issues tab still works.
-            using var create = connection.CreateCommand();
-            create.CommandText = """
-                CREATE TABLE IF NOT EXISTS restored_paths (
-                    path TEXT NOT NULL,
-                    type INTEGER NOT NULL,
-                    restored_at_utc INTEGER NOT NULL,
-                    PRIMARY KEY (path, type)
-                )
-                """;
-            create.ExecuteNonQuery();
-        }
-
-        if (current < 6)
-        {
-            // HasTruncationMarker used to treat "Truncating packet" ffmpeg warnings as truncation
-            // (v1.0.7.2 and earlier). Cached decode-error strings from those runs poisoned every
-            // subsequent scan into re-flagging the same MP4/M2TS/AVI file — path+size+mtime unchanged
-            // so the cache hit returned the stale error. Wipe the cache once so v1.0.7.3+ scanners
-            // get a fresh probe on every file. Also drop already-Queued Playability rows so users
-            // aren't stuck approving fake reports on their next fix run.
-            using var clearDecode = connection.CreateCommand();
-            clearDecode.CommandText = "DELETE FROM decode_cache";
-            clearDecode.ExecuteNonQuery();
-            using var clearQueued = connection.CreateCommand();
-#pragma warning disable CA2100 // (int)enum is a compile-time constant, not user input.
-            clearQueued.CommandText = "DELETE FROM issues WHERE type = " + (int)IssueType.Playability;
-#pragma warning restore CA2100
-            clearQueued.ExecuteNonQuery();
-        }
-
-        using var setVersion = connection.CreateCommand();
-#pragma warning disable CA2100 // SchemaVersion is a compile-time constant, and PRAGMA does not accept bound parameters.
-        setVersion.CommandText = $"PRAGMA user_version = {SchemaVersion}";
-#pragma warning restore CA2100
-        setVersion.ExecuteNonQuery();
-    }
+    // 05-C.6: single owner of the `restore_operations` table (schema v7). Consumed by
+    // RestoreService (the sole caller of the restore-workflow primitives) and by
+    // MediaDashDb's ctor reconciliation. Pre-05-B `TryClaimRestore` / `ReleaseRestoreClaim`
+    // deleted in the same sub-substep; `RestoreClaimTests.cs` deleted with them.
+    internal RestoreOperationStore RestoreOps => _restoreOps;
 
     private static string EnsureDbPath(IApplicationPaths applicationPaths)
     {
@@ -378,73 +179,17 @@ public sealed class MediaDashDb
     /// <param name="issues">The freshly detected issues.</param>
     /// <param name="scannedPaths">All file paths covered by this scan; null means the scan covered everything.</param>
     public void ReplaceDetectedIssues(IssueType type, IReadOnlyList<Issue> issues, IReadOnlyCollection<string>? scannedPaths = null)
-    {
-        using var connection = Open();
-        using var transaction = connection.BeginTransaction();
+        => _issues.ReplaceDetectedIssues(type, issues, scannedPaths);
 
-        if (scannedPaths is null)
-        {
-            using var delete = connection.CreateCommand();
-            delete.Transaction = transaction;
-            delete.CommandText = "DELETE FROM issues WHERE type = @type AND status = @detected";
-            delete.Parameters.AddWithValue("@type", (int)type);
-            delete.Parameters.AddWithValue("@detected", (int)IssueStatus.Detected);
-            delete.ExecuteNonQuery();
-        }
-        else
-        {
-            using var delete = connection.CreateCommand();
-            delete.Transaction = transaction;
-            delete.CommandText = "DELETE FROM issues WHERE type = @type AND status = @detected AND path = @path";
-            delete.Parameters.AddWithValue("@type", (int)type);
-            delete.Parameters.AddWithValue("@detected", (int)IssueStatus.Detected);
-            var pPath = delete.Parameters.Add("@path", SqliteType.Text);
-            foreach (var path in scannedPaths)
-            {
-                pPath.Value = path;
-                delete.ExecuteNonQuery();
-            }
-        }
-
-        using (var insert = connection.CreateCommand())
-        {
-            insert.Transaction = transaction;
-            // Dismissed rows suppress re-detection (the user said "never show this again");
-            // queued rows suppress duplicates. Fixed rows must NOT suppress — the same path can break again later.
-            insert.CommandText = """
-                INSERT INTO issues (type, item_id, path, details, suggested_fix, size_savings, status, detected_at_utc, confidence)
-                SELECT @type, @itemId, @path, @details, @suggestedFix, @sizeSavings, @detected, @detectedAt, @confidence
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM issues WHERE type = @type AND path = @path AND status IN (@queued, @dismissed))
-                """;
-            insert.Parameters.AddWithValue("@queued", (int)IssueStatus.Queued);
-            insert.Parameters.AddWithValue("@dismissed", (int)IssueStatus.Dismissed);
-            var pType = insert.Parameters.Add("@type", SqliteType.Integer);
-            var pItemId = insert.Parameters.Add("@itemId", SqliteType.Text);
-            var pPath = insert.Parameters.Add("@path", SqliteType.Text);
-            var pDetails = insert.Parameters.Add("@details", SqliteType.Text);
-            var pSuggestedFix = insert.Parameters.Add("@suggestedFix", SqliteType.Text);
-            var pSizeSavings = insert.Parameters.Add("@sizeSavings", SqliteType.Integer);
-            insert.Parameters.AddWithValue("@detected", (int)IssueStatus.Detected);
-            var pDetectedAt = insert.Parameters.Add("@detectedAt", SqliteType.Integer);
-            var pConfidence = insert.Parameters.Add("@confidence", SqliteType.Real);
-
-            foreach (var issue in issues)
-            {
-                pType.Value = (int)type;
-                pItemId.Value = issue.ItemId.ToString("N");
-                pPath.Value = issue.Path;
-                pDetails.Value = issue.DetailsJson;
-                pSuggestedFix.Value = issue.SuggestedFix;
-                pSizeSavings.Value = issue.SizeSavings;
-                pDetectedAt.Value = issue.DetectedAtUtc.Ticks;
-                pConfidence.Value = issue.Confidence.HasValue ? issue.Confidence.Value : (object)DBNull.Value;
-                insert.ExecuteNonQuery();
-            }
-        }
-
-        transaction.Commit();
-    }
+    /// <summary>
+    /// Wipes Detected rows for every supplied issue type. Queued and Dismissed rows are left
+    /// untouched — the user's approval / suppression outlives a config edit.
+    /// Called by <see cref="ScheduledTasks.ConfigChangeRescanner"/> after a config change
+    /// invalidates the details baked into an old scan (issue #64).
+    /// </summary>
+    /// <param name="types">The affected issue types.</param>
+    /// <returns>The number of rows removed.</returns>
+    public int WipeDetectedForTypes(IEnumerable<IssueType> types) => _issues.WipeDetectedForTypes(types);
 
     /// <summary>
     /// Gets issues, optionally filtered by type and status.
@@ -453,78 +198,14 @@ public sealed class MediaDashDb
     /// <param name="status">Filter by status, or null for all statuses.</param>
     /// <returns>The matching issues, newest first.</returns>
     public IReadOnlyList<Issue> GetIssues(IssueType? type = null, IssueStatus? status = null)
-    {
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = "SELECT id, type, item_id, path, details, suggested_fix, size_savings, status, detected_at_utc, confidence FROM issues"
-            + " WHERE (@type IS NULL OR type = @type) AND (@status IS NULL OR status = @status) ORDER BY id DESC";
-        cmd.Parameters.AddWithValue("@type", type is null ? DBNull.Value : (int)type);
-        cmd.Parameters.AddWithValue("@status", status is null ? DBNull.Value : (int)status);
-
-        var result = new List<Issue>();
-        using var reader = cmd.ExecuteReader();
-        while (reader.Read())
-        {
-            // F-014: use TryParseExact so a single malformed item_id (legacy row, botched DB
-            // edit, third-party tool experimenting) doesn't crash the whole /Status + /Issues
-            // surface with FormatException → HTTP 500. Log the row id + drop the malformed
-            // entry; the rest of the payload still renders. CLAUDE.md safety invariant #6.
-            var idColumn = reader.GetInt64(0);
-            var itemIdStr = reader.GetString(2);
-            if (!Guid.TryParseExact(itemIdStr, "N", out var itemId))
-            {
-                Api.Diagnostics.Record(
-                    "MediaDashDb.MalformedItemId",
-                    "Skipped issues row id=" + idColumn.ToString(CultureInfo.InvariantCulture) + ": item_id '" + itemIdStr + "' is not a valid 32-char hex GUID. Delete the row from SQLite to clean up (DELETE FROM issues WHERE id = " + idColumn.ToString(CultureInfo.InvariantCulture) + ";).");
-                continue;
-            }
-
-            result.Add(new Issue
-            {
-                Id = idColumn,
-                Type = (IssueType)reader.GetInt32(1),
-                ItemId = itemId,
-                Path = reader.GetString(3),
-                DetailsJson = reader.GetString(4),
-                SuggestedFix = reader.GetString(5),
-                SizeSavings = reader.GetInt64(6),
-                Status = (IssueStatus)reader.GetInt32(7),
-                DetectedAtUtc = new DateTime(reader.GetInt64(8), DateTimeKind.Utc),
-                Confidence = reader.IsDBNull(9) ? null : reader.GetDouble(9)
-            });
-        }
-
-        return result;
-    }
+        => _issues.GetIssues(type, status);
 
     /// <summary>
     /// Gets per-type counts and potential savings for open issues (Detected + Queued), plus the newest detection time.
     /// Queued items are already approved and waiting for the fix task, so their savings still count toward "space you could reclaim".
     /// </summary>
     /// <returns>One summary row per issue type that has open issues.</returns>
-    public IReadOnlyList<IssueSummary> GetSummary()
-    {
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = "SELECT type, COUNT(*), SUM(size_savings), MAX(detected_at_utc) FROM issues WHERE status IN (@detected, @queued) GROUP BY type";
-        cmd.Parameters.AddWithValue("@detected", (int)IssueStatus.Detected);
-        cmd.Parameters.AddWithValue("@queued", (int)IssueStatus.Queued);
-
-        var result = new List<IssueSummary>();
-        using var reader = cmd.ExecuteReader();
-        while (reader.Read())
-        {
-            result.Add(new IssueSummary
-            {
-                Type = (IssueType)reader.GetInt32(0),
-                Count = reader.GetInt32(1),
-                PotentialSavings = reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
-                NewestDetectedUtc = new DateTime(reader.GetInt64(3), DateTimeKind.Utc)
-            });
-        }
-
-        return result;
-    }
+    public IReadOnlyList<IssueSummary> GetSummary() => _issues.GetSummary();
 
     /// <summary>
     /// Looks up a cached ffprobe result that is still valid for the file's current size and modification time.
@@ -533,16 +214,7 @@ public sealed class MediaDashDb
     /// <param name="size">Current file size in bytes.</param>
     /// <param name="mtimeUtcTicks">Current last-write time in UTC ticks.</param>
     /// <returns>The cached ffprobe JSON, or null when absent or stale.</returns>
-    public string? GetCachedProbe(string path, long size, long mtimeUtcTicks)
-    {
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = "SELECT json FROM probe_cache WHERE path = @path AND size = @size AND mtime_utc = @mtime";
-        cmd.Parameters.AddWithValue("@path", path);
-        cmd.Parameters.AddWithValue("@size", size);
-        cmd.Parameters.AddWithValue("@mtime", mtimeUtcTicks);
-        return cmd.ExecuteScalar() as string;
-    }
+    public string? GetCachedProbe(string path, long size, long mtimeUtcTicks) => _probes.GetCachedProbe(path, size, mtimeUtcTicks);
 
     /// <summary>
     /// Stores an ffprobe result in the cache, replacing any previous entry for the path.
@@ -551,22 +223,7 @@ public sealed class MediaDashDb
     /// <param name="size">File size in bytes at probe time.</param>
     /// <param name="mtimeUtcTicks">Last-write time in UTC ticks at probe time.</param>
     /// <param name="json">Raw ffprobe JSON output.</param>
-    public void StoreProbe(string path, long size, long mtimeUtcTicks, string json)
-    {
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = """
-            INSERT INTO probe_cache (path, size, mtime_utc, probed_at_utc, json)
-            VALUES (@path, @size, @mtime, @probedAt, @json)
-            ON CONFLICT(path) DO UPDATE SET size = @size, mtime_utc = @mtime, probed_at_utc = @probedAt, json = @json
-            """;
-        cmd.Parameters.AddWithValue("@path", path);
-        cmd.Parameters.AddWithValue("@size", size);
-        cmd.Parameters.AddWithValue("@mtime", mtimeUtcTicks);
-        cmd.Parameters.AddWithValue("@probedAt", DateTime.UtcNow.Ticks);
-        cmd.Parameters.AddWithValue("@json", json);
-        cmd.ExecuteNonQuery();
-    }
+    public void StoreProbe(string path, long size, long mtimeUtcTicks, string json) => _probes.StoreProbe(path, size, mtimeUtcTicks, json);
 
     /// <summary>
     /// Looks up a cached full-file SHA-256 hash that is still valid for the file's current size
@@ -576,16 +233,7 @@ public sealed class MediaDashDb
     /// <param name="size">Current file size in bytes.</param>
     /// <param name="mtimeUtcTicks">Current last-write time in UTC ticks.</param>
     /// <returns>The cached lowercase hex hash, or null when absent or stale.</returns>
-    public string? GetCachedHash(string path, long size, long mtimeUtcTicks)
-    {
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = "SELECT hash FROM file_hashes WHERE path = @path AND size = @size AND mtime = @mtime";
-        cmd.Parameters.AddWithValue("@path", path);
-        cmd.Parameters.AddWithValue("@size", size);
-        cmd.Parameters.AddWithValue("@mtime", mtimeUtcTicks);
-        return cmd.ExecuteScalar() as string;
-    }
+    public string? GetCachedHash(string path, long size, long mtimeUtcTicks) => _probes.GetCachedHash(path, size, mtimeUtcTicks);
 
     /// <summary>
     /// Stores a computed hash, replacing any previous entry for the same (path, size, mtime).
@@ -594,45 +242,14 @@ public sealed class MediaDashDb
     /// <param name="size">File size at hash time.</param>
     /// <param name="mtimeUtcTicks">Last-write time at hash time.</param>
     /// <param name="hash">Lowercase hex SHA-256.</param>
-    public void StoreHash(string path, long size, long mtimeUtcTicks, string hash)
-    {
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = """
-            INSERT INTO file_hashes (path, size, mtime, hash)
-            VALUES (@path, @size, @mtime, @hash)
-            ON CONFLICT(path, size, mtime) DO UPDATE SET hash = @hash
-            """;
-        cmd.Parameters.AddWithValue("@path", path);
-        cmd.Parameters.AddWithValue("@size", size);
-        cmd.Parameters.AddWithValue("@mtime", mtimeUtcTicks);
-        cmd.Parameters.AddWithValue("@hash", hash);
-        cmd.ExecuteNonQuery();
-    }
+    public void StoreHash(string path, long size, long mtimeUtcTicks, string hash) => _probes.StoreHash(path, size, mtimeUtcTicks, hash);
 
     /// <summary>Looks up a cached format-probe result that is still valid for the file's current size and mtime.</summary>
     /// <param name="path">Full file path.</param>
     /// <param name="size">Current file size in bytes.</param>
     /// <param name="mtimeUtcTicks">Current last-write time in UTC ticks.</param>
     /// <returns>The cached result, or null when absent or stale.</returns>
-    public FormatProbeResult? GetCachedFormatProbe(string path, long size, long mtimeUtcTicks)
-    {
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = "SELECT ok, reason FROM format_probe_cache WHERE path = @path AND size = @size AND mtime_utc = @mtime";
-        cmd.Parameters.AddWithValue("@path", path);
-        cmd.Parameters.AddWithValue("@size", size);
-        cmd.Parameters.AddWithValue("@mtime", mtimeUtcTicks);
-        using var reader = cmd.ExecuteReader();
-        if (!reader.Read())
-        {
-            return null;
-        }
-
-        var ok = reader.GetInt32(0) != 0;
-        var reason = reader.IsDBNull(1) ? null : reader.GetString(1);
-        return new FormatProbeResult(ok, reason);
-    }
+    public FormatProbeResult? GetCachedFormatProbe(string path, long size, long mtimeUtcTicks) => _probes.GetCachedFormatProbe(path, size, mtimeUtcTicks);
 
     /// <summary>Stores a format-probe result, replacing any previous entry for the path.</summary>
     /// <param name="path">Full file path.</param>
@@ -640,23 +257,7 @@ public sealed class MediaDashDb
     /// <param name="mtimeUtcTicks">Last-write time in UTC ticks at probe time.</param>
     /// <param name="ok">True when the file's container parsed cleanly.</param>
     /// <param name="reason">Human-readable failure reason when <paramref name="ok"/> is false, else null.</param>
-    public void StoreFormatProbe(string path, long size, long mtimeUtcTicks, bool ok, string? reason)
-    {
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = """
-            INSERT INTO format_probe_cache (path, size, mtime_utc, probed_at_utc, ok, reason)
-            VALUES (@path, @size, @mtime, @probedAt, @ok, @reason)
-            ON CONFLICT(path) DO UPDATE SET size = @size, mtime_utc = @mtime, probed_at_utc = @probedAt, ok = @ok, reason = @reason
-            """;
-        cmd.Parameters.AddWithValue("@path", path);
-        cmd.Parameters.AddWithValue("@size", size);
-        cmd.Parameters.AddWithValue("@mtime", mtimeUtcTicks);
-        cmd.Parameters.AddWithValue("@probedAt", DateTime.UtcNow.Ticks);
-        cmd.Parameters.AddWithValue("@ok", ok ? 1 : 0);
-        cmd.Parameters.AddWithValue("@reason", (object?)reason ?? DBNull.Value);
-        cmd.ExecuteNonQuery();
-    }
+    public void StoreFormatProbe(string path, long size, long mtimeUtcTicks, bool ok, string? reason) => _probes.StoreFormatProbe(path, size, mtimeUtcTicks, ok, reason);
 
     /// <summary>
     /// Looks up a cached decode-check result that is still valid for the file's current size and modification time.
@@ -665,16 +266,7 @@ public sealed class MediaDashDb
     /// <param name="size">Current file size in bytes.</param>
     /// <param name="mtimeUtcTicks">Current last-write time in UTC ticks.</param>
     /// <returns>Empty string when the file decoded cleanly, the error text when it did not, or null when not cached.</returns>
-    public string? GetCachedDecode(string path, long size, long mtimeUtcTicks)
-    {
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = "SELECT error FROM decode_cache WHERE path = @path AND size = @size AND mtime_utc = @mtime";
-        cmd.Parameters.AddWithValue("@path", path);
-        cmd.Parameters.AddWithValue("@size", size);
-        cmd.Parameters.AddWithValue("@mtime", mtimeUtcTicks);
-        return cmd.ExecuteScalar() as string;
-    }
+    public string? GetCachedDecode(string path, long size, long mtimeUtcTicks) => _probes.GetCachedDecode(path, size, mtimeUtcTicks);
 
     /// <summary>
     /// Stores a decode-check result, replacing any previous entry for the path.
@@ -683,38 +275,26 @@ public sealed class MediaDashDb
     /// <param name="size">File size in bytes at check time.</param>
     /// <param name="mtimeUtcTicks">Last-write time in UTC ticks at check time.</param>
     /// <param name="error">Empty string for a clean decode, otherwise the error text.</param>
-    public void StoreDecode(string path, long size, long mtimeUtcTicks, string error)
-    {
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = """
-            INSERT INTO decode_cache (path, size, mtime_utc, checked_at_utc, error)
-            VALUES (@path, @size, @mtime, @checkedAt, @error)
-            ON CONFLICT(path) DO UPDATE SET size = @size, mtime_utc = @mtime, checked_at_utc = @checkedAt, error = @error
-            """;
-        cmd.Parameters.AddWithValue("@path", path);
-        cmd.Parameters.AddWithValue("@size", size);
-        cmd.Parameters.AddWithValue("@mtime", mtimeUtcTicks);
-        cmd.Parameters.AddWithValue("@checkedAt", DateTime.UtcNow.Ticks);
-        cmd.Parameters.AddWithValue("@error", error);
-        cmd.ExecuteNonQuery();
-    }
+    public void StoreDecode(string path, long size, long mtimeUtcTicks, string error) => _probes.StoreDecode(path, size, mtimeUtcTicks, error);
 
     /// <summary>
-    /// Updates the status of a single issue.
+    /// Atomically transitions an issue's status from one of the allowed source statuses to the
+    /// target status. The source-status filter runs inside the same UPDATE so a stale caller can't
+    /// resurrect a Fixed row or overwrite a concurrent decision. Enforces CLAUDE.md invariant 7 —
+    /// direct <c>UPDATE issues SET status = …</c> is banned outside this helper and
+    /// <see cref="BulkUpdateOpenIssueStatus"/>.
     /// </summary>
     /// <param name="issueId">The issue id.</param>
-    /// <param name="status">The new status.</param>
-    /// <returns>True when a row was updated.</returns>
-    public bool UpdateIssueStatus(long issueId, IssueStatus status)
-    {
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = "UPDATE issues SET status = @status WHERE id = @id";
-        cmd.Parameters.AddWithValue("@status", (int)status);
-        cmd.Parameters.AddWithValue("@id", issueId);
-        return cmd.ExecuteNonQuery() > 0;
-    }
+    /// <param name="fromAny">Statuses that permit this transition. Empty means "any status" is rejected.</param>
+    /// <param name="to">Target status.</param>
+    /// <returns>
+    /// <see cref="StatusTransitionResult.Applied"/> when the row moved,
+    /// <see cref="StatusTransitionResult.NotFound"/> when the id doesn't exist,
+    /// <see cref="StatusTransitionResult.Conflict"/> when the row exists but its current status
+    /// isn't in <paramref name="fromAny"/> (a stale approve of a Fixed row, a race with the fixer, etc.).
+    /// </returns>
+    public StatusTransitionResult TryTransitionIssueStatus(long issueId, IReadOnlyCollection<IssueStatus> fromAny, IssueStatus to)
+        => _issues.TryTransitionIssueStatus(issueId, fromAny, to);
 
     /// <summary>
     /// Reads a single issue's current status. Used by the fix loop to re-verify that a queued
@@ -723,15 +303,7 @@ public sealed class MediaDashDb
     /// </summary>
     /// <param name="issueId">The issue id.</param>
     /// <returns>The current status, or null if the row is gone.</returns>
-    public IssueStatus? GetIssueStatus(long issueId)
-    {
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = "SELECT status FROM issues WHERE id = @id";
-        cmd.Parameters.AddWithValue("@id", issueId);
-        var raw = cmd.ExecuteScalar();
-        return raw is null || raw is DBNull ? null : (IssueStatus)Convert.ToInt32(raw, CultureInfo.InvariantCulture);
-    }
+    public IssueStatus? GetIssueStatus(long issueId) => _issues.GetIssueStatus(issueId);
 
     /// <summary>
     /// Guarded bulk status update. Only transitions rows currently in Detected or Queued to the
@@ -741,39 +313,8 @@ public sealed class MediaDashDb
     /// <param name="ids">Issue ids to update.</param>
     /// <param name="target">Target status.</param>
     /// <returns>Number of rows actually updated.</returns>
-    public int BulkUpdateOpenIssueStatus(IReadOnlyList<long> ids, IssueStatus target)
-    {
-        if (ids.Count == 0)
-        {
-            return 0;
-        }
-
-        // SQLite's default parameter limit is 999; a fresh install with 5000+ duplicates otherwise
-        // throws SqliteException here. Chunk into 500-id batches — each batch runs its own UPDATE.
-        const int chunkSize = 500;
-        using var connection = Open();
-        var total = 0;
-        for (var offset = 0; offset < ids.Count; offset += chunkSize)
-        {
-            var count = Math.Min(chunkSize, ids.Count - offset);
-            using var cmd = connection.CreateCommand();
-            var placeholders = string.Join(",", Enumerable.Range(0, count).Select(i => "@id" + i.ToString(CultureInfo.InvariantCulture)));
-#pragma warning disable CA2100, CA3001 // placeholder list is machine-composed from an int range, ids are bound as parameters — no user text reaches the SQL string
-            cmd.CommandText = "UPDATE issues SET status = @target WHERE id IN (" + placeholders + ") AND status IN (@detected, @queued)";
-#pragma warning restore CA2100, CA3001
-            cmd.Parameters.AddWithValue("@target", (int)target);
-            cmd.Parameters.AddWithValue("@detected", (int)IssueStatus.Detected);
-            cmd.Parameters.AddWithValue("@queued", (int)IssueStatus.Queued);
-            for (var i = 0; i < count; i++)
-            {
-                cmd.Parameters.AddWithValue("@id" + i.ToString(CultureInfo.InvariantCulture), ids[offset + i]);
-            }
-
-            total += cmd.ExecuteNonQuery();
-        }
-
-        return total;
-    }
+    public IReadOnlyList<long> BulkUpdateOpenIssueStatus(IReadOnlyList<long> ids, IssueStatus target)
+        => _issues.BulkUpdateOpenIssueStatus(ids, target);
 
     /// <summary>
     /// Bulk un-ignore: moves Dismissed rows back to Detected so they re-appear on the Issues tab.
@@ -782,36 +323,7 @@ public sealed class MediaDashDb
     /// </summary>
     /// <param name="ids">Issue ids to revert.</param>
     /// <returns>Number of rows actually updated.</returns>
-    public int BulkRevertDismissedIssues(IReadOnlyList<long> ids)
-    {
-        if (ids.Count == 0)
-        {
-            return 0;
-        }
-
-        const int chunkSize = 500;
-        using var connection = Open();
-        var total = 0;
-        for (var offset = 0; offset < ids.Count; offset += chunkSize)
-        {
-            var count = Math.Min(chunkSize, ids.Count - offset);
-            using var cmd = connection.CreateCommand();
-            var placeholders = string.Join(",", Enumerable.Range(0, count).Select(i => "@id" + i.ToString(CultureInfo.InvariantCulture)));
-#pragma warning disable CA2100, CA3001 // placeholder list is machine-composed from an int range, ids are bound as parameters
-            cmd.CommandText = "UPDATE issues SET status = @detected WHERE id IN (" + placeholders + ") AND status = @dismissed";
-#pragma warning restore CA2100, CA3001
-            cmd.Parameters.AddWithValue("@detected", (int)IssueStatus.Detected);
-            cmd.Parameters.AddWithValue("@dismissed", (int)IssueStatus.Dismissed);
-            for (var i = 0; i < count; i++)
-            {
-                cmd.Parameters.AddWithValue("@id" + i.ToString(CultureInfo.InvariantCulture), ids[offset + i]);
-            }
-
-            total += cmd.ExecuteNonQuery();
-        }
-
-        return total;
-    }
+    public int BulkRevertDismissedIssues(IReadOnlyList<long> ids) => _issues.BulkRevertDismissedIssues(ids);
 
     /// <summary>
     /// Re-points every issue whose stored path is exactly <paramref name="oldPath"/>, or lives under
@@ -822,44 +334,7 @@ public sealed class MediaDashDb
     /// <param name="oldPath">The pre-move source path (file or directory).</param>
     /// <param name="newPath">The post-move target path.</param>
     /// <returns>The number of issue rows updated.</returns>
-    public int RelocateIssuePaths(string oldPath, string newPath)
-    {
-        if (string.IsNullOrEmpty(oldPath) || string.IsNullOrEmpty(newPath))
-        {
-            return 0;
-        }
-
-        // Callers pass paths from different sources — some already TrimEndingDirectorySeparator,
-        // some don't. A trailing separator collapses the boundary check (@oldSlash duplicates the
-        // separator) and the prefix match silently misses. Normalize here so the callers don't have to.
-        oldPath = Path.TrimEndingDirectorySeparator(oldPath);
-        newPath = Path.TrimEndingDirectorySeparator(newPath);
-
-        if (string.Equals(oldPath, newPath, StringComparison.Ordinal))
-        {
-            return 0;
-        }
-
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        // Exact match (file move) → rewrite in place; the SUBSTR tail is empty so @new stays @new.
-        // Prefix match with '/' or '\' boundary (folder move) → rewrite with the folder prefix swapped.
-        // Uses SUBSTR equality rather than LIKE to avoid % / _ being treated as wildcards on paths.
-        // COLLATE NOCASE on the WHERE — on Windows the stored path can differ in case from the fixer's
-        // post-move path (drive letter, case-fold varying scanner sources); without this the sibling
-        // issues never re-point and every subsequent fix run fails with "no longer exists".
-        cmd.CommandText = @"
-            UPDATE issues
-               SET path = @new || SUBSTR(path, LENGTH(@old) + 1)
-             WHERE path = @old COLLATE NOCASE
-                OR SUBSTR(path, 1, LENGTH(@old) + 1) = @oldSlash COLLATE NOCASE
-                OR SUBSTR(path, 1, LENGTH(@old) + 1) = @oldBackslash COLLATE NOCASE";
-        cmd.Parameters.AddWithValue("@old", oldPath);
-        cmd.Parameters.AddWithValue("@new", newPath);
-        cmd.Parameters.AddWithValue("@oldSlash", oldPath + "/");
-        cmd.Parameters.AddWithValue("@oldBackslash", oldPath + "\\");
-        return cmd.ExecuteNonQuery();
-    }
+    public int RelocateIssuePaths(string oldPath, string newPath) => _issues.RelocateIssuePaths(oldPath, newPath);
 
     /// <summary>
     /// Moves all detected issues of a type into the queue (used by automatic mode). When
@@ -869,150 +344,131 @@ public sealed class MediaDashDb
     /// </summary>
     /// <param name="type">The issue type.</param>
     /// <param name="minConfidence">Optional minimum <c>Issue.Confidence</c> threshold. Only pass a non-null value for confidence-gated types (currently Duplicate).</param>
-    /// <returns>The number of issues queued.</returns>
-    public int QueueDetectedIssues(IssueType type, double? minConfidence = null)
-    {
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        // The NOT EXISTS gate against restored_paths implements the "if a user restored a file, no
-        // scanner may auto-fix it again" invariant. Manual approval via /Issues/{id}/Approve still
-        // works — that endpoint updates status directly and doesn't go through this method.
-        var baseSql = """
-            UPDATE issues SET status = @queued
-            WHERE type = @type AND status = @detected
-              AND NOT EXISTS (
-                  SELECT 1 FROM restored_paths rp
-                  WHERE rp.path = issues.path AND (rp.type = issues.type OR rp.type = @any)
-              )
-            """;
-
-        if (minConfidence is double gate)
-        {
-            cmd.CommandText = baseSql + " AND (confidence IS NULL OR confidence >= @gate)";
-            cmd.Parameters.AddWithValue("@gate", gate);
-        }
-        else
-        {
-            cmd.CommandText = baseSql;
-        }
-
-        cmd.Parameters.AddWithValue("@queued", (int)IssueStatus.Queued);
-        cmd.Parameters.AddWithValue("@type", (int)type);
-        cmd.Parameters.AddWithValue("@detected", (int)IssueStatus.Detected);
-        cmd.Parameters.AddWithValue("@any", RestoredPathAnyType);
-        return cmd.ExecuteNonQuery();
-    }
+    /// <returns>
+    /// The IDs of the rows this call moved from Detected to Queued. The caller (FixTask) hands this
+    /// exact list to <see cref="RollbackAutoQueuedBlockingWarnings"/> so the consent rollback can
+    /// distinguish auto-queued rows from manually approved ones — otherwise a manual Approve would
+    /// be silently reverted by any subsequent fix run.
+    /// </returns>
+    public IReadOnlyList<long> QueueDetectedIssues(IssueType type, double? minConfidence = null)
+        => _issues.QueueDetectedIssues(type, minConfidence);
 
     /// <summary>
-    /// Reverts newly auto-queued issues whose DetailsJson carries a blocking warning back to
-    /// Detected, so the fixer never touches them without a manual Approve. The consent gate lives
-    /// in <see cref="Issue.HasBlockingWarnings"/> — this method is the DB-side enforcement that
-    /// pairs with it: <see cref="QueueDetectedIssues"/> is a bulk SQL UPDATE that can't see the
-    /// per-row warning payload, so we walk the newly-queued rows in C# and bounce any consent-
-    /// required ones back. Called immediately after the auto-queue step in FixTask.
+    /// Reverts auto-queued issues whose DetailsJson carries a blocking warning back to Detected,
+    /// so the fixer never touches them without a manual Approve. The consent gate lives in
+    /// <see cref="Issue.HasBlockingWarnings"/> — this method is the DB-side enforcement that pairs
+    /// with it: <see cref="QueueDetectedIssues"/> is a bulk SQL UPDATE that can't see the per-row
+    /// warning payload, so we walk the ids it just transitioned and bounce any consent-required
+    /// ones back. Only rows in <paramref name="justAutoQueuedIds"/> are considered — rows a user
+    /// manually approved via <c>/Issues/{id}/Approve</c> are left alone even if they carry a
+    /// blocking warning, because manual approval is a stronger signal than the auto-queue.
     /// </summary>
+    /// <param name="justAutoQueuedIds">
+    /// Exact set of IDs the current auto-queue pass just moved from Detected to Queued. Pass the
+    /// return value of <see cref="QueueDetectedIssues"/>. Empty list = no-op.
+    /// </param>
     /// <returns>The number of issues reverted from Queued to Detected.</returns>
-    public int RollbackAutoQueuedBlockingWarnings()
-    {
-        var toRevert = GetIssues(status: IssueStatus.Queued)
-            .Where(i => i.HasBlockingWarnings)
-            .Select(i => i.Id)
-            .ToList();
-
-        if (toRevert.Count == 0)
-        {
-            return 0;
-        }
-
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        // Parameterize each id — SQLite has no array binding, so we build @id0,@id1,... .
-        // The list is typically 0-few items (bitmap-sub track removals are the main source), so
-        // one parameterised UPDATE is cheaper than a per-row round-trip.
-        var placeholders = new List<string>(toRevert.Count);
-        for (int i = 0; i < toRevert.Count; i++)
-        {
-            var name = "@id" + i.ToString(CultureInfo.InvariantCulture);
-            placeholders.Add(name);
-            cmd.Parameters.AddWithValue(name, toRevert[i]);
-        }
-
-#pragma warning disable CA2100, CA3001 // placeholder list is machine-composed from an int range, ids are bound as parameters
-        cmd.CommandText = "UPDATE issues SET status = @detected WHERE status = @queued AND id IN ("
-            + string.Join(",", placeholders) + ")";
-#pragma warning restore CA2100, CA3001
-        cmd.Parameters.AddWithValue("@detected", (int)IssueStatus.Detected);
-        cmd.Parameters.AddWithValue("@queued", (int)IssueStatus.Queued);
-        return cmd.ExecuteNonQuery();
-    }
+    public int RollbackAutoQueuedBlockingWarnings(IReadOnlyCollection<long> justAutoQueuedIds)
+        => _issues.RollbackAutoQueuedBlockingWarnings(justAutoQueuedIds);
 
     /// <summary>
     /// Gets a single issue by id.
     /// </summary>
     /// <param name="issueId">The issue id.</param>
     /// <returns>The issue, or null.</returns>
-    public Issue? GetIssue(long issueId)
-    {
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = "SELECT id, type, item_id, path, details, suggested_fix, size_savings, status, detected_at_utc, confidence FROM issues WHERE id = @id";
-        cmd.Parameters.AddWithValue("@id", issueId);
-        using var reader = cmd.ExecuteReader();
-        if (!reader.Read())
-        {
-            return null;
-        }
-
-        // F-014 (single-row variant): tolerate malformed item_id — return null rather than
-        // throwing FormatException all the way up. Every caller of GetIssue already handles the
-        // "no such row" null return, so the malformed case reuses that path.
-        var idColumn = reader.GetInt64(0);
-        var itemIdStr = reader.GetString(2);
-        if (!Guid.TryParseExact(itemIdStr, "N", out var itemId))
-        {
-            Api.Diagnostics.Record(
-                "MediaDashDb.MalformedItemId",
-                "GetIssue(" + issueId.ToString(CultureInfo.InvariantCulture) + ") returned null: item_id '" + itemIdStr + "' is not a valid 32-char hex GUID. Delete the row from SQLite to clean up.");
-            return null;
-        }
-
-        return new Issue
-        {
-            Id = idColumn,
-            Type = (IssueType)reader.GetInt32(1),
-            ItemId = itemId,
-            Path = reader.GetString(3),
-            DetailsJson = reader.GetString(4),
-            SuggestedFix = reader.GetString(5),
-            SizeSavings = reader.GetInt64(6),
-            Status = (IssueStatus)reader.GetInt32(7),
-            DetectedAtUtc = new DateTime(reader.GetInt64(8), DateTimeKind.Utc),
-            Confidence = reader.IsDBNull(9) ? null : reader.GetDouble(9)
-        };
-    }
+    public Issue? GetIssue(long issueId) => _issues.GetIssue(issueId);
 
     /// <summary>
     /// Records a fix action in the history.
     /// </summary>
     /// <param name="entry">The history entry.</param>
-    public void AddHistory(HistoryEntry entry)
+    public void AddHistory(HistoryEntry entry) => _history.AddHistory(entry);
+
+    /// <summary>
+    /// Narrow transactional recorder consumed by <see cref="ScheduledTasks.FixResultRecorder"/>:
+    /// inserts every history row and attempts each conditional status transition inside ONE
+    /// SQLite transaction. If any statement in the batch throws (constraint violation, corrupt row,
+    /// I/O), the enclosing transaction is disposed without commit and every effect rolls back —
+    /// callers never observe a partial history/status write for the same operation. Filesystem
+    /// operations MUST NOT be performed inside this method; the caller finishes all file work
+    /// before invoking the recorder.
+    /// </summary>
+    /// <param name="historyRows">History entries to insert, in caller-supplied order (typically primary first, then companions, then sidecars).</param>
+    /// <param name="idsToTransition">Issue ids to attempt <paramref name="transitionTo"/> against. Pass an empty collection for dry-run success or non-terminal failure to skip the transition pass entirely.</param>
+    /// <param name="transitionFromAny">Statuses that authorise the transition. Rows whose current status is outside this set stay put and their transition is reported as <c>false</c>.</param>
+    /// <param name="transitionTo">Target status for authorised transitions.</param>
+    /// <returns>Per-id map of whether the transition applied. A <c>false</c> value means "row exists but its current status wasn't in <paramref name="transitionFromAny"/>" or "row is gone". A row that was never in <paramref name="idsToTransition"/> is absent from the map.</returns>
+    public IReadOnlyDictionary<long, bool> RecordFixOutcome(
+        IReadOnlyList<HistoryEntry> historyRows,
+        IReadOnlyCollection<long> idsToTransition,
+        IReadOnlyCollection<IssueStatus> transitionFromAny,
+        IssueStatus transitionTo)
     {
         using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = """
-            INSERT INTO history (issue_id, type, path, action, bytes_freed, recycle_path, fixed_at_utc, dry_run, restored, success)
-            VALUES (@issueId, @type, @path, @action, @bytesFreed, @recyclePath, @fixedAt, @dryRun, 0, @success)
-            """;
-        cmd.Parameters.AddWithValue("@issueId", entry.IssueId);
-        cmd.Parameters.AddWithValue("@type", (int)entry.Type);
-        cmd.Parameters.AddWithValue("@path", entry.Path);
-        cmd.Parameters.AddWithValue("@action", entry.Action);
-        cmd.Parameters.AddWithValue("@bytesFreed", entry.BytesFreed);
-        cmd.Parameters.AddWithValue("@recyclePath", (object?)entry.RecyclePath ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@fixedAt", entry.FixedAtUtc.Ticks);
-        cmd.Parameters.AddWithValue("@dryRun", entry.WasDryRun ? 1 : 0);
-        cmd.Parameters.AddWithValue("@success", entry.Success ? 1 : 0);
-        cmd.ExecuteNonQuery();
+        using var transaction = connection.BeginTransaction();
+
+        if (historyRows.Count > 0)
+        {
+            using var insert = connection.CreateCommand();
+            insert.Transaction = transaction;
+            insert.CommandText = """
+                INSERT INTO history (issue_id, type, path, action, bytes_freed, recycle_path, fixed_at_utc, dry_run, restored, success)
+                VALUES (@issueId, @type, @path, @action, @bytesFreed, @recyclePath, @fixedAt, @dryRun, 0, @success)
+                """;
+            var pIssueId = insert.Parameters.Add("@issueId", SqliteType.Integer);
+            var pType = insert.Parameters.Add("@type", SqliteType.Integer);
+            var pPath = insert.Parameters.Add("@path", SqliteType.Text);
+            var pAction = insert.Parameters.Add("@action", SqliteType.Text);
+            var pBytesFreed = insert.Parameters.Add("@bytesFreed", SqliteType.Integer);
+            var pRecyclePath = insert.Parameters.Add("@recyclePath", SqliteType.Text);
+            var pFixedAt = insert.Parameters.Add("@fixedAt", SqliteType.Integer);
+            var pDryRun = insert.Parameters.Add("@dryRun", SqliteType.Integer);
+            var pSuccess = insert.Parameters.Add("@success", SqliteType.Integer);
+            foreach (var row in historyRows)
+            {
+                pIssueId.Value = row.IssueId;
+                pType.Value = (int)row.Type;
+                pPath.Value = (object?)row.Path ?? DBNull.Value;
+                pAction.Value = (object?)row.Action ?? DBNull.Value;
+                pBytesFreed.Value = row.BytesFreed;
+                pRecyclePath.Value = (object?)row.RecyclePath ?? DBNull.Value;
+                pFixedAt.Value = row.FixedAtUtc.Ticks;
+                pDryRun.Value = row.WasDryRun ? 1 : 0;
+                pSuccess.Value = row.Success ? 1 : 0;
+                insert.ExecuteNonQuery();
+            }
+        }
+
+        var applied = new Dictionary<long, bool>(idsToTransition.Count);
+        if (idsToTransition.Count > 0 && transitionFromAny.Count > 0)
+        {
+            using var update = connection.CreateCommand();
+            update.Transaction = transaction;
+            var fromNames = new List<string>(transitionFromAny.Count);
+            var i = 0;
+            foreach (var s in transitionFromAny)
+            {
+                var name = "@from" + i.ToString(CultureInfo.InvariantCulture);
+                fromNames.Add(name);
+                update.Parameters.AddWithValue(name, (int)s);
+                i++;
+            }
+
+#pragma warning disable CA2100, CA3001 // placeholder list is machine-composed from an int range, ids/statuses are bound as parameters — no user text reaches the SQL string
+            update.CommandText = "UPDATE issues SET status = @to WHERE id = @id AND status IN (" + string.Join(",", fromNames) + ")";
+#pragma warning restore CA2100, CA3001
+            update.Parameters.AddWithValue("@to", (int)transitionTo);
+            var pId = update.Parameters.Add("@id", SqliteType.Integer);
+
+            foreach (var id in idsToTransition)
+            {
+                pId.Value = id;
+                applied[id] = update.ExecuteNonQuery() > 0;
+            }
+        }
+
+        transaction.Commit();
+        return applied;
     }
 
     /// <summary>
@@ -1020,59 +476,14 @@ public sealed class MediaDashDb
     /// </summary>
     /// <param name="limit">Maximum rows returned.</param>
     /// <returns>The history entries.</returns>
-    public IReadOnlyList<HistoryEntry> GetHistory(int limit = 500)
-    {
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = "SELECT id, issue_id, type, path, action, bytes_freed, recycle_path, fixed_at_utc, dry_run, restored, success, acknowledged"
-            + " FROM history ORDER BY id DESC LIMIT @limit";
-        cmd.Parameters.AddWithValue("@limit", limit);
-
-        var result = new List<HistoryEntry>();
-        using var reader = cmd.ExecuteReader();
-        while (reader.Read())
-        {
-            result.Add(new HistoryEntry
-            {
-                Id = reader.GetInt64(0),
-                IssueId = reader.GetInt64(1),
-                Type = (IssueType)reader.GetInt32(2),
-                Path = reader.GetString(3),
-                Action = reader.GetString(4),
-                BytesFreed = reader.GetInt64(5),
-                RecyclePath = reader.IsDBNull(6) ? null : reader.GetString(6),
-                FixedAtUtc = new DateTime(reader.GetInt64(7), DateTimeKind.Utc),
-                WasDryRun = reader.GetInt32(8) != 0,
-                Restored = reader.GetInt32(9) != 0,
-                Success = reader.GetInt32(10) != 0,
-                Acknowledged = reader.GetInt32(11) != 0
-            });
-        }
-
-        return result;
-    }
+    public IReadOnlyList<HistoryEntry> GetHistory(int limit = 500) => _history.GetHistory(limit);
 
     /// <summary>
     /// Gets every distinct recycle path recorded by non-dry-run history. These paths
     /// are authoritative evidence for adopting pre-marker batches after an upgrade.
     /// </summary>
     /// <returns>Recorded recycle paths.</returns>
-    public IReadOnlyList<string> GetRecyclePaths()
-    {
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = "SELECT DISTINCT recycle_path FROM history"
-            + " WHERE recycle_path IS NOT NULL AND recycle_path <> '' AND dry_run = 0";
-
-        var result = new List<string>();
-        using var reader = cmd.ExecuteReader();
-        while (reader.Read())
-        {
-            result.Add(reader.GetString(0));
-        }
-
-        return result;
-    }
+    public IReadOnlyList<string> GetRecyclePaths() => _history.GetRecyclePaths();
 
     /// <summary>
     /// Marks a history row as acknowledged so the redownload-warning banner stops flagging it.
@@ -1080,48 +491,12 @@ public sealed class MediaDashDb
     /// </summary>
     /// <param name="historyId">The history row id.</param>
     /// <returns>True when a row was updated.</returns>
-    public bool AcknowledgeHistoryEntry(long historyId)
-    {
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = "UPDATE history SET acknowledged = 1 WHERE id = @id";
-        cmd.Parameters.AddWithValue("@id", historyId);
-        return cmd.ExecuteNonQuery() > 0;
-    }
+    public bool AcknowledgeHistoryEntry(long historyId) => _history.AcknowledgeHistoryEntry(historyId);
 
     /// <summary>Gets a single history row by id.</summary>
     /// <param name="historyId">The row id.</param>
     /// <returns>The row, or null.</returns>
-    public HistoryEntry? GetHistoryEntry(long historyId)
-    {
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = "SELECT id, issue_id, type, path, action, bytes_freed, recycle_path, fixed_at_utc, dry_run, restored, success, acknowledged"
-            + " FROM history WHERE id = @id";
-        cmd.Parameters.AddWithValue("@id", historyId);
-
-        using var reader = cmd.ExecuteReader();
-        if (!reader.Read())
-        {
-            return null;
-        }
-
-        return new HistoryEntry
-        {
-            Id = reader.GetInt64(0),
-            IssueId = reader.GetInt64(1),
-            Type = (IssueType)reader.GetInt32(2),
-            Path = reader.GetString(3),
-            Action = reader.GetString(4),
-            BytesFreed = reader.GetInt64(5),
-            RecyclePath = reader.IsDBNull(6) ? null : reader.GetString(6),
-            FixedAtUtc = new DateTime(reader.GetInt64(7), DateTimeKind.Utc),
-            WasDryRun = reader.GetInt32(8) != 0,
-            Restored = reader.GetInt32(9) != 0,
-            Success = reader.GetInt32(10) != 0,
-            Acknowledged = reader.GetInt32(11) != 0
-        };
-    }
+    public HistoryEntry? GetHistoryEntry(long historyId) => _history.GetHistoryEntry(historyId);
 
     /// <summary>
     /// Returns the most recent successful, non-dry-run <c>fixed_at_utc</c> for a given issue type and
@@ -1132,16 +507,7 @@ public sealed class MediaDashDb
     /// <param name="type">The issue type.</param>
     /// <param name="path">The exact path recorded on the history row (trickplay folder for LargeTrickplay).</param>
     /// <returns>UTC timestamp of the newest matching row, or null when none.</returns>
-    public DateTime? GetLastSuccessfulFixUtc(IssueType type, string path)
-    {
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = "SELECT MAX(fixed_at_utc) FROM history WHERE type = @type AND path = @path AND success = 1 AND dry_run = 0";
-        cmd.Parameters.AddWithValue("@type", (int)type);
-        cmd.Parameters.AddWithValue("@path", path);
-        var raw = cmd.ExecuteScalar();
-        return raw is long ticks and > 0 ? new DateTime(ticks, DateTimeKind.Utc) : null;
-    }
+    public DateTime? GetLastSuccessfulFixUtc(IssueType type, string path) => _history.GetLastSuccessfulFixUtc(type, path);
 
     /// <summary>
     /// Counts failed non-dry-run history rows since the given watermark (Config.HistoryHiddenBeforeUtcTicks).
@@ -1149,15 +515,7 @@ public sealed class MediaDashDb
     /// </summary>
     /// <param name="hiddenBeforeUtcTicks">The Clear-history watermark; 0 = count everything.</param>
     /// <returns>Row count.</returns>
-    public int GetFailedHistoryCount(long hiddenBeforeUtcTicks)
-    {
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = "SELECT COUNT(*) FROM history WHERE success = 0 AND dry_run = 0 AND fixed_at_utc >= @hidden";
-        cmd.Parameters.AddWithValue("@hidden", hiddenBeforeUtcTicks);
-        var raw = cmd.ExecuteScalar();
-        return raw is long l ? (int)l : 0;
-    }
+    public int GetFailedHistoryCount(long hiddenBeforeUtcTicks) => _history.GetFailedHistoryCount(hiddenBeforeUtcTicks);
 
     /// <summary>
     /// Returns the lifetime total of bytes reclaimed by successful non-dry-run fixes. Same
@@ -1165,14 +523,7 @@ public sealed class MediaDashDb
     /// Overview matches what actually happened to their disk. Returns 0 for a fresh install.
     /// </summary>
     /// <returns>Total bytes freed across the entire history.</returns>
-    public long GetLifetimeBytesFreed()
-    {
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = "SELECT COALESCE(SUM(bytes_freed), 0) FROM history WHERE success = 1 AND dry_run = 0";
-        var raw = cmd.ExecuteScalar();
-        return raw is long l ? l : 0L;
-    }
+    public long GetLifetimeBytesFreed() => _history.GetLifetimeBytesFreed();
 
     /// <summary>
     /// Returns every successful non-dry-run history row as (path, bytes_freed). Used by the History
@@ -1181,50 +532,14 @@ public sealed class MediaDashDb
     /// it to a library name via Jellyfin's library manager in one pass.
     /// </summary>
     /// <returns>One row per successful non-dry-run fix.</returns>
-    public IReadOnlyList<(string Path, long BytesFreed)> GetLifetimePathTotals()
-    {
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = "SELECT path, bytes_freed FROM history WHERE success = 1 AND dry_run = 0 AND bytes_freed > 0";
-        var result = new List<(string, long)>();
-        using var reader = cmd.ExecuteReader();
-        while (reader.Read())
-        {
-            result.Add((reader.GetString(0), reader.GetInt64(1)));
-        }
-
-        return result;
-    }
+    public IReadOnlyList<(string Path, long BytesFreed)> GetLifetimePathTotals() => _history.GetLifetimePathTotals();
 
     /// <summary>
     /// Per-type breakdown of the lifetime reclaim total. Powers the donut on the right half of the
     /// Overview reclaim card so the user can see which fix type has recovered the most disk.
     /// </summary>
     /// <returns>One row per type that ever produced a successful non-dry-run fix.</returns>
-    public IReadOnlyList<IssueSummary> GetLifetimeSummary()
-    {
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = "SELECT type, COUNT(*), COALESCE(SUM(bytes_freed), 0)"
-            + " FROM history"
-            + " WHERE success = 1 AND dry_run = 0"
-            + " GROUP BY type";
-
-        var result = new List<IssueSummary>();
-        using var reader = cmd.ExecuteReader();
-        while (reader.Read())
-        {
-            result.Add(new IssueSummary
-            {
-                Type = (IssueType)reader.GetInt32(0),
-                Count = reader.GetInt32(1),
-                PotentialSavings = reader.GetInt64(2),
-                NewestDetectedUtc = DateTime.MinValue
-            });
-        }
-
-        return result;
-    }
+    public IReadOnlyList<IssueSummary> GetLifetimeSummary() => _history.GetLifetimeSummary();
 
     /// <summary>
     /// Aggregates the history for a given month into per-type success counts + total bytes freed.
@@ -1233,30 +548,7 @@ public sealed class MediaDashDb
     /// <param name="monthStartUtc">First instant of the target month (UTC).</param>
     /// <param name="monthEndUtc">First instant of the following month (UTC) — exclusive upper bound.</param>
     /// <returns>A per-type count map plus the total bytes freed.</returns>
-    public MonthAggregate GetMonthAggregate(DateTime monthStartUtc, DateTime monthEndUtc)
-    {
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = "SELECT type, COUNT(*), COALESCE(SUM(bytes_freed), 0)"
-            + " FROM history"
-            + " WHERE success = 1 AND dry_run = 0"
-            + " AND fixed_at_utc >= @start AND fixed_at_utc < @end"
-            + " GROUP BY type";
-        cmd.Parameters.AddWithValue("@start", monthStartUtc.Ticks);
-        cmd.Parameters.AddWithValue("@end", monthEndUtc.Ticks);
-
-        var byType = new Dictionary<IssueType, int>();
-        long totalBytes = 0;
-        using var reader = cmd.ExecuteReader();
-        while (reader.Read())
-        {
-            var type = (IssueType)reader.GetInt32(0);
-            byType[type] = reader.GetInt32(1);
-            totalBytes += reader.GetInt64(2);
-        }
-
-        return new MonthAggregate(byType, totalBytes);
-    }
+    public MonthAggregate GetMonthAggregate(DateTime monthStartUtc, DateTime monthEndUtc) => _history.GetMonthAggregate(monthStartUtc, monthEndUtc);
 
     /// <summary>
     /// Wipes all scan state — issues, probe cache, decode cache — so the next scan starts from scratch.
@@ -1291,6 +583,84 @@ public sealed class MediaDashDb
         cmd.Parameters.AddWithValue("@id", historyId);
         cmd.ExecuteNonQuery();
     }
+
+    // ─── restore_operations (schema v7) ─────────────────────────────────
+    // Owner-tokened claim table introduced in 05-B for the restore workflow. entry_key uniqueness
+    // is the serialization point: two concurrent callers targeting the same recycled bin entry
+    // both try to INSERT with the same entry_key; the SQLite UNIQUE constraint makes exactly one
+    // succeed. operation_id is the owner token — only the caller that holds it can Complete /
+    // Abort / MarkNeedsReview the operation. This replaces the pre-05-B `history.restored = 1`
+    // claim pattern that (a) couldn't be released by owner (any caller could flip it back), and
+    // (b) couldn't distinguish "restore in progress" from "restore succeeded".
+
+    /// <summary>
+    /// Atomically claims the exclusive right to restore the bin entry identified by
+    /// <paramref name="entryKey"/>. Returns a fresh operation id (the owner token) on success,
+    /// or <c>null</c> when another Pending / NeedsReview / Completed row already exists for the
+    /// same key.
+    /// </summary>
+    /// <param name="entryKey">Canonical identity of the bin entry. Callers pass the recycle path
+    /// (normalised) — multiple history rows may point at the same bin entry, and this key
+    /// serializes physical access.</param>
+    /// <param name="historyId">Optional history row that triggered this restore. Null for
+    /// manifest-only restores where no history row exists.</param>
+    /// <param name="sourcePath">The bin file/directory being restored.</param>
+    /// <param name="destinationPath">The resolved final target on disk (post-suffix, post-force
+    /// swap).</param>
+    /// <returns>The operation id to hand back to Complete/Abort/MarkNeedsReview, or null when
+    /// this entry is already claimed.</returns>
+    public string? TryBeginRestore(string entryKey, long? historyId, string sourcePath, string destinationPath)
+        => _restoreOps.TryBeginRestore(entryKey, historyId, sourcePath, destinationPath);
+
+    /// <summary>
+    /// Marks a Pending restore as successful and removes the row so the entry_key is free to be
+    /// re-claimed later. Owner-mismatched calls (unknown or wrong <paramref name="operationId"/>,
+    /// or the operation is no longer Pending) affect zero rows and return false.
+    /// </summary>
+    /// <param name="operationId">The owner token returned by <see cref="TryBeginRestore"/>.</param>
+    /// <param name="finalDestination">The actual destination path the FS work landed at (may
+    /// differ from the value at claim time if a late collision forced a re-resolve).</param>
+    /// <returns>True when the row was Pending under this owner and successfully removed.</returns>
+    public bool CompleteRestore(string operationId, string finalDestination) => _restoreOps.CompleteRestore(operationId, finalDestination);
+
+    /// <summary>
+    /// Releases a Pending claim without recording success. Used by the caller-recoverable failure
+    /// path (validation failed, filesystem work threw before mutating anything). Owner-mismatched
+    /// or non-Pending rows are left untouched.
+    /// </summary>
+    /// <param name="operationId">The owner token returned by <see cref="TryBeginRestore"/>.</param>
+    /// <returns>True when a Pending row was owned by this caller and removed.</returns>
+    public bool AbortRestore(string operationId) => _restoreOps.AbortRestore(operationId);
+
+    /// <summary>
+    /// Transitions a Pending operation to NeedsReview. Used when filesystem mutation started but
+    /// couldn't be verifiably completed (partial move, missing verification step, ambiguous state).
+    /// The row stays in the table so <see cref="GetRestoreOperations"/> surfaces it for manual
+    /// triage; another restore of the same entry is refused until an admin cleans up.
+    /// </summary>
+    /// <param name="operationId">The owner token returned by <see cref="TryBeginRestore"/>.</param>
+    /// <param name="detail">Human-readable explanation of what left the operation in an
+    /// uncertain state. Persisted verbatim.</param>
+    /// <returns>True when a Pending row was owned by this caller and transitioned.</returns>
+    public bool MarkRestoreNeedsReview(string operationId, string detail) => _restoreOps.MarkRestoreNeedsReview(operationId, detail);
+
+    /// <summary>
+    /// Startup sweep: any Pending row is from a process that died mid-restore (the runtime
+    /// contract is that every successful path either Completes or Aborts before returning).
+    /// Convert every Pending row to NeedsReview with a detail explaining process death; also
+    /// DELETE any Completed rows left over from a crash between UPDATE-to-Completed and the
+    /// DELETE inside <see cref="CompleteRestore"/>. Per plan §05-B: "inspect known paths,
+    /// preserve uncertain data and never automatically repeat destructive moves".
+    /// </summary>
+    /// <returns>The count of Pending rows that were reclassified as NeedsReview.</returns>
+    public int ReconcilePendingRestoresAtStartup() => _restoreOps.ReconcilePendingRestoresAtStartup();
+
+    /// <summary>
+    /// Returns every row currently in restore_operations. Used by the NeedsReview surface and
+    /// by tests that verify post-crash state.
+    /// </summary>
+    /// <returns>All rows, newest-first by <c>started_utc_ticks</c>.</returns>
+    public IReadOnlyList<RestoreOperationRow> GetRestoreOperations() => _restoreOps.GetRestoreOperations();
 
     /// <summary>
     /// Records that a user restored a file at <paramref name="path"/> for a given IssueType. The
@@ -1400,33 +770,7 @@ public sealed class MediaDashDb
     /// <param name="lastAtUtc">When the current occurrence fired.</param>
     /// <param name="maxRows">Ring-buffer size the writer caps at (default 100).</param>
     public void SaveDiagnostic(string source, int messageHash, string message, DateTime atUtc, DateTime lastAtUtc, int maxRows = 100)
-    {
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = @"
-            INSERT INTO diagnostics (source, message_hash, message, count, at_utc, last_at_utc)
-            VALUES (@source, @hash, @msg, 1, @at, @last)
-            ON CONFLICT(source, message_hash) DO UPDATE SET
-                count = count + 1,
-                message = excluded.message,
-                last_at_utc = excluded.last_at_utc";
-        cmd.Parameters.AddWithValue("@source", source);
-        cmd.Parameters.AddWithValue("@hash", messageHash);
-        cmd.Parameters.AddWithValue("@msg", message);
-        cmd.Parameters.AddWithValue("@at", atUtc.Ticks);
-        cmd.Parameters.AddWithValue("@last", lastAtUtc.Ticks);
-        cmd.ExecuteNonQuery();
-
-        // Trim to newest maxRows. Same policy the in-memory LinkedList applied.
-        using var trim = connection.CreateCommand();
-        trim.CommandText = @"
-            DELETE FROM diagnostics
-             WHERE rowid NOT IN (
-                 SELECT rowid FROM diagnostics ORDER BY last_at_utc DESC LIMIT @max
-             )";
-        trim.Parameters.AddWithValue("@max", maxRows);
-        trim.ExecuteNonQuery();
-    }
+        => _diagnostics.SaveDiagnostic(source, messageHash, message, atUtc, lastAtUtc, maxRows);
 
     /// <summary>
     /// Returns the persisted diagnostic entries, newest first. Populates the in-memory ring buffer
@@ -1435,40 +779,14 @@ public sealed class MediaDashDb
     /// <param name="limit">Maximum entries to return.</param>
     /// <returns>Newest diagnostic entries first.</returns>
     public IReadOnlyList<(string Source, int MessageHash, string Message, int Count, DateTime AtUtc, DateTime LastAtUtc)> LoadDiagnostics(int limit = 100)
-    {
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = "SELECT source, message_hash, message, count, at_utc, last_at_utc FROM diagnostics ORDER BY last_at_utc DESC LIMIT @limit";
-        cmd.Parameters.AddWithValue("@limit", limit);
-        var rows = new List<(string, int, string, int, DateTime, DateTime)>();
-        using var reader = cmd.ExecuteReader();
-        while (reader.Read())
-        {
-            rows.Add((
-                reader.GetString(0),
-                reader.GetInt32(1),
-                reader.GetString(2),
-                reader.GetInt32(3),
-                new DateTime(reader.GetInt64(4), DateTimeKind.Utc),
-                new DateTime(reader.GetInt64(5), DateTimeKind.Utc)));
-        }
-
-        return rows;
-    }
+        => _diagnostics.LoadDiagnostics(limit);
 
     /// <summary>
     /// Returns the total row count in the diagnostics table. Cheaper than <see cref="LoadDiagnostics"/>
     /// when the Errors tab just needs to know whether a "Load older" button should appear.
     /// </summary>
     /// <returns>Total persisted diagnostic entries.</returns>
-    public int CountDiagnostics()
-    {
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = "SELECT COUNT(*) FROM diagnostics";
-        var raw = cmd.ExecuteScalar();
-        return raw is long l ? (int)l : 0;
-    }
+    public int CountDiagnostics() => _diagnostics.CountDiagnostics();
 
     /// <summary>
     /// Reads a small string value from the singleton <c>plugin_state</c> key/value table. Returns
@@ -1515,13 +833,7 @@ public sealed class MediaDashDb
     /// <summary>
     /// Wipes the diagnostics table. Used by the Errors → Clear button and by Reset.
     /// </summary>
-    public void ClearDiagnostics()
-    {
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = "DELETE FROM diagnostics";
-        cmd.ExecuteNonQuery();
-    }
+    public void ClearDiagnostics() => _diagnostics.ClearDiagnostics();
 
     /// <summary>
     /// Deletes a specific diagnostic entry identified by <paramref name="source"/> and
@@ -1531,35 +843,29 @@ public sealed class MediaDashDb
     /// </summary>
     /// <param name="source">Diagnostic source tag.</param>
     /// <param name="messageHash">Hash of the pre-truncation message (see <see cref="Api.Diagnostics.Record"/>).</param>
-    public void DeleteDiagnostic(string source, int messageHash)
-    {
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = "DELETE FROM diagnostics WHERE source = $source AND message_hash = $hash";
-        cmd.Parameters.AddWithValue("$source", source);
-        cmd.Parameters.AddWithValue("$hash", messageHash);
-        cmd.ExecuteNonQuery();
-    }
+    public void DeleteDiagnostic(string source, int messageHash) => _diagnostics.DeleteDiagnostic(source, messageHash);
 
-    private SqliteConnection Open()
-    {
-        var connection = new SqliteConnection(_connectionString);
-        try
-        {
-            connection.Open();
-            return connection;
-        }
-        catch (SqliteException ex)
-        {
-            // Backup tool / virus scanner / WAL checkpoint holding a Windows file lock produces a
-            // hard failure with no breadcrumb otherwise. Record so admins can see it in the Errors tab
-            // and correlate with the resulting API 500. Rethrow — callers cannot recover from a
-            // completely-unopenable database.
-            connection.Dispose();
-            Api.Diagnostics.Record("MediaDashDb.Open", "Could not open SQLite database: " + ex.Message + ". Something else may be holding a lock on the file (backup software, antivirus, running scan).");
-            throw;
-        }
-    }
+    /// <summary>
+    /// Deletes every persisted diagnostic whose source starts with <paramref name="sourcePrefix"/>
+    /// OR matches it exactly. Backs review finding P2-8: the in-memory buffer only holds ~100
+    /// entries, so deleting by (source, hash) tuples derived from that buffer leaves older
+    /// SQLite rows behind. When a user turns off a whole subsystem (SMART monitoring, etc.) the
+    /// dashboard promises to clear every historical row for that subsystem — this method makes
+    /// that promise true regardless of how many rows accumulated before the toggle.
+    /// </summary>
+    /// <param name="sourcePrefix">
+    /// Prefix to match. Rows whose source equals the prefix, or begins with the prefix followed
+    /// by <c>.</c>, are deleted. This matches both the base subsystem source (e.g. "SmartHealth")
+    /// and its dotted children (e.g. "SmartHealth.MalwareRisk").
+    /// </param>
+    /// <returns>Number of rows deleted.</returns>
+    public int DeleteDiagnosticsBySourcePrefix(string sourcePrefix) => _diagnostics.DeleteDiagnosticsBySourcePrefix(sourcePrefix);
+
+    // Delegates to <see cref="MediaDashConnectionFactory"/>. Kept as a thin forwarder so the
+    // ~60 internal callers inside MediaDashDb don't churn — they already say `using var connection = Open();`
+    // Later 05-C sub-substeps that migrate methods off this facade into dedicated stores will
+    // consume the factory directly and drop this helper.
+    private SqliteConnection Open() => _connectionFactory.Open();
 
     /// <summary>
     /// Returns the Playability repair-ladder tally for the Overview panel. Empty until the

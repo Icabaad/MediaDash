@@ -63,12 +63,12 @@ public sealed class TrickplayOptimizeFixer : IFixer
         // path from disk enumeration) can't turn into arbitrary file destruction.
         if (!IsSafeTrickplayPath(issue.Path))
         {
-            return FixResult.Fail("Refused: this path is not a recognised Jellyfin trickplay folder (must sit under the trickplay data dir, or be a <basename>-trickplay folder inside a library): " + issue.Path);
+            return FixResult.Refused(FixReason.UnsupportedFormat, "Refused: this path is not a recognised Jellyfin trickplay folder (must sit under the trickplay data dir, or be a <basename>-trickplay folder inside a library): " + issue.Path);
         }
 
         if (!Directory.Exists(issue.Path))
         {
-            return FixResult.Fail("The trickplay folder no longer exists: " + issue.Path);
+            return FixResult.Fail(FixReason.SourceMissing, "The trickplay folder no longer exists: " + issue.Path);
         }
 
         var jpgs = Directory.EnumerateFiles(issue.Path, "*.jpg", SearchOption.AllDirectories)
@@ -76,7 +76,7 @@ public sealed class TrickplayOptimizeFixer : IFixer
             .ToList();
         if (jpgs.Count == 0)
         {
-            return FixResult.Fail("Nothing to remove any more — this trickplay folder no longer has any raw JPG sprites.");
+            return FixResult.NoChange(FixReason.NothingToRemove, "Nothing to remove any more — this trickplay folder no longer has any raw JPG sprites.");
         }
 
         var config = Plugin.Instance!.Configuration;
@@ -143,7 +143,7 @@ public sealed class TrickplayOptimizeFixer : IFixer
 
         if (converted == 0 && failed > 0)
         {
-            return FixResult.Fail("All " + failed + " trickplay conversions failed. The originals were left untouched.");
+            return FixResult.Fail(FixReason.ProcessFailed, "All " + failed + " trickplay conversions failed. The originals were left untouched.");
         }
 
         var freed = totalBefore - totalAfter;
@@ -156,7 +156,7 @@ public sealed class TrickplayOptimizeFixer : IFixer
             skipped > 0 ? " Skipped " + skipped + " already-optimised file(s)." : string.Empty,
             failed > 0 ? " " + failed + " file(s) failed and were left untouched." : string.Empty);
 
-        return new FixResult { Success = converted > 0, Message = msg, BytesFreed = freed };
+        return new FixResult { Success = converted > 0, Outcome = FixOutcome.Applied, Message = msg, BytesFreed = freed };
     }
 
     /// <summary>

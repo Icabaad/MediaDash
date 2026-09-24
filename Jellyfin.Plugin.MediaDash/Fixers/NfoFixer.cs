@@ -40,17 +40,17 @@ public sealed class NfoFixer : IFixer
     {
         if (!issue.Path.EndsWith(".nfo", StringComparison.OrdinalIgnoreCase))
         {
-            return Task.FromResult(FixResult.Fail("Refused: not an .nfo file — " + issue.Path));
+            return Task.FromResult(FixResult.Refused(FixReason.UnsupportedFormat, "Refused: not an .nfo file — " + issue.Path));
         }
 
         if (!_libraryGuard.IsInsideLibrary(issue.Path))
         {
-            return Task.FromResult(FixResult.Fail("Refused: NFO is not inside a configured library — " + issue.Path));
+            return Task.FromResult(FixResult.Refused(FixReason.OutsideLibrary, "Refused: NFO is not inside a configured library — " + issue.Path));
         }
 
         if (!File.Exists(issue.Path))
         {
-            return Task.FromResult(FixResult.Fail("The NFO no longer exists: " + issue.Path));
+            return Task.FromResult(FixResult.Fail(FixReason.SourceMissing, "The NFO no longer exists: " + issue.Path));
         }
 
         var config = Plugin.Instance!.Configuration;
@@ -83,6 +83,7 @@ public sealed class NfoFixer : IFixer
             return Task.FromResult(new FixResult
             {
                 Success = true,
+                Outcome = FixOutcome.Applied,
                 Message = descriptor,
                 BytesFreed = issue.SizeSavings,
                 RecyclePath = recyclePath
@@ -92,7 +93,7 @@ public sealed class NfoFixer : IFixer
         {
             _logger.LogWarning(ex, "NfoFixer: could not remove {Path}", issue.Path);
             Api.Diagnostics.Record("NfoFixer.Delete", "Couldn't delete NFO \"" + issue.Path + "\": " + ex.Message + ". Check that Jellyfin has write access to the containing folder.");
-            return Task.FromResult(FixResult.Fail("Couldn't delete \"" + fileName + "\" — check that Jellyfin has write access to the containing folder.", ex.Message));
+            return Task.FromResult(FixResult.Fail(FixReason.AccessDenied, "Couldn't delete \"" + fileName + "\" — check that Jellyfin has write access to the containing folder.", ex.Message));
         }
     }
 }

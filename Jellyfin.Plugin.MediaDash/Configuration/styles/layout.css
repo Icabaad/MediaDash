@@ -1,0 +1,250 @@
+/*
+ * LAYOUT
+ *
+ * Focus-ring suppression, layout wrapper + content column, form-width fix, modal chrome, reorder rows, icon buttons, context menu, System-Performance hidden chip, range slider tokens, fade + spin keyframes.
+ *
+ * Served via /MediaDash/Asset/layout.css by Api/PluginAssetController.cs
+ * (whitelist entry "layout.css"). Extracted in 06-FOLLOWUP-3-bulk-2 from
+ * configPage.html — ranges 105-111, 167-201, 297-373, 374-410, 411-471, 1126-1141 of the original inline <style> block
+ * (pre-06-FOLLOWUP-3-bulk-1 line numbers, post-jump.css state). Move is
+ * verbatim; comment headers preserved; @media blocks travel with their
+ * default-scheme counterparts so the pairing survives the split.
+ */
+
+/* Hide focus rings on mouse clicks; keep them for keyboard navigation. Without this,
+   Jellyfin's default button focus ring flashes on every mouse click and reads as a bug
+   to users unfamiliar with the browser focus model. */
+#MediaDashConfigPage button:focus:not(:focus-visible) {
+    outline: none;
+}
+
+
+/* ── Layout wrapper ───────────────────────────────────────────
+   Jellyfin's default pluginConfigurationPage caps content at ~60em and left-aligns it.
+   We take over the full page: transparent host, our own centred 1180px content column,
+   32px gutters. Override at multiple levels because different Jellyfin versions apply
+   the padding on different ancestors. */
+#MediaDashConfigPage {
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+}
+#MediaDashConfigPage [data-role="content"] {
+    max-width: none !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    display: block;
+    background: var(--md-page);
+}
+#MediaDashConfigPage .content-primary {
+    max-width: none !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    box-sizing: border-box;
+}
+/* Jellyfin's core CSS caps every <form> at 54em on ≥50em viewports. Kill that so
+   the Settings surface can span the full 1180px column. */
+#MediaDashConfigPage form { max-width: none !important; }
+
+/* Centred content column used by every tab. The masthead has its own header-band
+   background that spans full-width; its inner content is wrapped in mdColumn. */
+#MediaDashConfigPage .mdColumn {
+    max-width: 1180px; margin: 0 auto; padding: 0 32px;
+    box-sizing: border-box;
+}
+
+
+/* Fix-order dialog + any future plugin-native modal. Uses the plugin's own tokens so it
+   tracks light/dark theme automatically, unlike the raw hex the dialog previously used. */
+.mdModalScrim {
+    display: none; position: fixed; inset: 0; z-index: 9999;
+    align-items: center; justify-content: center;
+    background: rgba(0, 0, 0, .55);
+    backdrop-filter: blur(2px);
+}
+.mdModalCard {
+    background: var(--md-panel);
+    color: var(--md-ink);
+    border: 1px solid var(--md-border-card);
+    border-radius: 14px;
+    box-shadow: var(--md-shadow-modal);
+    max-width: 34em; width: 92vw; max-height: 82vh;
+    display: flex; flex-direction: column;
+    font-family: Figtree, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+.mdModalHeader {
+    padding: 16px 20px 10px;
+    border-bottom: 1px solid var(--md-border-inner);
+}
+.mdModalTitle {
+    font: 700 18px Figtree, sans-serif; letter-spacing: -.015em;
+    color: var(--md-ink);
+}
+.mdModalHint {
+    margin-top: 4px;
+    font: 500 13px Figtree, sans-serif;
+    color: var(--md-meta);
+}
+.mdModalBody {
+    flex: 1; overflow-y: auto;
+    padding: 8px 12px;
+}
+.mdModalWarn {
+    padding: 8px 20px;
+    color: #fbbf24;
+    font: 500 12.5px Figtree, sans-serif;
+    border-top: 1px solid var(--md-border-inner);
+}
+.mdModalFooter {
+    padding: 12px 16px;
+    border-top: 1px solid var(--md-border-inner);
+    display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap;
+    align-items: center;
+}
+/* High-specificity anchors: Jellyfin's emby-button JS can apply inline styles at
+   initialisation that beat plain class-level !important. Selecting through the
+   footer + id guarantees enough specificity to win regardless. */
+#MediaDashConfigPage .mdModalFooter button.mdActionBtn {
+    height: 44px !important;
+    padding: 0 20px !important;
+    border-radius: 999px !important;
+    min-height: 0 !important;
+    background: var(--md-neutral) !important;
+    color: var(--md-ink) !important;
+    border: 1px solid var(--md-border-btn) !important;
+    text-transform: none !important;
+    font: 600 14.5px Figtree, sans-serif !important;
+    display: inline-flex !important;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+}
+#MediaDashConfigPage .mdModalFooter button.mdActionBtn:not(:disabled):hover {
+    background: var(--md-neutral-hover) !important;
+}
+#MediaDashConfigPage .mdModalFooter button.mdActionBtn.mdActionFix {
+    background: var(--md-primary) !important;
+    color: var(--md-primary-ink) !important;
+    border: none !important;
+    font-weight: 700 !important;
+}
+#MediaDashConfigPage .mdModalFooter button.mdActionBtn.mdActionFix:not(:disabled):hover {
+    background: var(--md-primary-hover) !important;
+}
+
+/* Reorder row + up/down icon buttons — small, flat, plugin-themed. */
+#MediaDashConfigPage .mdOrderRow {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 6px;
+    border-bottom: 1px solid var(--md-border-row);
+}
+#MediaDashConfigPage .mdOrderRow:last-child { border-bottom: 0; }
+#MediaDashConfigPage .mdOrderNum {
+    width: 22px; text-align: right;
+    font: 600 12.5px 'IBM Plex Mono', monospace;
+    color: var(--md-meta);
+}
+#MediaDashConfigPage .mdOrderIcon { font-size: 20px; }
+#MediaDashConfigPage .mdOrderLabel {
+    flex: 1;
+    font: 500 14px Figtree, sans-serif;
+    color: var(--md-ink);
+}
+#MediaDashConfigPage .mdIconBtn {
+    width: 32px; height: 32px;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--md-neutral) !important;
+    color: var(--md-ink) !important;
+    border: 1px solid var(--md-border-btn) !important;
+    border-radius: 8px !important;
+    padding: 0 !important;
+    cursor: pointer;
+    transition: background .14s ease, opacity .14s ease;
+}
+#MediaDashConfigPage .mdIconBtn:not(:disabled):hover {
+    background: var(--md-neutral-hover) !important;
+}
+#MediaDashConfigPage .mdIconBtn:disabled {
+    opacity: .35; cursor: not-allowed;
+}
+#MediaDashConfigPage .mdIconBtn .material-icons { font-size: 18px; }
+
+
+/* Plugin-themed context menu popover. Used by the System Performance card enable/disable
+   menu; reusable for any future right-click / long-press affordance. */
+.mdCtxMenu {
+    display: none;
+    position: fixed;
+    z-index: 9999;
+    background: var(--md-panel);
+    color: var(--md-ink);
+    border: 1px solid var(--md-border-card);
+    border-radius: 10px;
+    box-shadow: var(--md-shadow-popover);
+    padding: 6px 0;
+    min-width: 15em;
+    font-family: Figtree, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 13.5px;
+    overflow: hidden;
+}
+#MediaDashConfigPage .mdCtxItem {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 14px;
+    cursor: pointer;
+    color: var(--md-ink);
+    white-space: nowrap;
+    transition: background .12s ease;
+}
+#MediaDashConfigPage .mdCtxItem:hover {
+    background: var(--md-panel-hover);
+}
+#MediaDashConfigPage .mdCtxItem .material-icons {
+    font-size: 18px;
+    color: var(--md-meta);
+}
+
+/* Compact placeholder shown when the user hides the System Performance card. Same rounded
+   pill vibe as the plugin's neutral buttons so it reads as "collapsed", not "broken". */
+#MediaDashConfigPage .mdSysHiddenChip {
+    display: flex; align-items: center; gap: 10px;
+    background: var(--md-panel);
+    border: 1px solid var(--md-border-card);
+    border-radius: 12px;
+    padding: 10px 16px;
+    font: 500 13px Figtree, sans-serif;
+    color: var(--md-meta);
+    cursor: pointer;
+    transition: background .14s ease, color .14s ease;
+}
+#MediaDashConfigPage .mdSysHiddenChip:hover {
+    background: var(--md-panel-hover);
+    color: var(--md-ink);
+}
+#MediaDashConfigPage .mdSysHiddenChip .material-icons {
+    font-size: 18px;
+    color: var(--md-meta);
+}
+#MediaDashConfigPage .mdSysHiddenChip .mdSysHiddenLabel { flex: 1; }
+#MediaDashConfigPage .mdSysHiddenChip .mdSysHiddenHint {
+    font: 500 11.5px 'IBM Plex Mono', monospace;
+    color: var(--md-meta);
+    opacity: .8;
+}
+
+
+/* ── Range slider tokens ────────────────────────────────────── */
+#MediaDashConfigPage input[type=range] { accent-color: var(--md-primary); width: 100%; max-width: 34em; }
+#MediaDashConfigPage .mdSliderVal {
+    display: inline-block; min-width: 4.5em; text-align: center;
+    font: 600 13px 'IBM Plex Mono', monospace;
+    background: var(--md-inner); border-radius: 8px;
+    padding: 2px 10px; margin-left: 10px;
+    color: var(--md-primary);
+}
+
+/* ── Fade animations ─────────────────────────────────────── */
+#MediaDashConfigPage .mdFade { animation: mdFadeIn .35s ease; }
+@keyframes mdFadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes mdSpin { to { transform: rotate(360deg); } }
+#MediaDashConfigPage .mdSpin { display:inline-block; animation: mdSpin 1s linear infinite; }

@@ -24,19 +24,19 @@ public sealed class MediaGrouperFixer : IFixer
 {
     private readonly LibraryGuard _guard;
     private readonly ILibraryMonitor _libraryMonitor;
-    private readonly MediaDashDb _db;
+    private readonly IssueStore _issues;
     private readonly ILogger<MediaGrouperFixer> _logger;
 
     /// <summary>Initializes a new instance of the <see cref="MediaGrouperFixer"/> class.</summary>
     /// <param name="guard">The library path guard.</param>
     /// <param name="libraryMonitor">Instance of <see cref="ILibraryMonitor"/>.</param>
-    /// <param name="db">The plugin database, used to re-point sibling issues after a successful move.</param>
+    /// <param name="issues">Issue-table store (05-C.2), used to re-point sibling issues after a successful move.</param>
     /// <param name="logger">The logger.</param>
-    public MediaGrouperFixer(LibraryGuard guard, ILibraryMonitor libraryMonitor, MediaDashDb db, ILogger<MediaGrouperFixer> logger)
+    public MediaGrouperFixer(LibraryGuard guard, ILibraryMonitor libraryMonitor, IssueStore issues, ILogger<MediaGrouperFixer> logger)
     {
         _guard = guard;
         _libraryMonitor = libraryMonitor;
-        _db = db;
+        _issues = issues;
         _logger = logger;
     }
 
@@ -76,40 +76,40 @@ public sealed class MediaGrouperFixer : IFixer
         }
         catch (JsonException)
         {
-            return Task.FromResult(FixResult.Fail("The grouping target was not recorded for this move; re-scan and try again."));
+            return Task.FromResult(FixResult.Refused(FixReason.SourceChanged, "The grouping target was not recorded for this move; re-scan and try again."));
         }
 
         if (string.IsNullOrEmpty(source) || string.IsNullOrEmpty(target) || string.IsNullOrEmpty(action))
         {
-            return Task.FromResult(FixResult.Fail("The grouping target was not recorded for this move; re-scan and try again."));
+            return Task.FromResult(FixResult.Refused(FixReason.SourceChanged, "The grouping target was not recorded for this move; re-scan and try again."));
         }
 
         var isFolder = string.Equals(action, "MoveFolder", StringComparison.Ordinal);
 
         if (isFolder ? !Directory.Exists(source) : !File.Exists(source))
         {
-            return Task.FromResult(FixResult.Fail("The source no longer exists; re-scan to refresh the list."));
+            return Task.FromResult(FixResult.Fail(FixReason.SourceMissing, "The source no longer exists; re-scan to refresh the list."));
         }
 
         if (!_guard.IsInsideLibrary(source))
         {
-            return Task.FromResult(FixResult.Fail("The source is outside your library folders; MediaDash will not touch it."));
+            return Task.FromResult(FixResult.Refused(FixReason.OutsideLibrary, "The source is outside your library folders; MediaDash will not touch it."));
         }
 
         var targetParent = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(target));
         if (string.IsNullOrEmpty(targetParent))
         {
-            return Task.FromResult(FixResult.Fail("The target folder was not recorded for this move; re-scan and try again."));
+            return Task.FromResult(FixResult.Refused(FixReason.SourceChanged, "The target folder was not recorded for this move; re-scan and try again."));
         }
 
         if (!_guard.IsInsideLibrary(targetParent))
         {
-            return Task.FromResult(FixResult.Fail("The target folder '" + targetParent + "' isn't inside a Jellyfin library; move refused."));
+            return Task.FromResult(FixResult.Refused(FixReason.OutsideLibrary, "The target folder '" + targetParent + "' isn't inside a Jellyfin library; move refused."));
         }
 
         if (isFolder ? Directory.Exists(target) : File.Exists(target))
         {
-            return Task.FromResult(FixResult.Fail("An item with the same name already exists at '" + target + "' — rename or remove it, or move this one manually."));
+            return Task.FromResult(FixResult.Refused(FixReason.DestinationCollision, "An item with the same name already exists at '" + target + "' — rename or remove it, or move this one manually."));
         }
 
         var actionText = string.Format(CultureInfo.InvariantCulture, "grouped {0} → {1}", source, target);
@@ -154,6 +154,7 @@ public sealed class MediaGrouperFixer : IFixer
         catch (UnauthorizedAccessException)
         {
             return Task.FromResult(FixResult.Fail(
+                FixReason.AccessDenied,
                 "Jellyfin can't write to '" + targetParent + "'. Grant the user Jellyfin runs as (typically 'jellyfin' on Linux) read+write permission on that path."));
         }
         catch (IOException ex) when (isFolder && IsCrossVolume(ex))
@@ -161,12 +162,13 @@ public sealed class MediaGrouperFixer : IFixer
             // ponytail: Directory.Move throws IOException across volumes. Grouping within a single library root
             // is same-volume in practice — punt with a clear message rather than implementing recursive copy+delete.
             // Upgrade when a user hits this: swap in a recursive Copy() + Delete() path.
-            return Task.FromResult(FixResult.Fail(
+            return Task.FromResult(FixResult.Refused(
+                FixReason.UnsupportedFormat,
                 "The target sits on a different drive than the source. Cross-drive folder grouping isn't supported yet — move the folder manually or align the library layout to one volume."));
         }
         catch (IOException ex)
         {
-            return Task.FromResult(FixResult.Fail("Move failed — the operating system rejected the rename.", ex.Message));
+            return Task.FromResult(FixResult.Fail(FixReason.ProcessFailed, "Move failed — the operating system rejected the rename.", ex.Message));
         }
 
         if (!isFolder)
@@ -186,11 +188,12 @@ public sealed class MediaGrouperFixer : IFixer
         _libraryMonitor.ReportFileSystemChanged(target);
         // For MoveFolder this rewrites both the folder-level issue AND every issue under that folder,
         // via the SUBSTR prefix branch in RelocateIssuePaths — no per-child bookkeeping needed here.
-        _db.RelocateIssuePaths(source, target);
+        _issues.RelocateIssuePaths(source, target);
         _logger.LogInformation("Media group: {Action}", actionText);
         return Task.FromResult(new FixResult
         {
             Success = true,
+            Outcome = FixOutcome.Applied,
             Message = actionText,
             BytesFreed = 0
         });

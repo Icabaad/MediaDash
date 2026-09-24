@@ -28,6 +28,12 @@
     <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.11">
       <ExcludeAssets>runtime</ExcludeAssets>
     </PackageReference>
+    <!-- Compile-only. Jellyfin bundles Swashbuckle at runtime; the plugin only references
+         SwaggerGenOptions so it can register its XML doc file with the host's Swagger generator
+         (PluginServiceRegistrator.cs). Runtime-excluded to avoid shipping a duplicate copy. -->
+    <PackageReference Include="Swashbuckle.AspNetCore.SwaggerGen" Version="6.2.3">
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </PackageReference>
     <!-- Windows-only. Referenced everywhere at compile time; runtime code gates by OS so Linux/macOS don't load it. -->
     <PackageReference Include="System.Diagnostics.PerformanceCounter" Version="9.0.0" />
     <!-- Windows-only. WMI queries against MSFT_PhysicalDisk / MSStorageDriver_FailurePredictStatus for SMART
@@ -50,6 +56,14 @@
     <EmbeddedResource Include="Configuration\logo.png" />
     <None Remove="Configuration\i18n\*.json" />
     <EmbeddedResource Include="Configuration\i18n\*.json" />
+    <!-- 06-D physical asset split. Anything dropped under scripts/ or styles/ auto-embeds
+         so future 06-D chunks (settings-mapper.js, api-client.js, mediadash.css, etc.) don't
+         need a csproj edit per file. What actually gets SERVED is gated by the whitelist in
+         Api/PluginAssetController.cs — embedding a file does not expose it. -->
+    <None Remove="Configuration\scripts\**\*.js" />
+    <EmbeddedResource Include="Configuration\scripts\**\*.js" />
+    <None Remove="Configuration\styles\**\*.css" />
+    <EmbeddedResource Include="Configuration\styles\**\*.css" />
   </ItemGroup>
 
   <!-- Jellyfin's plugin loader scans every subfolder of the plugin directory and tries to load each .dll it

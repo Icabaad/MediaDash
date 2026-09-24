@@ -132,6 +132,106 @@ public class TrackFixerMp4MuxerSubtitleTests
         Assert.Empty(TrackFixer.ComputeMuxerIncompatibleSubtitleIndexes(probe, "mkv"));
     }
 
+    // Bug-pattern audit round 3 (2026-09-19): MKV target used to fall through as "no
+    // incompatible subs" and mkvmuxer aborted mid-remux on tx3g / mov_text — both are MP4-
+    // native timed-text codecs with no MKV mapping. Rung 4 of the Playability repair ladder
+    // hits this every time it re-encodes an MP4 source with a tx3g track.
+    [Theory]
+    [InlineData("tx3g")]
+    [InlineData("mov_text")]
+    public void MkvOutputDropsMp4NativeTimedText(string codec)
+    {
+        var probe = Probe(Vid(0, "h264"), Sub(1, codec), Aud(2, "aac"));
+
+        Assert.Equal(new[] { 1 }, TrackFixer.ComputeMuxerIncompatibleSubtitleIndexes(probe, "mkv"));
+    }
+
+    [Theory]
+    [InlineData("subrip")]
+    [InlineData("ass")]
+    [InlineData("ssa")]
+    [InlineData("hdmv_pgs_subtitle")]
+    [InlineData("dvd_subtitle")]
+    [InlineData("dvb_subtitle")]
+    public void MkvOutputKeepsUniversalSubtitleCodecs(string codec)
+    {
+        // Regression: MKV is permissive by design. Adding the tx3g/mov_text blacklist must not
+        // accidentally reject the codecs Matroska handles cleanly under -c copy.
+        var probe = Probe(Vid(0, "h264"), Sub(1, codec), Aud(2, "aac"));
+
+        Assert.Empty(TrackFixer.ComputeMuxerIncompatibleSubtitleIndexes(probe, "mkv"));
+    }
+
+    [Fact]
+    public void WebmOutputAlsoDropsMp4NativeTimedText()
+    {
+        // WebM uses the same matroska muxer family with the same tx3g/mov_text limitation.
+        var probe = Probe(Vid(0, "vp9"), Sub(1, "tx3g"), Aud(2, "opus"));
+
+        Assert.Equal(new[] { 1 }, TrackFixer.ComputeMuxerIncompatibleSubtitleIndexes(probe, "webm"));
+    }
+
+    // Bug-pattern audit round 3 (2026-09-19): the mpegts family (.ts / .m2ts / .mts) refuses
+    // most subtitle codecs under -c copy — only dvb_subtitle and dvb_teletext survive. The
+    // PlayabilityFixer rung 1 same-container remux hits this every time a Blu-ray .ts rip
+    // carries an hdmv_pgs_subtitle track. Fold-in drops the offending sub so rung 1 keeps
+    // the container instead of falling through to rung 3's MKV coerce (which resets Jellyfin's
+    // watch history).
+    [Theory]
+    [InlineData("hdmv_pgs_subtitle")]  // Blu-ray PGS — most common
+    [InlineData("pgssub")]             // older alias
+    [InlineData("dvd_subtitle")]       // DVD bitmap
+    [InlineData("dvdsub")]             // older alias
+    [InlineData("subrip")]             // needs transcode to dvb_subtitle for mpegts
+    [InlineData("ass")]
+    [InlineData("mov_text")]           // MP4-native, mpegts refuses
+    [InlineData("")]                   // empty codec_name — drop rather than risk mux failure
+    public void MpegTsOutputDropsHostileSubs(string codec)
+    {
+        var probe = Probe(Vid(0, "h264"), Sub(1, codec), Aud(2, "ac3"));
+
+        Assert.Equal(new[] { 1 }, TrackFixer.ComputeMuxerIncompatibleSubtitleIndexes(probe, "ts"));
+    }
+
+    [Theory]
+    [InlineData("dvb_subtitle")]
+    [InlineData("dvb_teletext")]
+    public void MpegTsOutputKeepsNativeDvbSubs(string codec)
+    {
+        // Sanity: mpegts natively supports these. Adding the hostile blacklist must not
+        // accidentally drop the codecs mpegts DOES handle under -c copy.
+        var probe = Probe(Vid(0, "h264"), Sub(1, codec), Aud(2, "ac3"));
+
+        Assert.Empty(TrackFixer.ComputeMuxerIncompatibleSubtitleIndexes(probe, "ts"));
+    }
+
+    [Theory]
+    [InlineData("ts")]
+    [InlineData("m2ts")]
+    [InlineData("mts")]
+    [InlineData(".ts")]
+    public void EveryMpegTsFamilyExtensionFoldsInHostileSubs(string ext)
+    {
+        // Every mpegts-family container routes through the same muxer with the same limitations.
+        var probe = Probe(Vid(0, "h264"), Sub(1, "hdmv_pgs_subtitle"), Aud(2, "ac3"));
+
+        Assert.Equal(new[] { 1 }, TrackFixer.ComputeMuxerIncompatibleSubtitleIndexes(probe, ext));
+    }
+
+    [Fact]
+    public void UnknownContainerReturnsEmpty()
+    {
+        // .flv, .avi, .ogg — no fold-in defined. Same-container remuxes for these fall through
+        // to rung 3 today; the fold-in helper returning empty is intentional (no coverage yet).
+        var probe = Probe(Vid(0, "h264"), Sub(1, "hdmv_pgs_subtitle"), Aud(2, "ac3"));
+
+        Assert.Empty(TrackFixer.ComputeMuxerIncompatibleSubtitleIndexes(probe, "flv"));
+        Assert.Empty(TrackFixer.ComputeMuxerIncompatibleSubtitleIndexes(probe, "avi"));
+    }
+
+    private static FfprobeStreamInfo Vid(int index, string codec)
+        => new() { Index = index, CodecType = "video", CodecName = codec };
+
     private static FfprobeData Probe(params FfprobeStreamInfo[] streams)
         => new() { Streams = new List<FfprobeStreamInfo>(streams) };
 

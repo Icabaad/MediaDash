@@ -46,6 +46,16 @@ public static class SmartHealthProbe
             return new SmartHealthResult(SmartHealth.Unknown, "No drive root supplied.");
         }
 
+        // Master kill-switch: user toggled SMART monitoring off from any drive card's SMART pill
+        // context menu. Skip the probe entirely — no smartctl shell-out, no WMI query, no
+        // SmartHealth.* diagnostics recorded — so the fix for "smartctl runs over an SMB share and
+        // fails" is one config click. The client sees the disabled state via SmartMonitoringEnabled
+        // in the plugin config and renders the pill / hides the tiles accordingly.
+        if (Plugin.Instance?.Configuration?.SmartMonitoringEnabled == false)
+        {
+            return new SmartHealthResult(SmartHealth.Unknown, "SMART monitoring disabled.");
+        }
+
         var hasHit = Cache.TryGetValue(driveRoot, out var hit);
         if (hasHit && DateTime.UtcNow - hit.At < CacheTtl)
         {
@@ -239,7 +249,7 @@ public static class SmartHealthProbe
 
     // smartctl -j -A returns overall health, ATA attribute table, and (for NVMe) an nvme_smart_health_information_log.
     // We pull the coarse verdict from smart_status.passed and pluck a few well-known attributes for the stats view.
-    private static SmartHealthResult ParseSmartctlJson(string json, string device)
+    internal static SmartHealthResult ParseSmartctlJson(string json, string device)
     {
         if (string.IsNullOrWhiteSpace(json))
         {
@@ -251,23 +261,48 @@ public static class SmartHealthProbe
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
 
+            // F-015 sibling (bug-pattern audit round 2, 2026-09-19): every downstream
+            // TryGetProperty call in this method assumes the JSON root — and its children —
+            // are objects. `JsonElement.TryGetProperty` on any non-object throws
+            // InvalidOperationException, which the surrounding `catch (JsonException)`
+            // doesn't match, and takes the whole Storage-health card down with a 500 for the
+            // rest of the session. smartctl output is well-structured in practice, but vendor
+            // firmware quirks and future --json format changes have caused wrapper-array or
+            // scalar-error blobs in the wild. Fail closed here to Unknown rather than escape.
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                return new SmartHealthResult(SmartHealth.Unknown, "smartctl JSON root is not an object on " + device + " — cannot parse.");
+            }
+
             // smartctl always writes JSON, even when it couldn't actually check the device
-            // (permission denied, unsupported device, no SMART support). Its own exit_status field
-            // is the tell — non-zero means smartctl failed to complete, so any absence of
-            // smart_status is NOT "self-assessment failed" — it's Unknown with a specific reason.
-            // On Linux this is the most common case: Jellyfin runs unprivileged, smartctl needs
-            // CAP_SYS_RAWIO or sudo, and every drive comes back Unknown without a useful hint.
-            if (root.TryGetProperty("smartctl", out var meta)
+            // (permission denied, unsupported device, no SMART support). Its exit_status is a
+            // BITMASK per smartmontools docs — not a plain nonzero-means-error indicator (review
+            // P2-5). Bits 0–2 mean smartctl couldn't complete execution (command parse fail,
+            // device-open fail, ATA command fail) → treat as Unknown. Bits 3–7 signal SMART data
+            // IS present and reliable AND is telling us the drive is in trouble (bit 3 = DISK
+            // FAILING, bit 4 = prefail attribute at threshold, bit 5+ = past history / error logs).
+            // Only short-circuit to Unknown when a bit-0-through-2 error is set; otherwise fall
+            // through to parse smart_status normally so genuinely failing drives light up red.
+            const int SmartctlExecutionFailedMask = 0x07; // bits 0-2 = command / device / ATA failure
+            var rawExit = 0;
+            var haveExit = root.TryGetProperty("smartctl", out var meta)
+                && meta.ValueKind == JsonValueKind.Object
                 && meta.TryGetProperty("exit_status", out var exit)
                 && exit.ValueKind == JsonValueKind.Number
-                && exit.GetInt32() != 0)
+                && (rawExit = exit.GetInt32()) != 0;
+            if (haveExit && (rawExit & SmartctlExecutionFailedMask) != 0)
             {
                 var firstMessage = string.Empty;
                 if (meta.TryGetProperty("messages", out var msgs) && msgs.ValueKind == JsonValueKind.Array)
                 {
                     foreach (var m in msgs.EnumerateArray())
                     {
-                        if (m.TryGetProperty("string", out var ms) && ms.ValueKind == JsonValueKind.String)
+                        // Array elements can be any JSON kind — a firmware that emits
+                        // `"messages": ["plain string", {"string": "obj wrapper"}]` (rare but
+                        // seen) would trip TryGetProperty on the scalar entry.
+                        if (m.ValueKind == JsonValueKind.Object
+                            && m.TryGetProperty("string", out var ms)
+                            && ms.ValueKind == JsonValueKind.String)
                         {
                             firstMessage = ms.GetString() ?? string.Empty;
                             break;
@@ -283,7 +318,7 @@ public static class SmartHealthProbe
                 }
                 else if (string.IsNullOrEmpty(firstMessage))
                 {
-                    hint = "smartctl exited " + exit.GetInt32() + " on " + device + " without a diagnostic message.";
+                    hint = "smartctl exited " + rawExit + " on " + device + " without a diagnostic message.";
                 }
 
                 // Permission-denied is an expected outcome for unprivileged Jellyfin; the Overview
@@ -293,30 +328,37 @@ public static class SmartHealthProbe
                 // Every other non-zero exit is worth surfacing once per device per session — after that
                 // the row exists on the Errors tab and re-emitting it every 10 minutes just increments
                 // a counter the user already saw.
-                if (!isPermissionDenied && SmartctlKnownFailing.TryAdd(device + ":exit" + exit.GetInt32(), 0))
+                if (!isPermissionDenied && SmartctlKnownFailing.TryAdd(device + ":exit" + rawExit, 0))
                 {
-                    Diagnostics.Record("SmartHealth", "smartctl exit_status=" + exit.GetInt32() + " on " + device + ": " + (firstMessage.Length > 0 ? firstMessage : "(no message)") + " Subsequent identical failures on this device are suppressed for the rest of the session.");
+                    Diagnostics.Record("SmartHealth", "smartctl exit_status=" + rawExit + " on " + device + ": " + (firstMessage.Length > 0 ? firstMessage : "(no message)") + " Subsequent identical failures on this device are suppressed for the rest of the session.");
                 }
 
                 return new SmartHealthResult(SmartHealth.Unknown, hint);
             }
 
             bool overallPassed = root.TryGetProperty("smart_status", out var status)
+                && status.ValueKind == JsonValueKind.Object
                 && status.TryGetProperty("passed", out var passed)
                 && passed.ValueKind == JsonValueKind.True;
 
             string? failingAttr = null;
             if (root.TryGetProperty("ata_smart_attributes", out var attrs)
+                && attrs.ValueKind == JsonValueKind.Object
                 && attrs.TryGetProperty("table", out var table)
                 && table.ValueKind == JsonValueKind.Array)
             {
                 foreach (var entry in table.EnumerateArray())
                 {
-                    if (entry.TryGetProperty("when_failed", out var wf)
+                    if (entry.ValueKind == JsonValueKind.Object
+                        && entry.TryGetProperty("when_failed", out var wf)
                         && wf.ValueKind == JsonValueKind.String
                         && !string.Equals(wf.GetString(), "never", StringComparison.OrdinalIgnoreCase))
                     {
-                        failingAttr = entry.TryGetProperty("name", out var n) ? n.GetString() : "attribute";
+                        // GetString on a non-string throws IOE — an attribute entry with a
+                        // numeric or null "name" (rare vendor quirk) would take down parsing.
+                        failingAttr = entry.TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.String
+                            ? n.GetString()
+                            : "attribute";
                         break;
                     }
                 }
@@ -354,7 +396,7 @@ public static class SmartHealthProbe
             result.ModelName = modelEl.GetString();
         }
 
-        if (root.TryGetProperty("temperature", out var tempEl))
+        if (root.TryGetProperty("temperature", out var tempEl) && tempEl.ValueKind == JsonValueKind.Object)
         {
             if (tempEl.TryGetProperty("current", out var cur) && cur.TryGetInt32(out var c))
             {
@@ -368,6 +410,7 @@ public static class SmartHealthProbe
         }
 
         if (root.TryGetProperty("power_on_time", out var potEl)
+            && potEl.ValueKind == JsonValueKind.Object
             && potEl.TryGetProperty("hours", out var hoursEl)
             && hoursEl.TryGetInt64(out var hours))
         {
@@ -375,7 +418,8 @@ public static class SmartHealthProbe
         }
 
         // NVMe drives report a distinct block. Prefer its fields when present — they're already normalised.
-        if (root.TryGetProperty("nvme_smart_health_information_log", out var nvme))
+        if (root.TryGetProperty("nvme_smart_health_information_log", out var nvme)
+            && nvme.ValueKind == JsonValueKind.Object)
         {
             if (result.PowerOnHours is null
                 && nvme.TryGetProperty("power_on_hours", out var nvHours)
@@ -398,17 +442,26 @@ public static class SmartHealthProbe
         // ATA/SATA drives: walk the attribute table and pluck by well-known IDs.
         // 9 = Power_On_Hours, 173/177/231/233 = wear/life-remaining variants, 187/198 = uncorrected errors, 194 = temperature.
         if (root.TryGetProperty("ata_smart_attributes", out var ataAttrs)
+            && ataAttrs.ValueKind == JsonValueKind.Object
             && ataAttrs.TryGetProperty("table", out var table)
             && table.ValueKind == JsonValueKind.Array)
         {
             foreach (var attr in table.EnumerateArray())
             {
+                // Array element could be any kind — a plain scalar or null here would trip the
+                // TryGetProperty calls below.
+                if (attr.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
+
                 if (!attr.TryGetProperty("id", out var idEl) || !idEl.TryGetInt32(out var id))
                 {
                     continue;
                 }
 
                 if (!attr.TryGetProperty("raw", out var rawEl)
+                    || rawEl.ValueKind != JsonValueKind.Object
                     || !rawEl.TryGetProperty("value", out var rawVal))
                 {
                     continue;

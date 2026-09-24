@@ -57,8 +57,15 @@ public sealed class TranscodeLogScanner : IScanner
 
     /// <inheritdoc />
     // Two IssueType outputs, but IScanner.Type is a single value. Report Heavy as the primary;
-    // Failed rows carry their own type through the emitted Issues.
+    // Failed rows carry their own type through the emitted Issues and get grouped/persisted
+    // independently by ScanTask via AdditionalTypes (MD-008).
     public IssueType Type => IssueType.HeavyTranscode;
+
+    /// <inheritdoc />
+    // MD-008: FailedTranscode rows must persist under their own type and the scanner must run
+    // when EITHER Heavy or Failed is enabled — otherwise setting Heavy=Off + Failed=Automatic
+    // silently disables the entire log parser.
+    public IReadOnlyCollection<IssueType> AdditionalTypes { get; } = new[] { IssueType.FailedTranscode };
 
     /// <inheritdoc />
     // Paths in our findings aren't guaranteed to match a currently-scoped BaseItem (the file could
@@ -279,7 +286,13 @@ public sealed class TranscodeLogScanner : IScanner
         try
         {
             using var doc = JsonDocument.Parse(firstLine);
-            if (doc.RootElement.TryGetProperty("Path", out var pathEl)
+            // F-015 alignment (bug-pattern audit round 2 defence-in-depth): the `firstLine[0] != '{'`
+            // gate above makes non-object roots unreachable via the JSON grammar, but a partial-write
+            // header ending mid-token could still parse into something whose root isn't an object.
+            // Bring this in line with the 1.0.7.6 systemic sweep — TryGetProperty on a non-object
+            // throws InvalidOperationException which the JsonException catch doesn't match.
+            if (doc.RootElement.ValueKind == JsonValueKind.Object
+                && doc.RootElement.TryGetProperty("Path", out var pathEl)
                 && pathEl.ValueKind == JsonValueKind.String)
             {
                 var p = pathEl.GetString();

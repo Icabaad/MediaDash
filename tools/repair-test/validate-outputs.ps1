@@ -3,10 +3,28 @@
 # exists and decodes cleanly. Also asserts the pre-repair original is in the recycle bin.
 #
 # Exit code: 0 all pass, 1 any mismatch.
+#
+# 00-B fixes:
+#  - Recycled originals are keyed by SHA-256 of file bytes, not by basename. Two
+#    fixtures with the same base filename would previously collide silently and
+#    the recycle-cross-check would false-positive.
+#  - Missing expected recycled original for a repaired fixture is now FAIL, not
+#    WARN + exit 0. The plugin's repair path ALWAYS recycles; a missing entry is
+#    a real regression.
+#  - Healthy controls compare current file hash to the manifest's declared
+#    `sourceSha256` (if the manifest carries one). A basename-only check would
+#    accept an in-place overwrite as "still there."
+#
+# The manifest schema is additive: fixtures without `sourceSha256` skip the
+# hash check but their path/existence checks still run. `regenerate.ps1` should
+# stamp `sourceSha256` when producing new fixtures; retrofitting existing
+# fixtures is a separate task and does not gate 00-B.
 
 param(
     [string]$Ffmpeg = '',
-    [string]$RecycleBinRoot = "$env:LOCALAPPDATA\jellyfin-v10\data\mediadash\recycle"
+    [string]$RecycleBinRoot = "$env:LOCALAPPDATA\jellyfin-v10\data\mediadash\recycle",
+    [string]$ManifestPath = (Join-Path $PSScriptRoot 'fixture-manifest.json'),
+    [string]$FixturesDir  = (Join-Path $PSScriptRoot 'fixtures')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -16,14 +34,27 @@ if (-not $Ffmpeg) {
     if (Test-Path $jf) { $Ffmpeg = $jf } else { $Ffmpeg = 'ffmpeg' }
 }
 
-$manifest = Get-Content (Join-Path $PSScriptRoot 'fixture-manifest.json') -Raw | ConvertFrom-Json
-$fixtures = Join-Path $PSScriptRoot 'fixtures'
+function Get-Sha256Hex {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash
+}
+
+$manifest = Get-Content $ManifestPath -Raw | ConvertFrom-Json
 
 # Gather recycled originals - batches are timestamped subdirs under RecycleBinRoot.
-$recycled = @{}
+# Keyed by SHA-256 so two fixtures that happen to share a basename never collide.
+$recycledByHash = @{}
+$recycledByPathTail = @{}   # secondary lookup: relative path from RecycleBinRoot
 if (Test-Path $RecycleBinRoot) {
-    Get-ChildItem $RecycleBinRoot -Recurse -File -ErrorAction SilentlyContinue |
-        ForEach-Object { $recycled[$_.Name] = $_.FullName }
+    $rootFull = (Resolve-Path -LiteralPath $RecycleBinRoot).Path
+    Get-ChildItem $RecycleBinRoot -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
+        $h = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash
+        if (-not $recycledByHash.ContainsKey($h)) { $recycledByHash[$h] = @() }
+        $recycledByHash[$h] += $_.FullName
+        $tail = $_.FullName.Substring($rootFull.Length).TrimStart('\','/')
+        $recycledByPathTail[$tail] = $_.FullName
+    }
 }
 
 $results = @()
@@ -33,20 +64,26 @@ foreach ($fx in $manifest.fixtures) {
     # output at either the source's original path (rungs 1/2) or with the extension changed
     # to .mkv (rungs 3/4). Both are correct outcomes from a user perspective - "my file is
     # playable somewhere reasonable" - so accept either.
-    $originalPath = Join-Path $fixtures $fx.name
-    $mkvVariant   = Join-Path $fixtures ([IO.Path]::ChangeExtension($fx.name, '.mkv'))
-    $candidates = @(@($originalPath, $mkvVariant) | Select-Object -Unique | Where-Object { Test-Path $_ })
+    $originalPath = Join-Path $FixturesDir $fx.name
+    $mkvVariant   = Join-Path $FixturesDir ([IO.Path]::ChangeExtension($fx.name, '.mkv'))
+    $candidates = @(@($originalPath, $mkvVariant) | Select-Object -Unique | Where-Object { Test-Path -LiteralPath $_ })
 
     $status = 'PASS'
     $reason = ''
+    $sourceHash = if ($fx.PSObject.Properties['sourceSha256']) { [string]$fx.sourceSha256 } else { $null }
+    $recycledHit = $null
+    if ($sourceHash) { $recycledHit = $recycledByHash[$sourceHash] }
 
     if ($fx.targetRung -eq 0) {
-        # Negative control - should be untouched at original path, no recycle entry.
-        if (-not (Test-Path $originalPath)) {
+        # Negative control - must be untouched at original path AND (if hash known) bytes intact.
+        if (-not (Test-Path -LiteralPath $originalPath)) {
             $status = 'FAIL'; $reason = "healthy fixture no longer at original path (false-positive delete)"
         }
-        elseif ($recycled.ContainsKey($fx.name)) {
-            $status = 'FAIL'; $reason = "healthy fixture was recycled (false positive)"
+        elseif ($sourceHash -and (Get-Sha256Hex $originalPath) -ne $sourceHash) {
+            $status = 'FAIL'; $reason = "healthy fixture bytes changed in place (source SHA-256 no longer matches manifest)"
+        }
+        elseif ($recycledHit) {
+            $status = 'FAIL'; $reason = "healthy fixture was recycled (false positive; hash matches an entry in $RecycleBinRoot)"
         }
         $chosen = $originalPath
     }
@@ -63,9 +100,18 @@ foreach ($fx in $manifest.fixtures) {
         if ($LASTEXITCODE -ne 0) {
             $status = 'FAIL'; $reason = "output '$(Split-Path $chosen -Leaf)' fails strict decode (-xerror) - Jellyfin would not play cleanly"
         }
-        elseif (-not $recycled.ContainsKey($fx.name)) {
-            # Repair path always recycles the original (see PlayabilityFixer.TrySwapRepairedAsync).
-            $status = 'WARN'; $reason = "output OK but pre-repair original not found in recycle bin"
+        elseif ($sourceHash) {
+            # We know the pre-repair bytes. A repaired fixture MUST have its exact
+            # pre-repair bytes recorded in the recycle bin.
+            if (-not $recycledHit) {
+                $status = 'FAIL'; $reason = "pre-repair original not in recycle bin (looked up SHA-256 $sourceHash under $RecycleBinRoot)"
+            }
+        }
+        elseif (-not $recycledByPathTail.Keys.Where({ $_ -match [regex]::Escape($fx.name) + '$' })) {
+            # Fallback for legacy manifests without sourceSha256. Path-tail match is still
+            # a real check but weaker than hash. Package the retrofit to stamp hashes as
+            # a follow-up so we can remove this branch.
+            $status = 'FAIL'; $reason = "pre-repair original not in recycle bin (no SHA-256 in manifest and no path-tail match for '$($fx.name)')"
         }
     }
 
@@ -81,15 +127,10 @@ foreach ($fx in $manifest.fixtures) {
 $results | Format-Table -AutoSize
 
 $failed = @($results | Where-Object { $_.status -eq 'FAIL' })
-$warned = @($results | Where-Object { $_.status -eq 'WARN' })
 
 if ($failed.Count -gt 0) {
     Write-Host "`n$($failed.Count) fixture(s) failed post-repair verification."
     exit 1
-}
-if ($warned.Count -gt 0) {
-    Write-Host "`nAll pass, but $($warned.Count) recycle-bin cross-check(s) inconclusive (check bin path)."
-    exit 0
 }
 Write-Host "`nAll $($results.Count) fixtures repaired as expected."
 exit 0

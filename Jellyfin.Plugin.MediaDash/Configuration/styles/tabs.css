@@ -1,0 +1,132 @@
+/*
+ * TABS
+ *
+ * Tab bar pills, badges, tab-content column, banners spacing, field descriptions, tab intro paragraphs, toolbar row, Phase B dismiss-banner buttons + notification banners.
+ *
+ * Served via /MediaDash/Asset/tabs.css by Api/PluginAssetController.cs
+ * (whitelist entry "tabs.css"). Extracted in 06-FOLLOWUP-3-bulk-2 from
+ * configPage.html — ranges 472-557, 2517-2549 of the original inline <style> block
+ * (pre-06-FOLLOWUP-3-bulk-1 line numbers, post-jump.css state). Move is
+ * verbatim; comment headers preserved; @media blocks travel with their
+ * default-scheme counterparts so the pairing survives the split.
+ */
+
+/* ── Tab bar ─────────────────────────────────────────────────
+   Pills with 10px 10px 0 0 radius so they sit visually connected to the page
+   background below. The active tab's fill is the page colour (not header-band). */
+#MediaDashConfigPage .mdTabBar {
+    display: flex; gap: 4px; flex-wrap: wrap;
+    margin: 28px 0 0 !important; padding: 0;
+}
+#MediaDashConfigPage .mdTab {
+    padding: 11px 17px !important;
+    border-radius: 10px 10px 0 0 !important;
+    font: 500 14px Figtree, sans-serif !important;
+    color: var(--md-meta) !important;
+    background: transparent !important;
+    border: 0 !important;
+    min-height: 0 !important; height: auto !important;
+    transition: color .14s ease, background .14s ease;
+    display: inline-flex; align-items: center; gap: 6px;
+    cursor: pointer;
+    opacity: 1 !important;
+}
+#MediaDashConfigPage .mdTab:hover {
+    color: var(--md-ink) !important;
+    background: rgba(255,255,255,.04) !important;
+}
+@media (prefers-color-scheme: light) {
+    #MediaDashConfigPage .mdTab:hover { background: rgba(17,24,35,.05) !important; }
+}
+#MediaDashConfigPage .mdTab.mdTabActive {
+    background: var(--md-page) !important;
+    color: var(--md-ink) !important;
+    font-weight: 700 !important;
+}
+#MediaDashConfigPage .mdBadge {
+    display: inline-flex; align-items: center; padding: 2px 8px;
+    border-radius: 999px; font: 600 11px 'IBM Plex Mono', monospace;
+    color: #fff; vertical-align: middle;
+}
+/* Design tokens for badge fills: Issues cyan, History amber, Errors red. */
+#MediaDashConfigPage #mdIssueBadge { background: var(--md-primary) !important; color: var(--md-primary-ink) !important; }
+#MediaDashConfigPage #mdHistoryBadge { background: #f59e0b !important; color: #241a00 !important; }
+#MediaDashConfigPage #mdErrorBadge { background: #ef4444 !important; color: #fff !important; }
+@media (prefers-color-scheme: light) {
+    #MediaDashConfigPage #mdHistoryBadge { background: #b45309 !important; color: #fff !important; }
+    #MediaDashConfigPage #mdErrorBadge { background: #dc2626 !important; color: #fff !important; }
+}
+
+/* Tab content column — bottom-only bottom padding so the tab bar sits directly under
+   the masthead. The 32px horizontal gutter is inherited from .mdColumn. Each tab body
+   gets its own top padding via the mdTabBody rule below. */
+#MediaDashConfigPage .mdTabContent {
+    padding-bottom: 72px;
+}
+/* Stack of section cards inside a tab content region. */
+#MediaDashConfigPage #mdContentInner > [id^="mdTab-"] {
+    padding-top: 36px;
+}
+#MediaDashConfigPage #mdContentInner > [id^="mdTab-"] > * + * { margin-top: 22px; }
+/* Above-tab notification banners keep their existing gap. */
+#MediaDashConfigPage #mdContentInner > .mdTabBar {
+    margin-top: 0 !important;
+}
+#MediaDashConfigPage #mdContentInner > #mdFixPauseNote,
+#MediaDashConfigPage #mdContentInner > #mdDryRunNote,
+#MediaDashConfigPage #mdContentInner > #mdPostUpgradeNote,
+#MediaDashConfigPage #mdContentInner > #mdBinFullNote {
+    margin-top: 16px;
+}
+/* Jellyfin core styles .fieldDescription with rgba(255,255,255,.7) which is invisible on
+   light theme. Force our own token-driven color so descriptions read on both themes. */
+#MediaDashConfigPage .fieldDescription {
+    color: var(--md-body) !important;
+    opacity: 1 !important;
+}
+/* Tab-level intro/scoping notes (the paragraph at the top of Files / Recycle / Errors). */
+#MediaDashConfigPage [id^="mdTab-"] > .fieldDescription:first-child,
+#MediaDashConfigPage [id^="mdTab-"] > .mdTabTitle {
+    font: 400 14px/1.55 Figtree, sans-serif;
+    color: var(--md-body);
+    max-width: 780px;
+    margin: 0 0 20px !important;
+}
+/* Toolbar / button row directly under a tab intro. */
+#MediaDashConfigPage [id^="mdTab-"] > div[style*="display:flex"][style*="align-items:center"]:not(#mdFileBulk):not(#mdFileBar) {
+    margin-bottom: 20px !important;
+}
+
+
+/* ── Phase B: dismiss banner buttons ────────────────────────── */
+#MediaDashConfigPage .mdDismissBanner {
+    background: transparent !important;
+    border: 0 !important;
+    min-width: 0 !important;
+    padding: 4px !important;
+    border-radius: 999px !important;
+}
+#MediaDashConfigPage .mdDismissBanner:hover {
+    background: rgba(255,255,255,.06) !important;
+}
+@media (prefers-color-scheme: light) {
+    #MediaDashConfigPage .mdDismissBanner:hover { background: rgba(17,24,35,.06) !important; }
+}
+
+/* ── Phase B: notification banners (dry-run, bin-full, post-upgrade, redownload) ── */
+#MediaDashConfigPage #mdDryRunNote,
+#MediaDashConfigPage #mdPostUpgradeNote,
+#MediaDashConfigPage #mdBinFullNote,
+#MediaDashConfigPage #mdRedownloadWarn,
+#MediaDashConfigPage #mdRecycleWarn,
+#MediaDashConfigPage #mdUpdateAvailable {
+    border-radius: 16px !important;
+    border-width: 1px !important;
+    padding: 16px 20px !important;
+}
+#MediaDashConfigPage #mdDryRunNote { background: rgba(245,158,11,.12) !important; border-color: rgba(245,158,11,.35) !important; }
+#MediaDashConfigPage #mdPostUpgradeNote,
+#MediaDashConfigPage #mdUpdateAvailable { background: rgba(139,92,246,.12) !important; border-color: rgba(139,92,246,.35) !important; }
+#MediaDashConfigPage #mdBinFullNote { background: rgba(236,72,153,.12) !important; border-color: rgba(236,72,153,.35) !important; }
+#MediaDashConfigPage #mdRedownloadWarn { background: rgba(239,68,68,.10) !important; border-color: rgba(239,68,68,.35) !important; }
+#MediaDashConfigPage #mdRecycleWarn { background: rgba(245,158,11,.10) !important; border-color: rgba(245,158,11,.35) !important; }

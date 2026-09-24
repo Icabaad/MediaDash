@@ -11,6 +11,7 @@ namespace Jellyfin.Plugin.MediaDash.Tests;
 /// restored" invariant. Every read/write helper is exercised here plus the interaction with
 /// QueueDetectedIssues so the auto-queue gate can't be silently bypassed by a schema tweak.
 /// </summary>
+[Collection("MediaDashDb")]
 public sealed class RestoredPathsTests : IDisposable
 {
     private readonly string _dbPath = Path.Combine(Path.GetTempPath(), "mediadash-restored-" + Guid.NewGuid().ToString("N") + ".db");
@@ -110,7 +111,7 @@ public sealed class RestoredPathsTests : IDisposable
         _db.MarkPathRestored("/lib/movies/keep.mkv", IssueType.Duplicate);
 
         var queued = _db.QueueDetectedIssues(IssueType.Duplicate);
-        Assert.Equal(1, queued); // only the unrestored one gets queued
+        Assert.Single(queued); // only the unrestored one gets queued
 
         var stillDetected = _db.GetIssues(IssueType.Duplicate, IssueStatus.Detected);
         Assert.Contains(stillDetected, i => i.Path == "/lib/movies/keep.mkv");
@@ -134,14 +135,15 @@ public sealed class RestoredPathsTests : IDisposable
         _db.MarkPathRestoredForAnyType("/lib/orphan.srt");
 
         var queued = _db.QueueDetectedIssues(IssueType.OrphanedDebris);
-        Assert.Equal(0, queued);
+        Assert.Empty(queued);
     }
 
     [Fact]
     public void ManualApproval_StillWorks_EvenForRestoredPaths()
     {
         // Restore blocks AUTO-queue. It must not block MANUAL approval — the user is expressing a
-        // new decision. UpdateIssueStatus is what the Approve button calls; verify it succeeds.
+        // new decision. TryTransitionIssueStatus (Detected → Queued) is what the Approve endpoint
+        // calls; verify it succeeds even against a restored path.
         var issue = new Issue
         {
             Type = IssueType.Duplicate,
@@ -154,7 +156,7 @@ public sealed class RestoredPathsTests : IDisposable
         _db.MarkPathRestored("/lib/movies/A.mkv", IssueType.Duplicate);
 
         var id = _db.GetIssues(IssueType.Duplicate, IssueStatus.Detected)[0].Id;
-        Assert.True(_db.UpdateIssueStatus(id, IssueStatus.Queued));
+        Assert.Equal(StatusTransitionResult.Applied, _db.TryTransitionIssueStatus(id, [IssueStatus.Detected], IssueStatus.Queued));
         Assert.Equal(IssueStatus.Queued, _db.GetIssueStatus(id));
     }
 

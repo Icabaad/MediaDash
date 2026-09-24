@@ -50,17 +50,17 @@ public sealed class SuspiciousFileFixer : IFixer
         var config = Plugin.Instance!.Configuration;
         if (!File.Exists(issue.Path))
         {
-            return Task.FromResult(FixResult.Fail("The file no longer exists; re-scan to refresh the list."));
+            return Task.FromResult(FixResult.Fail(FixReason.SourceMissing, "The file no longer exists; re-scan to refresh the list."));
         }
 
         if (!_guard.IsInsideLibrary(issue.Path))
         {
-            return Task.FromResult(FixResult.Fail("The file is outside your library folders; MediaDash will not touch it."));
+            return Task.FromResult(FixResult.Refused(FixReason.OutsideLibrary, "The file is outside your library folders; MediaDash will not touch it."));
         }
 
         if (!SuspiciousFileScanner.IsSuspicious(issue.Path))
         {
-            return Task.FromResult(FixResult.Fail("File extension is no longer flagged as suspicious; re-scan to refresh the list."));
+            return Task.FromResult(FixResult.NoChange(FixReason.AlreadyHealthy, "File extension is no longer flagged as suspicious; re-scan to refresh the list."));
         }
 
         var size = new FileInfo(issue.Path).Length;
@@ -91,6 +91,7 @@ public sealed class SuspiciousFileFixer : IFixer
         return Task.FromResult(new FixResult
         {
             Success = true,
+            Outcome = FixOutcome.Applied,
             Message = actionText,
             BytesFreed = size,
             RecyclePath = recyclePath

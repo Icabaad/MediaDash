@@ -27,6 +27,12 @@ namespace Jellyfin.Plugin.MediaDash.Fixers;
 /// </summary>
 public sealed class TranscodeFixer : IFixer
 {
+    /// <summary>R09 (2026-09-20): all in-flight sidecars end with this non-media tail so
+    /// Jellyfin's real-time monitor and library scan skip them mid-encode. Preserves the
+    /// existing <c>.mediadash.tmp</c> / <c>.new</c> / <c>.swap</c> / <c>.strip</c> middle
+    /// infix so <see cref="LibraryGuard.SweepOrphanSidecars"/> patterns still match.</summary>
+    public const string InflightTail = ".mediaDash.tmp";
+
     private static readonly TimeSpan TranscodeTimeout = TimeSpan.FromHours(6);
 
     // Codecs known to be broadly HW-decodable across modern (2016+) GPUs on every current
@@ -44,11 +50,12 @@ public sealed class TranscodeFixer : IFixer
     private readonly FfmpegExecutor _ffmpeg;
     private readonly OutputVerifier _verifier;
     private readonly LibraryGuard _guard;
-    private readonly RecycleBin _recycleBin;
+    private readonly VerifiedReplacementService _replacement;
+    private readonly IPluginConfigurationProvider _configProvider;
     private readonly ILibraryMonitor _libraryMonitor;
     private readonly ILibraryManager _libraryManager;
     private readonly IServerConfigurationManager _serverConfig;
-    private readonly MediaDashDb _db;
+    private readonly IssueStore _issues;
     private readonly ILogger<TranscodeFixer> _logger;
 
     /// <summary>
@@ -58,33 +65,38 @@ public sealed class TranscodeFixer : IFixer
     /// <param name="ffmpeg">The ffmpeg executor.</param>
     /// <param name="verifier">The output verifier.</param>
     /// <param name="guard">The library path guard.</param>
-    /// <param name="recycleBin">The recycle bin.</param>
+    /// <param name="replacement">03-B: the shared verify → promote → dispose → commit protocol.
+    /// Takes ownership of the source recycle (or permanent delete) as part of its commit.</param>
+    /// <param name="configProvider">02-A snapshot provider. Used for the pre-commit policy
+    /// recheck callback so a dry-run flip mid-encode aborts before the commit.</param>
     /// <param name="libraryMonitor">Instance of the <see cref="ILibraryMonitor"/> interface.</param>
     /// <param name="libraryManager">Instance of the <see cref="ILibraryManager"/> interface, used to resolve the item behind an issue for post-encode renaming.</param>
     /// <param name="serverConfig">Instance of the <see cref="IServerConfigurationManager"/> interface, used to read the server's hardware acceleration type.</param>
-    /// <param name="db">The plugin database, used to re-point sibling issues after a container change or canonical rename.</param>
+    /// <param name="issues">Issue-table store (05-C.2), used to spot same-path queued siblings and re-point sibling issues after a container change or canonical rename.</param>
     /// <param name="logger">The logger.</param>
     public TranscodeFixer(
         FfprobeService ffprobe,
         FfmpegExecutor ffmpeg,
         OutputVerifier verifier,
         LibraryGuard guard,
-        RecycleBin recycleBin,
+        VerifiedReplacementService replacement,
+        IPluginConfigurationProvider configProvider,
         ILibraryMonitor libraryMonitor,
         ILibraryManager libraryManager,
         IServerConfigurationManager serverConfig,
-        MediaDashDb db,
+        IssueStore issues,
         ILogger<TranscodeFixer> logger)
     {
         _ffprobe = ffprobe;
         _ffmpeg = ffmpeg;
         _verifier = verifier;
         _guard = guard;
-        _recycleBin = recycleBin;
+        _replacement = replacement;
+        _configProvider = configProvider;
         _libraryMonitor = libraryMonitor;
         _libraryManager = libraryManager;
         _serverConfig = serverConfig;
-        _db = db;
+        _issues = issues;
         _logger = logger;
     }
 
@@ -100,12 +112,12 @@ public sealed class TranscodeFixer : IFixer
         var config = Plugin.Instance!.Configuration;
         if (!File.Exists(issue.Path))
         {
-            return FixResult.Fail("The file no longer exists; re-scan to refresh the list.");
+            return FixResult.Fail(FixReason.SourceMissing, "The file no longer exists; re-scan to refresh the list.");
         }
 
         if (!_guard.IsInsideLibrary(issue.Path))
         {
-            return FixResult.Fail("The file is outside your library folders; MediaDash will not touch it.");
+            return FixResult.Refused(FixReason.OutsideLibrary, "The file is outside your library folders; MediaDash will not touch it.");
         }
 
         var probe = await _ffprobe.ProbeAsync(issue.Path, cancellationToken).ConfigureAwait(false);
@@ -114,7 +126,7 @@ public sealed class TranscodeFixer : IFixer
         var video = probe?.Streams?.FirstOrDefault(s => string.Equals(s.CodecType, "video", StringComparison.OrdinalIgnoreCase) && !s.IsAttachedPicture);
         if (probe is null || probe.Error is not null || video is null)
         {
-            return FixResult.Fail("The file could not be analyzed; it may be broken.");
+            return FixResult.Fail(FixReason.ProbeUnavailable, "The file could not be analyzed; it may be broken.");
         }
 
         var originalSize = new FileInfo(issue.Path).Length;
@@ -122,6 +134,31 @@ public sealed class TranscodeFixer : IFixer
         var targetPath = Path.ChangeExtension(issue.Path, "." + targetContainer);
         var needsDownscale = video.Height is > 0 && video.Height.Value > config.MaxResolutionHeight;
         var disposal = config.GetDisposal(issue.Type);
+
+        // MP4-family target + source audio the mp4 muxer refuses under `-c copy`. BuildArgs hard-
+        // codes `-c:a copy` for every Quality/HeavyTranscode/FailedTranscode re-encode; on a 4K
+        // Blu-ray remux with TrueHD / DTS-HD MA / lossless PCM audio (or a FLAC audiobook remux),
+        // ffmpeg gets past the video re-encode and then aborts at the mux with "codec not
+        // currently supported in container". The whole re-encode fails, the temp is cleaned up,
+        // the issue stays Queued, next scheduled fix retries and hits the same wall — retry storm
+        // that only ends when the user notices and switches Settings → Quality → target container
+        // to MKV. Refuse cleanly here instead: the message names the offending codec + points at
+        // the exact setting to change, and the typed FixReason.IncompatibleContainer routes to
+        // CompleteLegacy via FixResultPolicy so the scheduler stops beating on it. Once the user
+        // changes the target container the next scan re-emits the issue and the fix runs normally.
+        // ponytail: refusal is the shortest safe fix. A future round can add either a blocking-
+        // warning consent gate (matches the bitmap-sub pattern — user Approve = accept audio
+        // transcode to AAC) or an automatic AAC fallback when a preference lands.
+        var mp4IncompatibleAudio = TrackFixer.FirstMp4IncompatibleAudioCodec(probe, targetContainer);
+        if (mp4IncompatibleAudio is not null)
+        {
+            return FixResult.Refused(FixReason.IncompatibleContainer, string.Format(
+                CultureInfo.InvariantCulture,
+                "Can't re-encode '{0}' with target container .{1}: source contains {2} audio, and the MP4 muxer refuses that codec under -c copy — this fix requires re-encoding the audio, which MediaDash won't do silently on a Quality run. Change Settings → Quality → target container to MKV (accepts every audio codec), or leave the file at its current container.",
+                Path.GetFileName(issue.Path),
+                targetContainer,
+                mp4IncompatibleAudio.ToUpperInvariant()));
+        }
 
         var actionText = string.Format(
             CultureInfo.InvariantCulture,
@@ -137,14 +174,14 @@ public sealed class TranscodeFixer : IFixer
             return FixResult.DryRun(actionText, issue.SizeSavings);
         }
 
-        // Temp file lives alongside the original during the encode and is aborted if it ever reaches originalSize
-        // (see the newSize >= originalSize check below). Worst case we need room for one more copy of the file plus
-        // a small margin for muxer overhead; batches free space as they progress because the original is removed each round.
-        var drive = RecycleBin.FindDriveForPath(issue.Path);
-        const long safetyMarginBytes = 500L * 1024 * 1024;
-        if (drive is not null && drive.AvailableFreeSpace < originalSize + safetyMarginBytes)
+        // CLAUDE.md safety invariant 5: transcode fixers require at least 2× source-size free
+        // before starting. The temp file lives alongside the original during the encode and is
+        // aborted if it ever reaches originalSize; the original is only removed after the swap.
+        // Worst case we hold source + full-size temp simultaneously = 2× source. Fails closed if
+        // the target drive can't be resolved.
+        if (!FreeSpaceGuard.HasEnoughFreeSpace(issue.Path, multiplier: 2))
         {
-            return FixResult.Fail("Not enough free disk space to re-encode this file (needs its own size plus about 500 MB free).");
+            return FixResult.Fail(FixReason.InsufficientSpace, "Not enough free disk space to re-encode this file (needs at least twice its own size free on the target drive).");
         }
 
         var durationSeconds = double.TryParse(probe.Format?.Duration, NumberStyles.Float, CultureInfo.InvariantCulture, out var d) ? d : 0;
@@ -156,18 +193,23 @@ public sealed class TranscodeFixer : IFixer
         // library-guard sidecar patterns still match for cleanup.
         var runToken = Guid.NewGuid().ToString("N")[..8];
         var tempPath = SidecarPath(issue.Path, "tmp." + runToken, targetContainer);
-        // The swap sidecar sits next to the eventual output so it lands on the same volume, which
-        // makes the final rename atomic. Distinct from tempPath so the finally cleanup below never
-        // fights the swap-preservation branch.
-        var swapPath = SidecarPath(targetPath, "new." + runToken, string.Empty);
-        var originalDisposed = false;
-        var swapCompleted = false;
-        // F-202 / issue #31: capture source timestamps before any rewrite. Restored after
-        // the final swap so Jellyfin's Recently Added widget doesn't treat every re-encode
-        // as newly-added media.
+        // 03-B: identity snapshot captured BEFORE ffmpeg runs so the pre-commit source recheck
+        // (inside VerifiedReplacementService) can refuse a stale source mutation. Length +
+        // mtime is the stale-source guard, not cryptographic identity.
         var srcInfo = new FileInfo(issue.Path);
-        var srcCreatedUtc = srcInfo.Exists ? srcInfo.CreationTimeUtc : DateTime.UtcNow;
-        var srcModifiedUtc = srcInfo.Exists ? srcInfo.LastWriteTimeUtc : DateTime.UtcNow;
+        var expectedSourceLength = srcInfo.Exists ? srcInfo.Length : 0;
+        var expectedSourceMtimeTicks = srcInfo.Exists ? srcInfo.LastWriteTimeUtc.Ticks : 0;
+        // 02-B: compute per-path companion consent BEFORE launching ffmpeg. `ManualApprove` mode
+        // requires a same-path AudioLanguage / SubtitleLanguage issue to actually be queued
+        // (or Detected and up for approval by the caller). A nonempty language allow-list is
+        // NOT approval. `Automatic` mode ignores this flag inside BuildArgs.
+        var samePathQueued = _issues.GetIssues(status: IssueStatus.Queued)
+            .Where(i => string.Equals(i.Path, issue.Path, StringComparison.OrdinalIgnoreCase))
+            .Select(i => i.Type)
+            .ToHashSet();
+        var hasApprovedAudioCompanion = samePathQueued.Contains(IssueType.AudioLanguage);
+        var hasApprovedSubtitleCompanion = samePathQueued.Contains(IssueType.SubtitleLanguage);
+
         try
         {
             string? vaapiDevice = null;
@@ -175,7 +217,7 @@ public sealed class TranscodeFixer : IFixer
             string? error;
             if (hwEncoder is not null)
             {
-                var hwArgs = BuildArgs(issue.Path, tempPath, probe, video, config, needsDownscale, targetContainer, hwEncoder, vaapiDevice);
+                var hwArgs = BuildArgs(issue.Path, tempPath, probe, video, config, needsDownscale, targetContainer, hwEncoder, vaapiDevice, hasApprovedAudioCompanion, hasApprovedSubtitleCompanion);
                 error = await _ffmpeg.RunAsync(hwArgs, TranscodeTimeout, cancellationToken, progress, durationSeconds).ConfigureAwait(false);
                 if (error is not null)
                 {
@@ -185,25 +227,25 @@ public sealed class TranscodeFixer : IFixer
                         File.Delete(tempPath);
                     }
 
-                    var swArgs = BuildArgs(issue.Path, tempPath, probe, video, config, needsDownscale, targetContainer, null, null);
+                    var swArgs = BuildArgs(issue.Path, tempPath, probe, video, config, needsDownscale, targetContainer, null, null, hasApprovedAudioCompanion, hasApprovedSubtitleCompanion);
                     error = await _ffmpeg.RunAsync(swArgs, TranscodeTimeout, cancellationToken, progress, durationSeconds).ConfigureAwait(false);
                 }
             }
             else
             {
-                var args = BuildArgs(issue.Path, tempPath, probe, video, config, needsDownscale, targetContainer, null, null);
+                var args = BuildArgs(issue.Path, tempPath, probe, video, config, needsDownscale, targetContainer, null, null, hasApprovedAudioCompanion, hasApprovedSubtitleCompanion);
                 error = await _ffmpeg.RunAsync(args, TranscodeTimeout, cancellationToken, progress, durationSeconds).ConfigureAwait(false);
             }
 
             if (error is not null)
             {
-                return FixResult.Fail("Re-encoding failed; the original is untouched. Details: " + Truncate(error));
+                return FixResult.Fail(FixReason.ProcessFailed, "Re-encoding failed; the original is untouched. Details: " + Truncate(error));
             }
 
             var verifyError = await _verifier.VerifyAsync(probe, issue.Path, tempPath, cancellationToken).ConfigureAwait(false);
             if (verifyError is not null)
             {
-                return FixResult.Fail("The re-encoded file failed verification; the original is untouched. Details: " + verifyError);
+                return FixResult.Fail(FixReason.VerificationFailed, "The re-encoded file failed verification; the original is untouched. Details: " + verifyError);
             }
 
             var newSize = new FileInfo(tempPath).Length;
@@ -214,55 +256,92 @@ public sealed class TranscodeFixer : IFixer
             // re-encodes (misconfigured bitrate, wrong preset) but otherwise accept the swap.
             if (issue.Type == IssueType.Quality && newSize >= originalSize)
             {
-                return FixResult.Fail("The re-encoded file would be larger than the original, so the original was kept.");
+                // ponytail: FixReason.Unknown preserves current KeepQueued behavior. A dedicated
+                // NoImprovement reason (Failed/NoImprovement -> KeepQueued OR CompleteLegacy) can
+                // land later once the roadmap decides whether a repeatable no-win re-encode should
+                // stop retrying.
+                return FixResult.Fail(FixReason.Unknown, "The re-encoded file would be larger than the original, so the original was kept.");
             }
 
             if (issue.Type != IssueType.Quality && newSize > originalSize * 1.3)
             {
                 var overheadPct = (int)((newSize - originalSize) * 100.0 / originalSize);
-                return FixResult.Fail("The re-encoded file is " + overheadPct + "% larger than the original — something's off with the encode settings, so the original was kept. Try a lower bitrate ceiling or a different codec in Settings → Files wasting space.");
+                return FixResult.Fail(FixReason.Unknown, "The re-encoded file is " + overheadPct + "% larger than the original — something's off with the encode settings, so the original was kept. Try a lower bitrate ceiling or a different codec in Settings → Files wasting space.");
             }
 
-            // Move the verified encode to a sidecar next to the target BEFORE touching the original.
-            // Old order (delete original -> move temp -> ...) lost the file if the move ever threw,
-            // because the finally cleanup then deleted the temp too. Under this order any pre-dispose
-            // failure leaves the original intact; any post-dispose failure preserves the encoded copy.
-            if (File.Exists(swapPath))
+            // 03-B: hand the verified ffmpeg output to VerifiedReplacementService. It owns the
+            // stage → promote → dispose → commit sequence, the recovery-marker naming and the
+            // sweep-safety guarantees. Verify callback is null (already checked above — repeating
+            // it would double the probe cost); policy recheck consults the current config
+            // snapshot so a dry-run flip mid-encode aborts the commit under the current setting,
+            // not the one the fixer captured at the top of FixAsync.
+            var request = new ReplacementRequest(
+                SourcePath: issue.Path,
+                OutputPath: tempPath,
+                DestinationPath: targetPath,
+                ExpectedSourceLength: expectedSourceLength,
+                ExpectedSourceMtimeUtcTicks: expectedSourceMtimeTicks,
+                RecycleOriginal: disposal == DisposalMethod.RecycleBin,
+                PreserveSourceTimestamps: true);
+
+            var replacementResult = await _replacement.ReplaceAsync(
+                request,
+                verifyOutput: _ => Task.FromResult<string?>(null),
+                checkCurrentPolicy: () =>
+                {
+                    // 02-B ceiling closed: re-read config at commit time. If the user has
+                    // flipped Dry-run ON during the (potentially hours-long) encode, we must
+                    // NOT commit under the stale snapshot from the top of FixAsync.
+                    var currentConfig = _configProvider.GetSnapshot();
+                    if (currentConfig.DryRun)
+                    {
+                        return PolicyDecision.Refuse(FixReason.TypeDisabled);
+                    }
+
+                    return PolicyDecision.Allow;
+                },
+                cancellationToken).ConfigureAwait(false);
+
+            if (!replacementResult.Applied)
             {
-                File.Delete(swapPath);
+                if (replacementResult.Reason == FixReason.RecoveryRequired && replacementResult.RecoveryPath is not null)
+                {
+                    // Preserve the pre-existing "Transcode.SwapAborted" diagnostic key so the
+                    // dashboard, CHANGELOG search anchors and audit trail keep working after
+                    // the service takes ownership of the promote+commit protocol. Service also
+                    // logs via ILogger; the diagnostic here is the user-facing signal.
+                    Api.Diagnostics.Record(
+                        "Transcode.SwapAborted",
+                        "Re-encode of '" + issue.Path + "' completed but the final rename to '" + targetPath + "' failed. The re-encoded copy is preserved at '" + replacementResult.RecoveryPath + "' — rename it manually. Do NOT delete this file; it is currently your only copy of the content.");
+                    return FixResult.Fail(FixReason.RecoveryRequired, "The re-encoded copy is preserved at '" + replacementResult.RecoveryPath + "'; rename it to '" + targetPath + "' manually. The original is no longer at its previous location.", replacementResult.TechnicalDetail);
+                }
+
+                if (replacementResult.Reason == FixReason.SourceChanged)
+                {
+                    return FixResult.Fail(FixReason.SourceChanged, "The source file changed while it was being re-encoded; the encode was discarded and the changed source was preserved.", replacementResult.TechnicalDetail);
+                }
+
+                if (replacementResult.Reason == FixReason.DestinationCollision)
+                {
+                    return FixResult.Refused(FixReason.DestinationCollision, "The target path '" + targetPath + "' is already occupied by a different file; the original is untouched.", replacementResult.TechnicalDetail);
+                }
+
+                if (replacementResult.Reason == FixReason.Cancelled)
+                {
+                    return FixResult.Fail(FixReason.Cancelled, "Re-encode was cancelled; the original is untouched.", replacementResult.TechnicalDetail);
+                }
+
+                // Policy refusal (dry-run flipped mid-encode), verification failure surfaced by
+                // the service, or any other typed refusal. Preserve the service's typed reason
+                // and fold the technical detail into the message.
+                return FixResult.Fail(replacementResult.Reason, "Re-encode could not be committed: " + (replacementResult.TechnicalDetail ?? replacementResult.Reason.ToString()), replacementResult.TechnicalDetail);
             }
 
-            File.Move(tempPath, swapPath);
-
-            string? recyclePath = null;
-            if (disposal == DisposalMethod.RecycleBin)
-            {
-                recyclePath = _recycleBin.MoveToBin(issue.Path);
-            }
-            else if (File.Exists(issue.Path))
-            {
-                File.Delete(issue.Path);
-            }
-
-            originalDisposed = true;
-            File.Move(swapPath, targetPath);
-            // F-202 / issue #31: preserve source timestamps on the transcoded file. Do after
-            // Move so the rename doesn't clobber them. Non-fatal on failure — the transcode
-            // is already committed.
-            try
-            {
-                File.SetCreationTimeUtc(targetPath, srcCreatedUtc);
-                File.SetLastWriteTimeUtc(targetPath, srcModifiedUtc);
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                // Linux `utimensat(2)` returns EPERM as UnauthorizedAccessException, NOT
-                // IOException (GitHub #59); network shares / restricted-perms mounts hit this.
-                // Non-fatal — the transcode is already committed.
-                _logger.LogInformation("TranscodeFixer: could not restore source timestamps on '{Path}': {Message}", targetPath, ex.Message);
-            }
-
-            swapCompleted = true;
+            // Commit succeeded. `targetPath` now holds the verified encode; the source is
+            // recycled (or permanent-deleted) per the request; timestamps are restored by the
+            // service. Downstream extras below stay in the caller: canonical rename, library
+            // notification, DB path relocation.
+            var recyclePath = replacementResult.RecyclePath;
             var finalPath = targetPath;
             if (config.RenameAfterTranscode)
             {
@@ -280,11 +359,12 @@ public sealed class TranscodeFixer : IFixer
             _libraryMonitor.ReportFileSystemChanged(finalPath);
             // Re-point any other queued issues on this file (audio-language cleanup, sorter, grouper, …)
             // at the new location so they don't fail with "no longer exists" on the next fix run.
-            _db.RelocateIssuePaths(issue.Path, finalPath);
+            _issues.RelocateIssuePaths(issue.Path, finalPath);
             _logger.LogInformation("Transcode fix: {Action}", actionText);
             return new FixResult
             {
                 Success = true,
+                Outcome = FixOutcome.Applied,
                 Message = actionText,
                 BytesFreed = originalSize - newSize,
                 RecyclePath = recyclePath
@@ -292,6 +372,11 @@ public sealed class TranscodeFixer : IFixer
         }
         finally
         {
+            // Caller only owns tempPath — the ffmpeg output. On the happy path the service
+            // moves tempPath into a recovery-marker sibling of targetPath; on any pre-promote
+            // refusal tempPath stays where ffmpeg wrote it and this finally cleans it up.
+            // Post-promote failures leave the recovery marker outside every sweep pattern
+            // (the service returns RecoveryPath for the caller to surface).
             if (File.Exists(tempPath))
             {
                 try
@@ -301,29 +386,6 @@ public sealed class TranscodeFixer : IFixer
                 catch (IOException ex)
                 {
                     _logger.LogWarning(ex, "Could not delete temp transcode file {Path}", tempPath);
-                }
-            }
-
-            if (!swapCompleted && File.Exists(swapPath))
-            {
-                if (originalDisposed)
-                {
-                    // Only reachable if the final rename failed AFTER the original was disposed.
-                    // The sidecar is now the only copy of the content — do not delete it.
-                    Api.Diagnostics.Record(
-                        "Transcode.SwapAborted",
-                        "Re-encode of '" + issue.Path + "' completed but the final rename to '" + targetPath + "' failed. The re-encoded copy is preserved at '" + swapPath + "' — rename it manually. Do NOT delete this file; it is currently your only copy of the content.");
-                }
-                else
-                {
-                    try
-                    {
-                        File.Delete(swapPath);
-                    }
-                    catch (IOException ex)
-                    {
-                        _logger.LogWarning(ex, "Could not delete swap sidecar {Path}", swapPath);
-                    }
                 }
             }
         }
@@ -484,7 +546,9 @@ public sealed class TranscodeFixer : IFixer
         bool needsDownscale,
         string targetContainer,
         string? hardwareEncoder,
-        string? vaapiDevice)
+        string? vaapiDevice,
+        bool hasApprovedAudioCompanion = true,
+        bool hasApprovedSubtitleCompanion = true)
     {
         var encoder = hardwareEncoder ?? config.PreferredCodec.ToLowerInvariant() switch
         {
@@ -533,7 +597,20 @@ public sealed class TranscodeFixer : IFixer
         args.AddRange(["-i", inputPath, "-map", "0:" + video.Index.ToString(CultureInfo.InvariantCulture)]);
 
         var audioStreams = probe.Streams!.Where(s => string.Equals(s.CodecType, "audio", StringComparison.OrdinalIgnoreCase)).ToList();
-        var keptAudio = config.AllowedAudioLanguages.Length > 0
+        // Bug-pattern audit round 4 P-01 (2026-09-19): the pre-fix filter applied the language
+        // allow-list unconditionally, which meant a Quality re-encode also performed an
+        // AudioLanguage cleanup the user had explicitly turned Off / disabled / never approved.
+        // Approving a compat re-encode of one file silently mutated its unrelated language state.
+        // Gate the filter on per-type authorization: cleanup type not Off AND not on the per-
+        // fixer disable list. Same pattern as FixTask's queue-selection guard. Unauthorized =
+        // keep every audio track (subject only to muxer-compat handled elsewhere).
+        // 02-B: consent gate composes config-level `IsTypeAuthorized` with per-path companion
+        // approval — a `ManualApprove` mode + non-empty language allow-list is NOT sufficient
+        // consent; a same-path AudioLanguage issue must actually be queued for the incidental
+        // cleanup to run. `Automatic` mode is bulk-authorised and the flag is ignored.
+        var audioCleanupAllowed = IsTypeAuthorized(config, IssueType.AudioLanguage)
+            && (config.GetFixMode(IssueType.AudioLanguage) == FixMode.Automatic || hasApprovedAudioCompanion);
+        var keptAudio = audioCleanupAllowed && config.AllowedAudioLanguages.Length > 0
             ? audioStreams.Where(s => LanguageHelper.IsAllowed(s.Language, config.AllowedAudioLanguages)).ToList()
             : audioStreams;
         if (keptAudio.Count == 0)
@@ -551,7 +628,12 @@ public sealed class TranscodeFixer : IFixer
         if (targetContainer == "mkv")
         {
             var subs = probe.Streams!.Where(s => string.Equals(s.CodecType, "subtitle", StringComparison.OrdinalIgnoreCase)).ToList();
-            var keptSubs = config.AllowedSubtitleLanguages.Length > 0
+            // Same P-01 gate as audio above — a Quality re-encode of an MKV must not perform an
+            // unauthorized SubtitleLanguage cleanup.
+            // 02-B: same composed consent gate as audio above.
+            var subtitleCleanupAllowed = IsTypeAuthorized(config, IssueType.SubtitleLanguage)
+                && (config.GetFixMode(IssueType.SubtitleLanguage) == FixMode.Automatic || hasApprovedSubtitleCompanion);
+            var keptSubs = subtitleCleanupAllowed && config.AllowedSubtitleLanguages.Length > 0
                 ? subs.Where(s => LanguageHelper.IsAllowed(s.Language, config.AllowedSubtitleLanguages)).ToList()
                 : subs;
             foreach (var stream in keptSubs)
@@ -688,7 +770,9 @@ public sealed class TranscodeFixer : IFixer
             args.AddRange(["-vf", "scale=-2:" + config.MaxResolutionHeight.ToString(CultureInfo.InvariantCulture)]);
         }
 
-        args.AddRange(["-c:a", "copy", "-map_chapters", "0", tempPath]);
+        // R09 (2026-09-20): sidecar output tail is `.mediaDash.tmp` so ffmpeg can't infer the
+        // muxer from the extension; pass -f explicitly.
+        args.AddRange(["-c:a", "copy", "-map_chapters", "0", "-f", ContainerToFfmpegFormat(targetContainer), tempPath]);
         return args;
     }
 
@@ -706,6 +790,42 @@ public sealed class TranscodeFixer : IFixer
         return "… " + text[^Max..];
     }
 
+    /// <summary>
+    /// P-01 gate helper: an incidental language-track cleanup during a Quality/HeavyTranscode/
+    /// FailedTranscode re-encode requires the SAME per-type authorization as a standalone
+    /// AudioLanguage or SubtitleLanguage fix. That means the type's <see cref="FixMode"/> must
+    /// not be <c>Off</c>, and the type must not be on the per-fixer disable list (Settings →
+    /// Fix order → visibility toggle). A nonempty language allow-list is NOT authorization on
+    /// its own — it just says "these languages exist" — so the pre-fix filter was silently
+    /// running the cleanup regardless of user consent. Bug-pattern audit round 4 (2026-09-19).
+    /// </summary>
+    /// <param name="config">The current plugin configuration.</param>
+    /// <param name="type">The cleanup type being considered (AudioLanguage / SubtitleLanguage).</param>
+    /// <returns>True when the type is authorized to run and the caller may apply its filter.</returns>
+    internal static bool IsTypeAuthorized(PluginConfiguration config, IssueType type)
+    {
+        if (config.GetFixMode(type) == FixMode.Off)
+        {
+            return false;
+        }
+
+        var disabled = config.FixerDisabled;
+        if (disabled is null)
+        {
+            return true;
+        }
+
+        for (var i = 0; i < disabled.Length; i++)
+        {
+            if (string.Equals(disabled[i], type.ToString(), StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     // Linux's NAME_MAX is 255 bytes. Appending our ".mediadash.tmp.<ext>" suffix to a file whose
     // own basename is already close to that limit (common with Cyrillic/CJK filenames — each
     // char is 2-3 UTF-8 bytes) blows past it and ffmpeg fails with "Error opening output".
@@ -716,7 +836,11 @@ public sealed class TranscodeFixer : IFixer
         var dir = Path.GetDirectoryName(sibling) ?? string.Empty;
         var name = Path.GetFileName(sibling);
         var extSuffix = string.IsNullOrEmpty(extension) ? string.Empty : "." + extension;
-        var candidate = name + ".mediadash." + marker + extSuffix;
+        // R09 (2026-09-20): append `.mediaDash.tmp` tail so Jellyfin's video-extension list
+        // (checked on the LAST file extension) doesn't treat our staging file as media and
+        // index it mid-encode. Ffmpeg no longer infers output format from the tail — every
+        // call site now passes `-f <container>` explicitly (see ContainerToFfmpegFormat).
+        var candidate = name + ".mediadash." + marker + extSuffix + InflightTail;
         if (Encoding.UTF8.GetByteCount(candidate) <= 240)
         {
             return Path.Combine(dir, candidate);
@@ -724,7 +848,40 @@ public sealed class TranscodeFixer : IFixer
 
         // 16 hex chars = 8 bytes of SHA-256; collision-proof for a per-directory sidecar.
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(name)), 0, 8);
-        return Path.Combine(dir, "mediadash." + marker + "." + hash + extSuffix);
+        return Path.Combine(dir, "mediadash." + marker + "." + hash + extSuffix + InflightTail);
+    }
+
+    /// <summary>Maps a MediaDash container name (e.g. "mkv", "mp3", "png") to the ffmpeg
+    /// <c>-f</c> muxer name. R09 (2026-09-20): every sidecar output now ends in
+    /// <see cref="InflightTail"/> so ffmpeg can't infer format from the extension — callers
+    /// pass this value via <c>-f</c> to the output-args block. Unknown containers pass
+    /// through unchanged (ffmpeg then errors clearly instead of writing a broken file).</summary>
+    /// <param name="container">The MediaDash container name (no leading dot).</param>
+    /// <returns>The ffmpeg muxer name.</returns>
+    internal static string ContainerToFfmpegFormat(string container)
+    {
+        return container.ToLowerInvariant() switch
+        {
+            "mkv" => "matroska",
+            "mp4" or "m4v" => "mp4",
+            "m4a" or "m4b" => "ipod",
+            "mov" => "mov",
+            "avi" => "avi",
+            "webm" => "webm",
+            "ts" or "m2ts" or "mts" => "mpegts",
+            "mpeg" or "mpg" => "mpeg",
+            "flv" => "flv",
+            "ogg" or "oga" => "ogg",
+            "opus" => "opus",
+            "mp3" => "mp3",
+            "flac" => "flac",
+            "wav" => "wav",
+            "aac" => "adts",
+            "wma" => "asf",
+            "webp" => "webp",
+            "png" or "jpg" or "jpeg" or "bmp" => "image2",
+            _ => container.ToLowerInvariant()
+        };
     }
 
     private string? TryRenameToCanonical(string currentPath, Guid itemId, int height, string extension, string sourcePath)

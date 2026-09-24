@@ -66,27 +66,37 @@ public sealed class DuplicateFixer : IFixer
 
         if (string.IsNullOrEmpty(keeperPath))
         {
-            return Task.FromResult(FixResult.Fail("No better copy is recorded for this duplicate; re-scan and try again."));
+            return Task.FromResult(FixResult.Refused(FixReason.SourceChanged, "No better copy is recorded for this duplicate; re-scan and try again."));
         }
 
         if (!File.Exists(issue.Path))
         {
-            return Task.FromResult(FixResult.Fail("The file no longer exists; re-scan to refresh the list."));
+            return Task.FromResult(FixResult.Fail(FixReason.SourceMissing, "The file no longer exists; re-scan to refresh the list."));
         }
 
         if (!File.Exists(keeperPath))
         {
-            return Task.FromResult(FixResult.Fail($"The better copy ({Path.GetFileName(keeperPath)}) no longer exists — nothing was deleted. Re-scan and review again."));
+            return Task.FromResult(FixResult.Fail(FixReason.SourceMissing, $"The better copy ({Path.GetFileName(keeperPath)}) no longer exists — nothing was deleted. Re-scan and review again."));
+        }
+
+        // R07 (audit 2026-09-19): revalidate keeper integrity immediately before deletion.
+        // Pre-fix the fixer only checked keeper existence — a keeper truncated to 0 bytes (or
+        // materially shrunk) between scan and fix would still be trusted, and the fixer would
+        // delete a nonempty loser in favour of the invalid keeper. Refuse on any suspicious
+        // shrinkage; user re-scans to pick a fresh keeper.
+        if (!KeeperStillViable(keeperPath, issue.DetailsJson, out var viabilityReason))
+        {
+            return Task.FromResult(FixResult.Refused(FixReason.SourceChanged, viabilityReason!));
         }
 
         if (string.Equals(Path.GetFullPath(keeperPath), Path.GetFullPath(issue.Path), StringComparison.OrdinalIgnoreCase))
         {
-            return Task.FromResult(FixResult.Fail("The duplicate and the better copy are the same file; nothing was deleted."));
+            return Task.FromResult(FixResult.NoChange(FixReason.NothingToRemove, "The duplicate and the better copy are the same file; nothing was deleted."));
         }
 
         if (!_guard.IsInsideLibrary(issue.Path))
         {
-            return Task.FromResult(FixResult.Fail("The file is outside your library folders; MediaDash will not touch it."));
+            return Task.FromResult(FixResult.Refused(FixReason.OutsideLibrary, "The file is outside your library folders; MediaDash will not touch it."));
         }
 
         // Defense in depth against a scanner ever writing a keeperPath outside the library — recycling
@@ -94,7 +104,7 @@ public sealed class DuplicateFixer : IFixer
         // silently losing content in favour of a file the user can't reach through Jellyfin.
         if (!_guard.IsInsideLibrary(keeperPath))
         {
-            return Task.FromResult(FixResult.Fail("Refused: the recorded better copy '" + keeperPath + "' is outside your library folders."));
+            return Task.FromResult(FixResult.Refused(FixReason.OutsideLibrary, "Refused: the recorded better copy '" + keeperPath + "' is outside your library folders."));
         }
 
         // Belt-and-braces behind the DB-level auto-queue gate in FixTask/MediaDashDb: under
@@ -106,7 +116,7 @@ public sealed class DuplicateFixer : IFixer
             && issue.Confidence is double conf
             && conf < config.DuplicateAutoFixConfidence)
         {
-            return Task.FromResult(FixResult.Fail(string.Format(
+            return Task.FromResult(FixResult.Refused(FixReason.ConsentChanged, string.Format(
                 CultureInfo.InvariantCulture,
                 "Confidence {0:F2} is below the auto-fix threshold {1:F2}. Approve manually from the Issues tab if you're sure — Automatic mode won't auto-delete low-confidence duplicates.",
                 conf,
@@ -154,11 +164,88 @@ public sealed class DuplicateFixer : IFixer
         return Task.FromResult(new FixResult
         {
             Success = true,
+            Outcome = FixOutcome.Applied,
             Message = actionText,
             BytesFreed = size,
             RecyclePath = recyclePath,
             AdditionalRecycled = additionalRecycled
         });
+    }
+
+    /// <summary>
+    /// R07 (audit 2026-09-19): fix-time keeper viability gate. Refuses the delete when the
+    /// current keeper is empty OR has shrunk materially below its scan-time size (recorded in
+    /// <c>DetailsJson.keeper.Size</c>). Pure and testable — file existence + <see cref="FileInfo.Length"/>
+    /// only; no probe / hash / library dependency so no per-fix cost beyond a Length read.
+    /// ponytail: content-hash identity check would be stronger, adds ffprobe cost + scanner-side
+    /// hash persistence; upgrade if a real deployment sees keeper substitution attacks.
+    /// </summary>
+    /// <param name="keeperPath">Path to the "better copy" the scanner picked.</param>
+    /// <param name="detailsJson">The issue's DetailsJson blob, potentially carrying keeper.Size.</param>
+    /// <param name="reason">Human-readable refusal reason on false; null on true.</param>
+    /// <returns>True when the keeper is still safe to trust as "better copy".</returns>
+    public static bool KeeperStillViable(string keeperPath, string detailsJson, out string? reason)
+    {
+        reason = null;
+        if (string.IsNullOrEmpty(keeperPath) || !File.Exists(keeperPath))
+        {
+            reason = string.Format(
+                CultureInfo.InvariantCulture,
+                "The better copy ({0}) no longer exists — nothing was deleted. Re-scan and review again.",
+                keeperPath is null ? "<unknown>" : Path.GetFileName(keeperPath));
+            return false;
+        }
+
+        long currentSize;
+        try
+        {
+            currentSize = new FileInfo(keeperPath).Length;
+        }
+        catch (IOException ex)
+        {
+            reason = "Could not measure the better copy (" + Path.GetFileName(keeperPath) + "): " + ex.Message + ". Nothing was deleted; re-scan and review.";
+            return false;
+        }
+
+        if (currentSize <= 0)
+        {
+            reason = string.Format(
+                CultureInfo.InvariantCulture,
+                "The better copy ({0}) is now 0 bytes — something modified or truncated it after the scan. Nothing was deleted; re-scan and review.",
+                Path.GetFileName(keeperPath));
+            return false;
+        }
+
+        long? recordedKeeperSize = null;
+        try
+        {
+            using var details = JsonDocument.Parse(detailsJson);
+            if (details.RootElement.ValueKind == JsonValueKind.Object
+                && details.RootElement.TryGetProperty("keeper", out var kw)
+                && kw.ValueKind == JsonValueKind.Object
+                && kw.TryGetProperty("Size", out var ks)
+                && ks.ValueKind == JsonValueKind.Number
+                && ks.TryGetInt64(out var s))
+            {
+                recordedKeeperSize = s;
+            }
+        }
+        catch (JsonException)
+        {
+        }
+
+        if (recordedKeeperSize is long recorded && recorded > 0 && currentSize < recorded / 2)
+        {
+            reason = string.Format(
+                CultureInfo.InvariantCulture,
+                "The better copy ({0}) is now {1} bytes but was {2} bytes at scan time. Something modified or truncated it after the scan. Nothing was deleted; re-scan and review.",
+                Path.GetFileName(keeperPath),
+                currentSize,
+                recorded);
+            return false;
+        }
+
+        return true;
     }
 
     // Recycles remaining sidecars and prunes the containing folder ONLY when the folder is a

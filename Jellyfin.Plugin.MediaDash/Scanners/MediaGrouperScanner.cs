@@ -32,9 +32,13 @@ public sealed partial class MediaGrouperScanner : IScanner
 {
     // Matches "Series Name (YYYY)" folder-suffix convention — the same shape Jellyfin's own
     // documented layout recommends and the shape users create on disk to keep reboots apart.
-    // Trailing whitespace tolerated so " Doctor Who (2005) " still matches.
+    // Trailing whitespace tolerated so " Doctor Who (2005) " still matches. Trailing bracketed
+    // provider tags also tolerated (R08 audit 2026-09-19): users pin the correct TVDb/TMDb/IMDb
+    // ID on reboot folders like "Doctor Who (1963) [tvdbid-76107]" so Jellyfin can't collapse it
+    // into the 2005 reboot entity — the on-disk-year rule must still recognise these as
+    // year-suffixed folders instead of falling through to Jellyfin's wrong metadata year.
     private static readonly Regex SeriesYearSuffixRegex = new(
-        @"^(.+?)\s*\((\d{4})\)\s*$",
+        @"^(.+?)\s*\((\d{4})\)(?:\s*\[[^\]]+\])*\s*$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     private readonly LibraryGuard _guard;
@@ -141,10 +145,39 @@ public sealed partial class MediaGrouperScanner : IScanner
     private static void EmitMovieGroupIssues(List<MovieCandidate> candidates, string moviesRoot, List<Issue> issues, HashSet<string> seenSources)
     {
         var byStem = candidates.GroupBy(c => c.StrippedStem, StringComparer.OrdinalIgnoreCase);
-        foreach (var group in byStem)
+        foreach (var rawGroup in byStem)
         {
-            var members = group.ToArray();
-            var isFranchise = members.Length >= 2;
+            // Bug-pattern audit round 3 (2026-09-19) — remake split. A stripped-stem group where
+            // nobody carried a sequel marker AND at least two members have different production
+            // years is REMAKES (The Thing 1982 + 2011, Fright Night 1985 + 2011, Suspiria 1977 +
+            // 2018), not a franchise. Split into per-year subgroups so each remake gets its own
+            // solo folder; members with no ProductionYear metadata bucket together (safer than
+            // guessing). Franchise sequels (at least one member with ":" / "Part" / trailing
+            // digit / roman numeral) collapse as before — that's what the whole scanner is for.
+            IEnumerable<IReadOnlyList<MovieCandidate>> effectiveGroups;
+            var hadAnyMarker = rawGroup.Any(m => m.HadSequelMarker);
+            if (!hadAnyMarker && rawGroup.Select(m => m.ProductionYear).Distinct().Count() > 1)
+            {
+                effectiveGroups = rawGroup
+                    .GroupBy(m => m.ProductionYear)
+                    .Select(g => (IReadOnlyList<MovieCandidate>)g.ToArray());
+            }
+            else
+            {
+                effectiveGroups = new[] { (IReadOnlyList<MovieCandidate>)rawGroup.ToArray() };
+            }
+
+            foreach (var effective in effectiveGroups)
+            {
+                EmitOneGroup(effective, moviesRoot, issues, seenSources);
+            }
+        }
+    }
+
+    private static void EmitOneGroup(IReadOnlyList<MovieCandidate> members, string moviesRoot, List<Issue> issues, HashSet<string> seenSources)
+    {
+        var isFranchise = members.Count >= 2;
+        {
             foreach (var member in members)
             {
                 // Solo movie already in its own folder — user's rule: leave it.
@@ -445,7 +478,7 @@ public sealed partial class MediaGrouperScanner : IScanner
         }
 
         var solo = RenameTemplate.Scrub(canonical);
-        var stem = RenameTemplate.Scrub(StripFranchiseSuffix(canonical));
+        var stem = RenameTemplate.Scrub(StripFranchiseSuffix(canonical, out var hadSequelMarker));
         if (string.IsNullOrWhiteSpace(stem))
         {
             stem = solo;
@@ -467,7 +500,11 @@ public sealed partial class MediaGrouperScanner : IScanner
             Kind = parentIsRoot ? MovieContainerKind.Loose : MovieContainerKind.InFolder,
             SoloFolderName = solo,
             FranchiseFolderName = stem,
-            StrippedStem = stem.ToLowerInvariant()
+            StrippedStem = stem.ToLowerInvariant(),
+            // Bug-pattern audit round 3 (2026-09-19): franchise-remake collapse fix. See
+            // MovieCandidate.HadSequelMarker doc + EmitMovieGroupIssues subgrouping.
+            ProductionYear = movie.ProductionYear,
+            HadSequelMarker = hadSequelMarker
         };
     }
 
@@ -478,13 +515,38 @@ public sealed partial class MediaGrouperScanner : IScanner
     /// <param name="name">The identified movie name.</param>
     /// <returns>The stem, or the trimmed input when nothing was stripped.</returns>
     public static string StripFranchiseSuffix(string name)
+        => StripFranchiseSuffix(name, out _);
+
+    /// <summary>
+    /// Strip variant that reports whether any actual sequel marker was removed (colon subtitle,
+    /// part, trailing digit, roman numeral). Year strip alone doesn't count — a lone year is what
+    /// separates remakes, not what identifies sequels. Bug-pattern audit round 3 (2026-09-19)
+    /// fix: `The Thing (1982)` and `The Thing (2011)` both stripped to "the thing" and got
+    /// franchise-collapsed into one folder before this signal existed. The caller uses
+    /// <paramref name="hadSequelMarker"/> to split groups back into per-year solo entries when
+    /// nobody in the group had a marker AND their production years differ.
+    /// </summary>
+    /// <param name="name">The identified movie name.</param>
+    /// <param name="hadSequelMarker">True when the stripping loop removed at least one non-year
+    /// sequel token (":", "Part", trailing digit, roman numeral).</param>
+    /// <returns>The stem, or the trimmed input when nothing was stripped.</returns>
+    public static string StripFranchiseSuffix(string name, out bool hadSequelMarker)
     {
+        hadSequelMarker = false;
         if (string.IsNullOrWhiteSpace(name))
         {
             return string.Empty;
         }
 
-        var s = name.Trim();
+        var trimmed = name.Trim();
+
+        // Baseline: the stem after year-only stripping. Anything the full strip removes on top
+        // of this baseline is a genuine sequel marker.
+        var yearOnly = YearParenRegex().Replace(trimmed, string.Empty);
+        yearOnly = YearBracketRegex().Replace(yearOnly, string.Empty);
+        yearOnly = yearOnly.TrimEnd(' ', '.', '_', '-', ':').Trim();
+
+        var s = trimmed;
         s = ColonSubtitleRegex().Replace(s, string.Empty);
         s = YearParenRegex().Replace(s, string.Empty);
         s = YearBracketRegex().Replace(s, string.Empty);
@@ -502,7 +564,9 @@ public sealed partial class MediaGrouperScanner : IScanner
         }
         while (s != prev);
 
-        return s.Length == 0 ? name.Trim() : s;
+        var final = s.Length == 0 ? name.Trim() : s;
+        hadSequelMarker = !string.Equals(yearOnly, final, StringComparison.OrdinalIgnoreCase);
+        return final;
     }
 
     /// <summary>
@@ -618,5 +682,19 @@ public sealed partial class MediaGrouperScanner : IScanner
         public string FranchiseFolderName { get; init; }
 
         public string StrippedStem { get; init; }
+
+        /// <summary>Gets the Jellyfin-metadata production year (TMDb / TVDb / IMDb-derived). Null
+        /// when the item has no year metadata — such members can't drive the remake split so they
+        /// fall through as if they were a normal franchise sibling.</summary>
+        public int? ProductionYear { get; init; }
+
+        /// <summary>Gets a value indicating whether
+        /// <see cref="StripFranchiseSuffix(string, out bool)"/> removed a non-year sequel token
+        /// (":" subtitle, "Part", trailing digit, roman numeral). False when only the year was
+        /// stripped or nothing changed. When every member of a stripped-stem group has this false
+        /// AND their production years differ, the group is re-split per year: distinct-year
+        /// same-title films are remakes, not franchise siblings, and must not be collapsed into
+        /// one folder.</summary>
+        public bool HadSequelMarker { get; init; }
     }
 }

@@ -21,7 +21,7 @@ using Microsoft.Extensions.Logging;
 // The taint flows out of Delete() into RecycleBin.MoveToBin. The path is validated at the controller layer before it reaches
 // the recycle bin. RecycleBin has no independent trust boundary; it always operates on paths its caller has already vetted.
 [assembly: SuppressMessage("Security", "CA3003:Review code for file path injection vulnerabilities", Scope = "member", Target = "~M:Jellyfin.Plugin.MediaDash.Fixers.RecycleBin.MoveToBin(System.String)~System.String", Justification = "Callers (fixers and FileBrowserController) validate paths via LibraryGuard before calling.")]
-[assembly: SuppressMessage("Security", "CA3003:Review code for file path injection vulnerabilities", Scope = "member", Target = "~M:Jellyfin.Plugin.MediaDash.Fixers.RecycleBin.MoveAcrossVolumes(System.String,System.String)", Justification = "Only called from validated code paths.")]
+[assembly: SuppressMessage("Security", "CA3003:Review code for file path injection vulnerabilities", Scope = "member", Target = "~M:Jellyfin.Plugin.MediaDash.Fixers.RecycleBin.MoveAcrossVolumes(System.String,System.String,System.Boolean)", Justification = "Only called from validated code paths.")]
 // AdoptBatchByPath does its own validation: (1) Path.GetFullPath canonicalises, (2) IsMediaDashBatchName gates on the exact 28-char timestamp+GUID leaf shape, (3) PathsEqual(parent, Root) requires the path to be a direct child of the current recycle bin. A traversal-shaped input fails IsMediaDashBatchName (leaf can't contain "..") and an out-of-root input fails the parent check.
 [assembly: SuppressMessage("Security", "CA3003:Review code for file path injection vulnerabilities", Scope = "member", Target = "~M:Jellyfin.Plugin.MediaDash.Fixers.RecycleBin.AdoptBatchByPath(System.String)~System.Boolean", Justification = "Path is validated inside the method: must be a direct child of Root and its leaf must match IsMediaDashBatchName.")]
 [assembly: SuppressMessage("Security", "CA3003:Review code for file path injection vulnerabilities", Scope = "member", Target = "~M:Jellyfin.Plugin.MediaDash.Fixers.RecycleBin.ConsolidateFromRoot(System.String)~System.ValueTuple{System.Int32,System.Int32,System.Int64,System.String}", Justification = "The caller (MediaDashController.ConsolidateBin) validates SourceRoot against DiscoverOtherBinRoots — only history-derived roots that are direct grandparents of a MediaDash-shape batch folder are accepted. Arbitrary paths from a hostile admin token are rejected at the controller layer with 404.")]
@@ -59,7 +59,7 @@ public class FileBrowserController : ControllerBase
     private readonly ILibraryMonitor _libraryMonitor;
     private readonly ILibraryManager _libraryManager;
     private readonly IApplicationPaths _appPaths;
-    private readonly Data.MediaDashDb _db;
+    private readonly Data.HistoryStore _history;
     private readonly ILogger<FileBrowserController> _logger;
 
     /// <summary>
@@ -70,16 +70,16 @@ public class FileBrowserController : ControllerBase
     /// <param name="libraryMonitor">Instance of the <see cref="ILibraryMonitor"/> interface.</param>
     /// <param name="libraryManager">Instance of the <see cref="ILibraryManager"/> interface.</param>
     /// <param name="appPaths">Instance of the <see cref="IApplicationPaths"/> interface; used to locate the Jellyfin log directory for the read-only shortcut.</param>
-    /// <param name="db">Plugin state DB; used to record a history row per manual delete so the Recycle bin tab labels the entry correctly.</param>
+    /// <param name="history">History-table store (05-C.3); used to record a history row per manual delete so the Recycle bin tab labels the entry correctly.</param>
     /// <param name="logger">Logger.</param>
-    public FileBrowserController(LibraryGuard guard, RecycleBin recycleBin, ILibraryMonitor libraryMonitor, ILibraryManager libraryManager, IApplicationPaths appPaths, Data.MediaDashDb db, ILogger<FileBrowserController> logger)
+    public FileBrowserController(LibraryGuard guard, RecycleBin recycleBin, ILibraryMonitor libraryMonitor, ILibraryManager libraryManager, IApplicationPaths appPaths, Data.HistoryStore history, ILogger<FileBrowserController> logger)
     {
         _guard = guard;
         _recycleBin = recycleBin;
         _libraryMonitor = libraryMonitor;
         _libraryManager = libraryManager;
         _appPaths = appPaths;
-        _db = db;
+        _history = history;
         _logger = logger;
     }
 
@@ -495,6 +495,15 @@ public class FileBrowserController : ControllerBase
         }
 
         var sourceIsDir = Directory.Exists(source);
+
+        // Review P1-3 (Move variant): reject moving a folder into itself or a descendant. Not the
+        // recursive-Copy explosion (Move only renames) but still a nonsense op that .NET reports
+        // via a bare IOException; catch it up front with a specific error.
+        if (sourceIsDir && IsSelfOrDescendant(target, source))
+        {
+            return Conflict("Cannot move a folder into itself or a subfolder of itself.");
+        }
+
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(target)!);
@@ -601,6 +610,15 @@ public class FileBrowserController : ControllerBase
             return forbidTo;
         }
 
+        // Review P1-3: reject copying/moving a directory into itself or into any descendant of
+        // itself. Without this, CopyDirectory recurses through the target it just created and
+        // builds an infinite chain until the disk or path length runs out. Applies only when the
+        // source is a directory; a file copy into a subfolder is a legitimate operation.
+        if (sourceIsDir && IsSelfOrDescendant(target, source))
+        {
+            return Conflict("Cannot copy a folder into itself or a subfolder of itself.");
+        }
+
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(target)!);
@@ -660,6 +678,34 @@ public class FileBrowserController : ControllerBase
             {
                 size = new System.IO.FileInfo(full).Length;
             }
+            else if (System.IO.Directory.Exists(full))
+            {
+                // Directory delete via the Files tab writes a HistoryEntry — before this branch
+                // the size fell through as 0 and dashboard "reclaimed" totals under-reported by
+                // the tree size, breaking quota accounting and per-library reclaim charts. Walk
+                // the tree once; IgnoreInaccessible so a single unreadable subfolder doesn't
+                // abort the size scan mid-count (matches RecycleBin.GetContents' enum options).
+                try
+                {
+                    var enumOpts = new System.IO.EnumerationOptions { IgnoreInaccessible = true, RecurseSubdirectories = true };
+                    foreach (var f in System.IO.Directory.EnumerateFiles(full, "*", enumOpts))
+                    {
+                        try
+                        {
+                            size += new System.IO.FileInfo(f).Length;
+                        }
+                        catch (System.IO.FileNotFoundException)
+                        {
+                            // Concurrent removal — skip silently. Same benign race the recycle-bin
+                            // size scan handles the same way.
+                        }
+                    }
+                }
+                catch (System.IO.IOException)
+                {
+                    // Best-effort accounting — a failed walk shouldn't block the recycle. Size stays 0.
+                }
+            }
 
             binPath = _recycleBin.MoveToBin(full);
         }
@@ -678,7 +724,7 @@ public class FileBrowserController : ControllerBase
         // branch ALSO catches older-version auto-fix recycles whose fixer paths didn't yet write
         // history rows, mislabelling them as manual. Splitting the two lets the manifest-only
         // fallback drop the misleading "manual" wording (see MediaDashController.GetRecycleBinItems).
-        _db.AddHistory(new Data.HistoryEntry
+        _history.AddHistory(new Data.HistoryEntry
         {
             IssueId = 0,
             Type = Data.IssueType.ManualDelete,
@@ -765,9 +811,14 @@ public class FileBrowserController : ControllerBase
             return StatusCode(StatusCodes.Status500InternalServerError, "Could not create upload file: " + ex.Message);
         }
 
+        // MD-005: track over-cap breach with a flag rather than a distinguished exception so the
+        // catch block can distinguish intentional cap-refusal (→ 413) from real I/O failure (→
+        // 500). Before this, both bubbled up as IOException and the ASP.NET pipeline turned the
+        // over-cap case into a misleading generic server error, which chunked clients had no way
+        // to interpret as "your file is too big" vs "infrastructure broke."
+        var exceededCap = false;
         try
         {
-            // Byte-counted copy — stop and 413 if the body exceeds the cap rather than filling the disk.
             var buffer = new byte[81920];
             long totalRead = 0;
             int read;
@@ -776,6 +827,7 @@ public class FileBrowserController : ControllerBase
                 totalRead += read;
                 if (totalRead > UploadMaxBytes)
                 {
+                    exceededCap = true;
                     throw new IOException("Upload exceeded the " + (UploadMaxBytes / (1024L * 1024 * 1024)) + " GB per-file cap.");
                 }
 
@@ -808,6 +860,11 @@ public class FileBrowserController : ControllerBase
                 {
                     Diagnostics.Record("FileBrowser.UploadCleanup", "Upload failed and the temp file at '" + tempPath + "' could not be removed: " + ex.Message + ". Delete it manually to reclaim the space.");
                 }
+            }
+
+            if (exceededCap)
+            {
+                return StatusCode(StatusCodes.Status413PayloadTooLarge, "Upload exceeds the " + (UploadMaxBytes / (1024L * 1024 * 1024)) + " GB per-file cap.");
             }
 
             throw;
@@ -909,6 +966,34 @@ public class FileBrowserController : ControllerBase
         return StatusCode(StatusCodes.Status403Forbidden, msg);
     }
 
+    // Review P1-3: true when candidate is the same folder as parent or lives inside it. Both
+    // paths are canonicalised via Path.GetFullPath before comparison; Windows comparison is
+    // case-insensitive to match how the underlying filesystem resolves lookups.
+    internal static bool IsSelfOrDescendant(string candidate, string parent)
+    {
+        try
+        {
+            var canonCandidate = Path.TrimEndingDirectorySeparator(Path.GetFullPath(candidate));
+            var canonParent = Path.TrimEndingDirectorySeparator(Path.GetFullPath(parent));
+            var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+
+            if (string.Equals(canonCandidate, canonParent, comparison))
+            {
+                return true;
+            }
+
+            return Fixers.LibraryGuard.IsUnder(canonCandidate, canonParent);
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+    }
+
     private static bool IsSimpleName(string? name)
     {
         if (string.IsNullOrWhiteSpace(name))
@@ -982,7 +1067,12 @@ public class FileBrowserController : ControllerBase
     {
         // Copy under a marker suffix first — if we die mid-copy, the partial payload is obvious and never
         // sits under the final name. Only after the copy verifies do we rename → delete-source.
-        var staging = target + ".mediadash-moving";
+        // Review P1-2: the staging suffix carries a per-operation GUID so two concurrent moves (or
+        // a retry landing next to an interrupted move's leftover) get distinct staging paths. With
+        // the old fixed name, File.Copy(overwrite:false) failed against a pre-existing file, and
+        // the catch-block cleanup then deleted THAT file — destroying data the current operation
+        // never owned.
+        var staging = target + ".mediadash-moving-" + Guid.NewGuid().ToString("N")[..12];
 
         try
         {

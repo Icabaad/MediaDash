@@ -23,15 +23,15 @@ public sealed class FileHasher
     // smaller ones burn CPU on IO overhead.
     private const int BufferSize = 1024 * 1024;
 
-    private readonly MediaDashDb _db;
+    private readonly ProbeCacheStore _probes;
     private readonly ILogger<FileHasher> _logger;
 
     /// <summary>Initializes a new instance of the <see cref="FileHasher"/> class.</summary>
-    /// <param name="db">Plugin DB — used for the (path, size, mtime) hash cache.</param>
+    /// <param name="probes">Probe-cache store (05-C.4) — backs the (path, size, mtime) hash cache.</param>
     /// <param name="logger">The logger.</param>
-    public FileHasher(MediaDashDb db, ILogger<FileHasher> logger)
+    public FileHasher(ProbeCacheStore probes, ILogger<FileHasher> logger)
     {
-        _db = db;
+        _probes = probes;
         _logger = logger;
     }
 
@@ -65,7 +65,7 @@ public sealed class FileHasher
 
         try
         {
-            var cached = _db.GetCachedHash(path, size, mtime);
+            var cached = _probes.GetCachedHash(path, size, mtime);
             if (cached is not null)
             {
                 return cached;
@@ -109,7 +109,7 @@ public sealed class FileHasher
 
         try
         {
-            _db.StoreHash(path, size, mtime, hash);
+            _probes.StoreHash(path, size, mtime, hash);
         }
         catch (Exception ex)
         {

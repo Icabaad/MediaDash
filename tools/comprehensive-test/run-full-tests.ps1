@@ -110,6 +110,12 @@ $Script:RunState = [PSCustomObject]@{
 
     # Timings
     PhaseTimings = @{}
+
+    # Truth: phase-level unhandled exceptions and per-phase test counts. Consumed
+    # by Get-RunVerdict so a phase that exploded before recording any test cannot
+    # be silently interpreted as "PASS: 0 tests".
+    PhaseExceptions = @()
+    PhaseCounters = @{}
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -138,8 +144,20 @@ foreach ($p in $AllPhases) {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Phase selection
+# Phase selection — validate that every user-supplied ID/name resolves to a
+# real phase before we start. Silent typos have burned us: "-OnlyPhases 07"
+# would resolve to zero phases and report "PASS: 0 tests" without ever hitting
+# the UI phase the operator wanted.
 # ─────────────────────────────────────────────────────────────────────────────
+$AllPhaseKeys = @()
+foreach ($p in $AllPhases) { $AllPhaseKeys += $p.Id; $AllPhaseKeys += $p.Name }
+foreach ($k in ($OnlyPhases + $SkipPhases)) {
+    if ($k -and $AllPhaseKeys -notcontains $k) {
+        Write-Host "ERROR: unknown phase '$k'. Known: $($AllPhases.Id -join ',') or $($AllPhases.Name -join ',')" -ForegroundColor Red
+        exit 3
+    }
+}
+
 $PhasesToRun = $AllPhases
 if ($OnlyPhases.Count -gt 0) {
     $PhasesToRun = $AllPhases | Where-Object { $_.Id -in $OnlyPhases -or $_.Name -in $OnlyPhases }
@@ -152,6 +170,13 @@ if ($SkipPhases.Count -gt 0) {
 # Teardown always runs last unless explicitly skipped
 if ($PhasesToRun.Id -notcontains "99" -and "99" -notin $SkipPhases -and "teardown" -notin $SkipPhases) {
     $PhasesToRun += ($AllPhases | Where-Object { $_.Id -eq "99" })
+}
+# Preflight is required unless the caller explicitly opted out via SkipPhases.
+# If the caller narrowed to OnlyPhases and preflight is missing, that's an error
+# rather than a silent skip: a live phase without preflight has no auth token.
+if ($OnlyPhases.Count -gt 0 -and $PhasesToRun.Id -notcontains "00" -and "00" -notin $SkipPhases -and "preflight" -notin $SkipPhases) {
+    Write-Host "ERROR: preflight (phase 00) is required when live phases are selected. Add it to -OnlyPhases or use -SkipPhases 00 to opt out explicitly." -ForegroundColor Red
+    exit 3
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -178,6 +203,7 @@ foreach ($phase in $PhasesToRun) {
     $Script:RunState.CurrentPhase = "$($phase.Id) $($phase.Name)"
     $Script:RunState.PhasesRun += $phase.Name
     $phaseStart = [DateTime]::UtcNow
+    $preTotal = $Script:RunState.TotalTests
     Write-Log ""
     Write-Log "─── PHASE $($phase.Id) · $($phase.Name.ToUpper()) ─────────────────────────"
     Update-Status
@@ -186,11 +212,17 @@ foreach ($phase in $PhasesToRun) {
     } catch {
         Write-Log "PHASE ABORT: $($phase.Name) — $($_.Exception.Message)"
         Write-Log $_.ScriptStackTrace
+        # Truth: an uncaught phase throw is recorded as an ERROR test result AND
+        # captured on RunState.PhaseExceptions. Previously the exit-decision only
+        # inspected TestsFailed/TestsErrored, so a phase that threw before any
+        # test ran silently passed. Fixed by Record-PhaseException + Get-RunVerdict.
+        Record-PhaseException -Phase "$($phase.Id) $($phase.Name)" -ErrorRecord $_
         if ($HaltOnFailure -or $phase.Id -eq "00" -or $phase.Id -eq "01") {
             $aborted = $true
             Write-Log "Halting further phases (except teardown)."
         }
     }
+    $Script:RunState.PhaseCounters[$phase.Name] = $Script:RunState.TotalTests - $preTotal
     $Script:RunState.PhaseTimings[$phase.Name] = ([DateTime]::UtcNow - $phaseStart).TotalSeconds
     Update-Status
 }
@@ -201,6 +233,8 @@ foreach ($phase in $PhasesToRun) {
 Write-Summary
 Update-Status -Final
 
+$verdict = Get-RunVerdict -RunState $Script:RunState
+
 Write-Log ""
 Write-Log "═══════════════════════════════════════════════════════════════════════"
 Write-Log "  Run complete."
@@ -208,11 +242,9 @@ Write-Log "  PASS: $($Script:RunState.TestsPassed)"
 Write-Log "  FAIL: $($Script:RunState.TestsFailed)"
 Write-Log "  ERROR: $($Script:RunState.TestsErrored)"
 Write-Log "  SKIP: $($Script:RunState.TestsSkipped)"
+Write-Log "  Verdict:  $($verdict.Verdict) — $($verdict.Reason)"
 Write-Log "  Summary:  $Script:SummaryPath"
 Write-Log "  Failures: $Script:FailuresDir"
 Write-Log "═══════════════════════════════════════════════════════════════════════"
 
-if ($Script:RunState.TestsFailed -gt 0 -or $Script:RunState.TestsErrored -gt 0) {
-    exit 1
-}
-exit 0
+exit $verdict.ExitCode

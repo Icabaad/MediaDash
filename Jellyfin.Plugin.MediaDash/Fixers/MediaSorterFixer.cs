@@ -30,7 +30,7 @@ public sealed class MediaSorterFixer : IFixer
 
     private readonly LibraryGuard _guard;
     private readonly ILibraryMonitor _libraryMonitor;
-    private readonly MediaDashDb _db;
+    private readonly IssueStore _issues;
     private readonly ILogger<MediaSorterFixer> _logger;
 
     /// <summary>
@@ -38,13 +38,13 @@ public sealed class MediaSorterFixer : IFixer
     /// </summary>
     /// <param name="guard">The library path guard.</param>
     /// <param name="libraryMonitor">Instance of the <see cref="ILibraryMonitor"/> interface.</param>
-    /// <param name="db">The plugin database, used to re-point sibling issues after a successful move.</param>
+    /// <param name="issues">Issue-table store (05-C.2), used to re-point sibling issues after a successful move.</param>
     /// <param name="logger">The logger.</param>
-    public MediaSorterFixer(LibraryGuard guard, ILibraryMonitor libraryMonitor, MediaDashDb db, ILogger<MediaSorterFixer> logger)
+    public MediaSorterFixer(LibraryGuard guard, ILibraryMonitor libraryMonitor, IssueStore issues, ILogger<MediaSorterFixer> logger)
     {
         _guard = guard;
         _libraryMonitor = libraryMonitor;
-        _db = db;
+        _issues = issues;
         _logger = logger;
     }
 
@@ -58,12 +58,12 @@ public sealed class MediaSorterFixer : IFixer
 
         if (!File.Exists(issue.Path))
         {
-            return Task.FromResult(FixResult.Fail("The file no longer exists; re-scan to refresh the list."));
+            return Task.FromResult(FixResult.Fail(FixReason.SourceMissing, "The file no longer exists; re-scan to refresh the list."));
         }
 
         if (!_guard.IsInsideLibrary(issue.Path))
         {
-            return Task.FromResult(FixResult.Fail("The file is outside your library folders; MediaDash will not touch it."));
+            return Task.FromResult(FixResult.Refused(FixReason.OutsideLibrary, "The file is outside your library folders; MediaDash will not touch it."));
         }
 
         string? targetPath = null;
@@ -85,28 +85,28 @@ public sealed class MediaSorterFixer : IFixer
 
         if (string.IsNullOrEmpty(targetPath))
         {
-            return Task.FromResult(FixResult.Fail("The target folder was not recorded for this move; re-scan and try again."));
+            return Task.FromResult(FixResult.Refused(FixReason.SourceChanged, "The target folder was not recorded for this move; re-scan and try again."));
         }
 
         var targetDir = Path.GetDirectoryName(targetPath);
         if (string.IsNullOrEmpty(targetDir))
         {
-            return Task.FromResult(FixResult.Fail("The target folder was not recorded for this move; re-scan and try again."));
+            return Task.FromResult(FixResult.Refused(FixReason.SourceChanged, "The target folder was not recorded for this move; re-scan and try again."));
         }
 
         if (!Directory.Exists(targetDir))
         {
-            return Task.FromResult(FixResult.Fail("The target folder no longer exists: '" + targetDir + "'. Update the folder path in Settings → Libraries → Media sorter, then re-scan."));
+            return Task.FromResult(FixResult.Fail(FixReason.SourceMissing, "The target folder no longer exists: '" + targetDir + "'. Update the folder path in Settings → Libraries → Media sorter, then re-scan."));
         }
 
         if (!_guard.IsInsideLibrary(targetDir))
         {
-            return Task.FromResult(FixResult.Fail("The target folder '" + targetDir + "' isn't inside a Jellyfin library; move refused. MediaDash will not move files outside your libraries."));
+            return Task.FromResult(FixResult.Refused(FixReason.OutsideLibrary, "The target folder '" + targetDir + "' isn't inside a Jellyfin library; move refused. MediaDash will not move files outside your libraries."));
         }
 
         if (File.Exists(targetPath))
         {
-            return Task.FromResult(FixResult.Fail("A file with the same name already exists at '" + targetPath + "' — nothing was moved. Rename or remove the existing file, or move this one manually."));
+            return Task.FromResult(FixResult.Refused(FixReason.DestinationCollision, "A file with the same name already exists at '" + targetPath + "' — nothing was moved. Rename or remove the existing file, or move this one manually."));
         }
 
         // Cross-volume moves in .NET are copy+delete, which requires target free-space equal to the file's size.
@@ -129,6 +129,7 @@ public sealed class MediaSorterFixer : IFixer
                     var neededMb = (fileSize + safetyMarginBytes) / (1024 * 1024);
                     var freeMb = free / (1024 * 1024);
                     return Task.FromResult(FixResult.Fail(
+                        FixReason.InsufficientSpace,
                         "Not enough free space on the target drive (" + targetRoot + "): needs about " + neededMb.ToString(CultureInfo.InvariantCulture) +
                         " MB, has " + freeMb.ToString(CultureInfo.InvariantCulture) + " MB free."));
                 }
@@ -159,8 +160,11 @@ public sealed class MediaSorterFixer : IFixer
         // stay a bare File.Move — it's already atomic there and the tmp indirection would add nothing.
         var isCrossVolume = sourceDrive is not null && targetDrive is not null
             && !string.Equals(sourceDrive.RootDirectory.FullName, targetDrive.RootDirectory.FullName, StringComparison.OrdinalIgnoreCase);
+        // R09 (2026-09-20): route through SidecarPath so the staging file ends in the
+        // `.mediaDash.tmp` tail Jellyfin's video-extension scan ignores. Middle infix
+        // `.mediadash.tmp` still matches the sweep pattern.
         var stagingPath = isCrossVolume
-            ? Path.Combine(targetDir, Path.GetFileNameWithoutExtension(targetPath) + ".mediadash.tmp" + Path.GetExtension(targetPath))
+            ? TranscodeFixer.SidecarPath(targetPath, "tmp", Path.GetExtension(targetPath).TrimStart('.'))
             : null;
 
         // Capture source timestamps BEFORE the move so we can restore them on the target — .NET's
@@ -196,12 +200,14 @@ public sealed class MediaSorterFixer : IFixer
             TryDeleteStaging(stagingPath);
             var offender = File.Exists(targetPath) ? issue.Path : targetDir;
             return Task.FromResult(FixResult.Fail(
+                FixReason.AccessDenied,
                 "Jellyfin can't write to '" + offender + "'. Grant the user Jellyfin runs as (typically 'jellyfin' on Linux) read+write permission on that path."));
         }
         catch (IOException ex) when (IsOutOfSpace(ex))
         {
             TryDeleteStaging(stagingPath);
             return Task.FromResult(FixResult.Fail(
+                FixReason.InsufficientSpace,
                 "The target drive filled up mid-move; the original was left in place. Free some space on " + (targetRoot ?? "the target drive") + " and try again."));
         }
         catch (IOException ex)
@@ -212,6 +218,7 @@ public sealed class MediaSorterFixer : IFixer
             // FixTask's generic handler which records a diagnostic but writes NO History row —
             // the audit trail loses the failure entirely.
             return Task.FromResult(FixResult.Fail(
+                FixReason.ProcessFailed,
                 "Couldn't move '" + Path.GetFileName(issue.Path) + "' → '" + targetPath + "': " + ex.Message));
         }
 
@@ -228,7 +235,7 @@ public sealed class MediaSorterFixer : IFixer
 
         _libraryMonitor.ReportFileSystemChanged(issue.Path);
         _libraryMonitor.ReportFileSystemChanged(targetPath);
-        _db.RelocateIssuePaths(issue.Path, targetPath);
+        _issues.RelocateIssuePaths(issue.Path, targetPath);
 
         // Sidecar-aware move (field report B1): once the primary moved successfully, take the
         // same-stem .srt / .ass / .nfo / artwork with it. Otherwise OrphanCleanupScanner would
@@ -240,6 +247,7 @@ public sealed class MediaSorterFixer : IFixer
         return Task.FromResult(new FixResult
         {
             Success = true,
+            Outcome = FixOutcome.Applied,
             Message = actionText,
             BytesFreed = 0
         });

@@ -46,7 +46,7 @@ public sealed class ArtworkFixer : IFixer
         // directories with the same prefix (e.g. "metadata-evil" under "metadata").
         if (!LibraryGuard.IsUnder(Path.GetFullPath(issue.Path), _applicationPaths.InternalMetadataPath))
         {
-            return FixResult.Fail("Refused to touch artwork outside the Jellyfin metadata folder: " + issue.Path);
+            return FixResult.Refused(FixReason.OutsideLibrary, "Refused to touch artwork outside the Jellyfin metadata folder: " + issue.Path);
         }
 
         var fileName = Path.GetFileName(issue.Path);
@@ -67,14 +67,14 @@ public sealed class ArtworkFixer : IFixer
 
         if (!DeleteArtworkFile(issue.Path))
         {
-            return FixResult.Fail("Could not delete artwork file (missing or access denied): " + issue.Path);
+            return FixResult.Fail(FixReason.AccessDenied, "Could not delete artwork file (missing or access denied): " + issue.Path);
         }
 
         // Notify Jellyfin the path changed so any watcher-based caches also drop it.
         _libraryMonitor.ReportFileSystemChanged(issue.Path);
 
         _logger.LogInformation("ArtworkFixer: {Action}", actionText);
-        return new FixResult { Success = true, Message = actionText, BytesFreed = 0 };
+        return new FixResult { Success = true, Outcome = FixOutcome.Applied, Message = actionText, BytesFreed = 0 };
     }
 
     private async Task InvalidateItemImageAsync(Issue issue, CancellationToken cancellationToken)

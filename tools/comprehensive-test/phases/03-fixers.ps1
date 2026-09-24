@@ -32,7 +32,7 @@ function Get-IssueForPath {
 
 function Restore-FromRecycleBin {
     param([long]$HistoryId)
-    Invoke-JfApi -Method POST -Path "/MediaDash/RecycleBin/Items/Restore" -Body @{ Ids = @($HistoryId) } | Out-Null
+    Invoke-JfApi -Method POST -Path "/MediaDash/History/$HistoryId/Restore?force=true" | Out-Null
 }
 
 function Invoke-Phase-Fixers {

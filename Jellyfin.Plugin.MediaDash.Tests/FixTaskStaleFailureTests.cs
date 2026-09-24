@@ -1,45 +1,125 @@
-using Jellyfin.Plugin.MediaDash.ScheduledTasks;
+using System.Collections.Generic;
+using System.IO;
 using Xunit;
 
 namespace Jellyfin.Plugin.MediaDash.Tests;
 
-public class FixTaskStaleFailureTests
+/// <summary>
+/// Presentation-only inventory of the canonical "stale-failure" phrases each fixer emits to the
+/// user. Before 01-B this file drove control flow via <c>FixTask.IsStaleFailure(message)</c>;
+/// that classifier is gone, and scheduling now consults <see cref="Jellyfin.Plugin.MediaDash.Fixers.FixResultPolicy"/>
+/// through the fixer's typed <c>Outcome</c>+<c>Reason</c>. What remains here is a documentation
+/// contract: for each canonical phrase, at least one production fixer file must still emit it
+/// verbatim so the user-facing message the audit trail was written against does not silently
+/// disappear during a rewording. If a phrase legitimately moves out of a fixer, delete its row
+/// (and the accompanying audit log entry) rather than weakening the assertion.
+/// </summary>
+public sealed class FixTaskStaleFailureTests
 {
-    [Theory]
-    [InlineData("The file no longer exists; re-scan to refresh the list.")]
-    [InlineData("The source no longer exists; re-scan to refresh the list.")]
-    [InlineData("Nothing to remove any more — the file may have changed since the scan. Re-scan to refresh.")]
-    [InlineData("The file plays fine now — nothing was removed. Re-scan to clear this issue.")]
-    [InlineData("An item with the same name already exists at '/mnt/media/Complete/TV/Yellowstone/Yellowstone (2018)' — rename or remove it, or move this one manually.")]
-    [InlineData("A file with the same name already exists at '/mnt/media/target.mkv' — nothing was moved. Rename or remove the existing file, or move this one manually.")]
-    // Library was renamed / removed / paths drifted between scan and fix. Every fixer's LibraryGuard
-    // refusal contains one of these two phrases — retrying every 30 min spams the Errors tab.
-    [InlineData("The file is outside your library folders; MediaDash will not touch it.")]
-    [InlineData("The source is outside your library folders; MediaDash will not touch it.")]
-    [InlineData("The folder is outside your library folders; MediaDash will not touch it.")]
-    [InlineData("Refused: NFO is not inside a configured library — /mnt/x/y.nfo")]
-    [InlineData("Refused: subtitle is not inside a configured library — /mnt/x/y.srt")]
-    [InlineData("Refused: folder is not inside a configured library — /mnt/x/y")]
-    [InlineData("Refused: trickplay folder is not inside a configured library — /mnt/x/y-trickplay")]
-    [InlineData("Refused: subtitle sits outside your library folders — /mnt/x/y.srt")]
-    [InlineData("Refused: the recorded better copy '/mnt/x/y.mkv' is outside your library folders.")]
-    public void IsStaleFailure_KnownStalePatterns_ReturnTrue(string message)
+    // The exact substrings the deleted IsStaleFailure classifier used to key off, mapped to the
+    // production files that emit them. Each substring must appear literally in at least one of the
+    // listed files. Reordering / rewording either side without also updating this table means the
+    // audit-trail wording is drifting silently — the test fails and forces a bilateral update.
+    private static readonly (string Substring, string[] OwnerFiles)[] CanonicalPhrases =
     {
-        // These are the exact strings the fixers emit when scan-time state no longer matches disk.
-        // Retrying is guaranteed to hit the same wall — auto-clear so the fix task stops looping every 15 min.
-        Assert.True(FixTask.IsStaleFailure(message));
+        ("no longer exists", new[]
+        {
+            "Jellyfin.Plugin.MediaDash/Fixers/PlayabilityFixer.cs",
+            "Jellyfin.Plugin.MediaDash/Fixers/TrackFixer.cs",
+            "Jellyfin.Plugin.MediaDash/Fixers/TranscodeFixer.cs",
+            "Jellyfin.Plugin.MediaDash/Fixers/EmbeddedCoverArtFixer.cs",
+            "Jellyfin.Plugin.MediaDash/Fixers/MediaGrouperFixer.cs",
+            "Jellyfin.Plugin.MediaDash/Fixers/MediaSorterFixer.cs",
+            "Jellyfin.Plugin.MediaDash/Fixers/NfoFixer.cs",
+            "Jellyfin.Plugin.MediaDash/Fixers/OrphanCleanupFixer.cs",
+            "Jellyfin.Plugin.MediaDash/Fixers/SubtitleFontFixer.cs",
+            "Jellyfin.Plugin.MediaDash/Fixers/SuspiciousFileFixer.cs",
+            "Jellyfin.Plugin.MediaDash/Fixers/TrickplayOptimizeFixer.cs",
+            "Jellyfin.Plugin.MediaDash/Fixers/DuplicateFixer.cs"
+        }),
+        ("Nothing to remove any more", new[]
+        {
+            "Jellyfin.Plugin.MediaDash/Fixers/SubtitleFontFixer.cs",
+            "Jellyfin.Plugin.MediaDash/Fixers/OrphanCleanupFixer.cs",
+            "Jellyfin.Plugin.MediaDash/Fixers/TrackFixer.cs",
+            "Jellyfin.Plugin.MediaDash/Fixers/TrickplayOptimizeFixer.cs"
+        }),
+        ("plays fine now", new[] { "Jellyfin.Plugin.MediaDash/Fixers/PlayabilityFixer.cs" }),
+        ("same name already exists", new[]
+        {
+            "Jellyfin.Plugin.MediaDash/Fixers/MediaGrouperFixer.cs",
+            "Jellyfin.Plugin.MediaDash/Fixers/MediaSorterFixer.cs"
+        }),
+        ("Resolve the collision manually and re-scan", new[] { "Jellyfin.Plugin.MediaDash/Fixers/PlayabilityFixer.cs" }),
+        ("folder cover already exists at", new[] { "Jellyfin.Plugin.MediaDash/Fixers/EmbeddedCoverArtFixer.cs" }),
+        ("DRM-protected", new[] { "Jellyfin.Plugin.MediaDash/Fixers/PlayabilityFixer.cs" }),
+        ("Refused: not an .ass", new[] { "Jellyfin.Plugin.MediaDash/Fixers/SubtitleFontFixer.cs" }),
+        ("not a recognised Jellyfin trickplay folder", new[] { "Jellyfin.Plugin.MediaDash/Fixers/TrickplayOptimizeFixer.cs" }),
+        ("requires re-encoding the audio", new[] { "Jellyfin.Plugin.MediaDash/Fixers/TranscodeFixer.cs" }),
+        ("Combined pass requires exactly one AudioLanguage", new[] { "Jellyfin.Plugin.MediaDash/Fixers/TrackFixer.cs" }),
+        ("Combined pass requires both issues to point at the same file", new[] { "Jellyfin.Plugin.MediaDash/Fixers/TrackFixer.cs" }),
+        ("outside your library", new[]
+        {
+            "Jellyfin.Plugin.MediaDash/Fixers/PlayabilityFixer.cs",
+            "Jellyfin.Plugin.MediaDash/Fixers/TrackFixer.cs",
+            "Jellyfin.Plugin.MediaDash/Fixers/TranscodeFixer.cs",
+            "Jellyfin.Plugin.MediaDash/Fixers/EmbeddedCoverArtFixer.cs",
+            "Jellyfin.Plugin.MediaDash/Fixers/MediaGrouperFixer.cs",
+            "Jellyfin.Plugin.MediaDash/Fixers/MediaSorterFixer.cs",
+            "Jellyfin.Plugin.MediaDash/Fixers/OrphanCleanupFixer.cs",
+            "Jellyfin.Plugin.MediaDash/Fixers/SubtitleFontFixer.cs",
+            "Jellyfin.Plugin.MediaDash/Fixers/SuspiciousFileFixer.cs",
+            "Jellyfin.Plugin.MediaDash/Fixers/DuplicateFixer.cs"
+        }),
+        ("not inside a configured library", new[] { "Jellyfin.Plugin.MediaDash/Fixers/NfoFixer.cs" })
+    };
+
+    [Fact]
+    public void EveryCanonicalStalePhrase_IsStillEmittedByAtLeastOneOwningFixer()
+    {
+        var root = RepoRoot();
+        var missing = new List<string>();
+
+        foreach (var (substring, ownerFiles) in CanonicalPhrases)
+        {
+            var found = false;
+            foreach (var relativePath in ownerFiles)
+            {
+                var full = Path.Combine(root, relativePath.Replace('/', Path.DirectorySeparatorChar));
+                if (!File.Exists(full))
+                {
+                    continue;
+                }
+
+                if (File.ReadAllText(full).Contains(substring, System.StringComparison.Ordinal))
+                {
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found)
+            {
+                missing.Add(substring);
+            }
+        }
+
+        Assert.True(
+            missing.Count == 0,
+            "Canonical stale-failure phrase(s) no longer appear in any of the listed fixer files: "
+            + string.Join(" | ", missing)
+            + ". If the wording was intentionally changed, update CanonicalPhrases (and the audit trail) at the same time.");
     }
 
-    [Theory]
-    [InlineData("Jellyfin can't write to '/mnt/media'. Grant read+write permission.")]
-    [InlineData("Not enough free disk space to rebuild this file.")]
-    [InlineData("Rebuilding the file failed; the original is untouched. Details: some ffmpeg error")]
-    [InlineData("The re-encoded file failed verification; the original is untouched.")]
-    [InlineData("")]
-    public void IsStaleFailure_TransientOrRealFailures_ReturnFalse(string message)
+    private static string RepoRoot()
     {
-        // Permission, disk space, ffmpeg, verification — all recoverable on retry (user fixes permissions,
-        // frees space, external tool releases file, etc.). Must NOT be treated as stale.
-        Assert.False(FixTask.IsStaleFailure(message));
+        var dir = new DirectoryInfo(System.AppContext.BaseDirectory);
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "Jellyfin.Plugin.MediaDash.sln")))
+        {
+            dir = dir.Parent;
+        }
+
+        Assert.NotNull(dir);
+        return dir!.FullName;
     }
 }

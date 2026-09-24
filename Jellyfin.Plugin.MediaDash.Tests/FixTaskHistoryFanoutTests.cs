@@ -13,6 +13,7 @@ namespace Jellyfin.Plugin.MediaDash.Tests;
 /// RecyclePath and renders "no history" for anything unjoined. These tests pin both the DB
 /// contract (many rows per issue) and the source shape of FixTask.ExecuteAsync's write loop.
 /// </summary>
+[Collection("MediaDashDb")]
 public sealed class FixTaskHistoryFanoutTests : IDisposable
 {
     private readonly string _dbPath = Path.Combine(Path.GetTempPath(), "mediadash-fanout-" + Guid.NewGuid().ToString("N") + ".db");
@@ -71,19 +72,18 @@ public sealed class FixTaskHistoryFanoutTests : IDisposable
     }
 
     [Fact]
-    public void FixTaskSourceStillContainsTheAdditionalRecycledFanoutBlock()
+    public void FixResultRecorderSourceStillContainsTheAdditionalRecycledFanoutBlock()
     {
-        // Grep-style guard: assert that FixTask.ExecuteAsync still writes one HistoryEntry per
-        // AdditionalRecycled entry. A future refactor that drops the loop would silently
-        // regress every multi-file fix (TrackFixer external subs, EmbeddedCoverArtFixer strips).
-        var fixTaskPath = Path.Combine(RepoRoot(), "Jellyfin.Plugin.MediaDash", "ScheduledTasks", "FixTask.cs");
-        var src = File.ReadAllText(fixTaskPath);
+        // 04-B: the sidecar fan-out loop moved from FixTask.cs into FixResultRecorder when the
+        // history + status writes went transactional. Same guard, same intent — assert one
+        // HistoryEntry per AdditionalRecycled entry, using the sidecar's OWN RecyclePath (not
+        // the primary result's). A refactor that drops the loop would silently regress every
+        // multi-file fix (TrackFixer external subs, EmbeddedCoverArtFixer strips).
+        var recorderPath = Path.Combine(RepoRoot(), "Jellyfin.Plugin.MediaDash", "ScheduledTasks", "FixResultRecorder.cs");
+        var src = File.ReadAllText(recorderPath);
 
         Assert.Contains("result.AdditionalRecycled", src);
         Assert.Contains("foreach (var extra in result.AdditionalRecycled)", src);
-        // The AddHistory inside the loop must reference the sidecar's own RecyclePath, not the
-        // primary result's RecyclePath — verifies the pattern hasn't accidentally been re-pointed
-        // at the wrong field.
         Assert.Contains("RecyclePath = extra.RecyclePath", src);
     }
 

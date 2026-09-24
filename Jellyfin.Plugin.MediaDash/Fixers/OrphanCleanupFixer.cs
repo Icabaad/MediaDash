@@ -55,7 +55,7 @@ public sealed class OrphanCleanupFixer : IFixer
         var kind = ReadKind(issue.DetailsJson);
         if (kind is null)
         {
-            return Task.FromResult(FixResult.Fail("Refused: issue is missing its orphan kind tag — cannot pick a delete strategy."));
+            return Task.FromResult(FixResult.Refused(FixReason.SourceChanged, "Refused: issue is missing its orphan kind tag — cannot pick a delete strategy."));
         }
 
         // Per-kind safety gates + live re-verification. Any failure returns FixResult.Fail rather
@@ -71,7 +71,7 @@ public sealed class OrphanCleanupFixer : IFixer
             case OrphanCleanupScanner.KindOrphanMetadata:
                 return Task.FromResult(RemoveOrphanMetadata(issue));
             default:
-                return Task.FromResult(FixResult.Fail("Refused: unknown orphan kind \"" + kind + "\"."));
+                return Task.FromResult(FixResult.Refused(FixReason.UnsupportedFormat, "Refused: unknown orphan kind \"" + kind + "\"."));
         }
     }
 
@@ -103,18 +103,18 @@ public sealed class OrphanCleanupFixer : IFixer
     {
         if (!_libraryGuard.IsInsideLibrary(issue.Path))
         {
-            return FixResult.Fail("Refused: folder is not inside a configured library — " + issue.Path);
+            return FixResult.Refused(FixReason.OutsideLibrary, "Refused: folder is not inside a configured library — " + issue.Path);
         }
 
         if (!Directory.Exists(issue.Path))
         {
-            return FixResult.Fail("The folder no longer exists: " + issue.Path);
+            return FixResult.Fail(FixReason.SourceMissing, "The folder no longer exists: " + issue.Path);
         }
 
         // Re-verify at fix time — someone may have copied a video into the folder between scan and fix.
         if (OrphanCleanupScanner_HasVideoNow(issue.Path))
         {
-            return FixResult.Fail("Nothing to remove any more — a video appeared inside \"" + Path.GetFileName(issue.Path) + "\" after the scan.");
+            return FixResult.NoChange(FixReason.NothingToRemove, "Nothing to remove any more — a video appeared inside \"" + Path.GetFileName(issue.Path) + "\" after the scan.");
         }
 
         return DisposeOfPath(issue, isDirectory: true, verb: "empty folder");
@@ -124,17 +124,17 @@ public sealed class OrphanCleanupFixer : IFixer
     {
         if (!_libraryGuard.IsInsideLibrary(issue.Path))
         {
-            return FixResult.Fail("Refused: subtitle is not inside a configured library — " + issue.Path);
+            return FixResult.Refused(FixReason.OutsideLibrary, "Refused: subtitle is not inside a configured library — " + issue.Path);
         }
 
         if (!File.Exists(issue.Path))
         {
-            return FixResult.Fail("The subtitle no longer exists: " + issue.Path);
+            return FixResult.Fail(FixReason.SourceMissing, "The subtitle no longer exists: " + issue.Path);
         }
 
         if (OrphanCleanupScanner.HasCompanionVideo(issue.Path))
         {
-            return FixResult.Fail("Nothing to remove any more — a companion video appeared next to \"" + Path.GetFileName(issue.Path) + "\" after the scan.");
+            return FixResult.NoChange(FixReason.NothingToRemove, "Nothing to remove any more — a companion video appeared next to \"" + Path.GetFileName(issue.Path) + "\" after the scan.");
         }
 
         return DisposeOfPath(issue, isDirectory: false, verb: "orphan subtitle");
@@ -144,17 +144,17 @@ public sealed class OrphanCleanupFixer : IFixer
     {
         if (!_libraryGuard.IsInsideLibrary(issue.Path))
         {
-            return FixResult.Fail("Refused: trickplay folder is not inside a configured library — " + issue.Path);
+            return FixResult.Refused(FixReason.OutsideLibrary, "Refused: trickplay folder is not inside a configured library — " + issue.Path);
         }
 
         if (!Directory.Exists(issue.Path))
         {
-            return FixResult.Fail("The trickplay folder no longer exists: " + issue.Path);
+            return FixResult.Fail(FixReason.SourceMissing, "The trickplay folder no longer exists: " + issue.Path);
         }
 
         if (OrphanCleanupScanner.HasCompanionVideoForTrickplay(issue.Path))
         {
-            return FixResult.Fail("Nothing to remove any more — the companion video reappeared next to \"" + Path.GetFileName(issue.Path) + "\" after the scan.");
+            return FixResult.NoChange(FixReason.NothingToRemove, "Nothing to remove any more — the companion video reappeared next to \"" + Path.GetFileName(issue.Path) + "\" after the scan.");
         }
 
         return DisposeOfPath(issue, isDirectory: true, verb: "orphan trickplay folder");
@@ -169,18 +169,18 @@ public sealed class OrphanCleanupFixer : IFixer
         var candidate2 = Path.GetFullPath(Path.Combine(_appPaths.DataPath, "..", "metadata", "library"));
         if (!LibraryGuard.IsUnder(full, candidate1) && !LibraryGuard.IsUnder(full, candidate2))
         {
-            return FixResult.Fail("Refused: metadata folder is not under a Jellyfin metadata root — " + issue.Path);
+            return FixResult.Refused(FixReason.OutsideLibrary, "Refused: metadata folder is not under a Jellyfin metadata root — " + issue.Path);
         }
 
         if (!Directory.Exists(issue.Path))
         {
-            return FixResult.Fail("The metadata folder no longer exists: " + issue.Path);
+            return FixResult.Fail(FixReason.SourceMissing, "The metadata folder no longer exists: " + issue.Path);
         }
 
         // Re-verify: the item's GUID might have started resolving between scan and fix (e.g. re-import).
         if (issue.ItemId != Guid.Empty && _libraryManager.GetItemById(issue.ItemId) is not null)
         {
-            return FixResult.Fail("Nothing to remove any more — the item at " + issue.ItemId + " has come back into the library.");
+            return FixResult.NoChange(FixReason.NothingToRemove, "Nothing to remove any more — the item at " + issue.ItemId + " has come back into the library.");
         }
 
         return DisposeOfPath(issue, isDirectory: true, verb: "orphan metadata folder");
@@ -223,6 +223,7 @@ public sealed class OrphanCleanupFixer : IFixer
             return new FixResult
             {
                 Success = true,
+                Outcome = FixOutcome.Applied,
                 Message = descriptor,
                 BytesFreed = issue.SizeSavings,
                 RecyclePath = recyclePath
@@ -232,7 +233,7 @@ public sealed class OrphanCleanupFixer : IFixer
         {
             _logger.LogWarning(ex, "OrphanCleanupFixer: could not remove {Path}", issue.Path);
             Api.Diagnostics.Record("OrphanCleanupFixer.Delete", "Couldn't remove orphan \"" + issue.Path + "\": " + ex.Message + ". Check that Jellyfin has write access there.");
-            return FixResult.Fail("Couldn't delete \"" + fileName + "\" — check that Jellyfin has write access to the containing folder.", ex.Message);
+            return FixResult.Fail(FixReason.AccessDenied, "Couldn't delete \"" + fileName + "\" — check that Jellyfin has write access to the containing folder.", ex.Message);
         }
     }
 
