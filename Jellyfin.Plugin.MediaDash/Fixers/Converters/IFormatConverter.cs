@@ -43,4 +43,16 @@ public interface IFormatConverter
     /// <param name="cancellationToken">Cancellation token for a long-running download.</param>
     /// <returns>The resulting availability after any download work completes.</returns>
     Task<ConverterAvailability> EnsureToolchainAsync(CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Converts <paramref name="sourcePath"/> to a staged output file at <paramref name="stagedTargetPath"/>.
+    /// Producers MUST write the output to the exact staged path — <see cref="Fixers.VerifiedReplacementService"/>
+    /// takes ownership of it for the swap-and-recycle protocol.
+    /// </summary>
+    /// <param name="sourcePath">Absolute path of the source file.</param>
+    /// <param name="stagedTargetPath">Absolute path the converter must write the output to. Includes the inflight tail already.</param>
+    /// <param name="progress">Optional intra-item progress reporter (0..1).</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The conversion result.</returns>
+    Task<ConversionResult> ConvertAsync(string sourcePath, string stagedTargetPath, IProgress<double>? progress, CancellationToken cancellationToken);
 }
