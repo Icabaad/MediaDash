@@ -109,8 +109,37 @@ public class FormatCompatibilityFixerTests
         bool dryRun = false,
         Func<Guid, BaseItem?>? getItemById = null)
     {
-        // ponytail: NotImplementedException here is the RED step — Task 10 GREEN wires it.
-        throw new NotImplementedException("FormatCompatibilityFixer construction — resolved in Task 10 GREEN step.");
+        var registry = new StubRegistry();
+        var resolver = new StubResolver();
+        var config = new StubConfig(dryRun);
+        // ponytail: guard/protection/VRS are null — all 4 tests exit via prechecks before
+        // reaching them. DryRun test reaches the guard check: null guard = pass (skip check).
+        var fixer = new FormatCompatibilityFixer(
+            converters: registry,
+            resolver: resolver,
+            replacement: null,
+            guard: null,
+            protection: null,
+            configProvider: config,
+            getItemById: getItemById ?? (_ => null),
+            libraryManager: null,
+            libraryMonitor: null,
+            logger: NullLogger<FormatCompatibilityFixer>.Instance);
+        return (fixer, resolver, registry);
+    }
+
+    private sealed class StubConfig : IPluginConfigurationProvider
+    {
+        private readonly bool _dryRun;
+        public StubConfig(bool dryRun) { _dryRun = dryRun; }
+        public PluginConfiguration GetSnapshot()
+            => new()
+            {
+                DryRun = _dryRun,
+                ConvertEbooks = true,
+                ConvertComics = true,
+                FormatCompatibilityFixMode = FixMode.Automatic
+            };
     }
 
     private static FileInfo MakeTempFile(string ext)

@@ -110,7 +110,9 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         // scan silently produces zero issues until Phase 2 wires the first converter.
         serviceCollection.AddSingleton<IFormatConverterRegistry, FormatConverterRegistry>();
         serviceCollection.AddSingleton<ILibraryCollectionResolver, LibraryCollectionResolver>();
-        serviceCollection.AddSingleton<IToolchainDownloader, NoOpToolchainDownloader>();
+        serviceCollection.AddSingleton<IToolchainDownloader, CalibreDownloader>();
+        serviceCollection.AddSingleton<IFormatConverter, ComicConverter>();
+        serviceCollection.AddSingleton<IFormatConverter, EbookConverter>();
         serviceCollection.AddSingleton(sp => new CalibreToolchain(
             sp.GetRequiredService<IToolchainDownloader>(),
             sp.GetRequiredService<ILogger<CalibreToolchain>>(),
@@ -151,6 +153,7 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddSingleton<IFixer, OrphanCleanupFixer>();
         serviceCollection.AddSingleton<IFixer, NfoFixer>();
         serviceCollection.AddSingleton<IFixer, EmbeddedCoverArtFixer>();
+        serviceCollection.AddSingleton<IFixer, FormatCompatibilityFixer>();
         serviceCollection.AddSingleton<AnalyticsReporter>();
         serviceCollection.AddSingleton<PostUpgradeCleanup>();
         serviceCollection.AddHostedService<ScheduleMigrator>();
