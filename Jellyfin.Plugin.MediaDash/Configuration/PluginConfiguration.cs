@@ -136,6 +136,19 @@ public class PluginConfiguration : BasePluginConfiguration
         DuplicateRuntimeVetoPct = 15;
         QualityMinSavingsPercent = 0;
         QualityMinSavingsBytes = 0;
+        FormatCompatibilityFixMode = FixMode.DetectOnly;
+        FormatCompatibilityDisposal = DisposalMethod.RecycleBin;
+        ConvertEbooks = false;
+        ConvertComics = false;
+        ConvertAudiobooks = false;
+        ConvertImages = false;
+        ConvertMusic = false;
+        ConvertVideos = false;
+        AudiobookMergeMultiFile = false;
+        CalibreOverridePath = string.Empty;
+        EbookPreferredTarget = string.Empty;
+        ImagePreferredTarget = string.Empty;
+        MusicPreferredTarget = string.Empty;
         LibraryDriveLowSpaceWarningEnabled = true;
         LibraryDriveWarnThresholdPercent = 90;
     }
@@ -337,6 +350,45 @@ public class PluginConfiguration : BasePluginConfiguration
     /// are set, both must be satisfied.
     /// </summary>
     public long QualityMinSavingsBytes { get; set; }
+
+    /// <summary>Gets or sets how the format-compatibility scanner/fixer act.</summary>
+    public FixMode FormatCompatibilityFixMode { get; set; }
+
+    /// <summary>Gets or sets where format-compatibility replaced originals go.</summary>
+    public DisposalMethod FormatCompatibilityDisposal { get; set; }
+
+    /// <summary>Gets or sets a value indicating whether the ebook converter runs.</summary>
+    public bool ConvertEbooks { get; set; }
+
+    /// <summary>Gets or sets a value indicating whether the comic converter runs.</summary>
+    public bool ConvertComics { get; set; }
+
+    /// <summary>Gets or sets a value indicating whether the audiobook converter runs. Phase 3+.</summary>
+    public bool ConvertAudiobooks { get; set; }
+
+    /// <summary>Gets or sets a value indicating whether the image converter runs. Phase 4.</summary>
+    public bool ConvertImages { get; set; }
+
+    /// <summary>Gets or sets a value indicating whether the music converter runs. Phase 4.</summary>
+    public bool ConvertMusic { get; set; }
+
+    /// <summary>Gets or sets a value indicating whether the video converter runs. Phase 4.</summary>
+    public bool ConvertVideos { get; set; }
+
+    /// <summary>Gets or sets a value indicating whether the audiobook fixer merges folder-of-mp3 audiobooks into a single m4b.</summary>
+    public bool AudiobookMergeMultiFile { get; set; }
+
+    /// <summary>Gets or sets the folder path containing a user-installed <c>ebook-convert</c> executable.</summary>
+    public string CalibreOverridePath { get; set; }
+
+    /// <summary>Gets or sets the preferred ebook target format ("epub" or "pdf"). Empty = matrix default.</summary>
+    public string EbookPreferredTarget { get; set; }
+
+    /// <summary>Gets or sets the preferred image target format ("jpg", "png", "webp"). Empty = matrix default.</summary>
+    public string ImagePreferredTarget { get; set; }
+
+    /// <summary>Gets or sets the preferred music target format ("flac", "mp3"). Empty = matrix default.</summary>
+    public string MusicPreferredTarget { get; set; }
 
     /// <summary>
     /// Gets or sets the ISO 639-2 codes of audio languages to keep. Empty means the audio language scanner is not configured and stays off.
@@ -815,6 +867,7 @@ public class PluginConfiguration : BasePluginConfiguration
             Data.IssueType.EmbeddedCoverArt => EmbeddedCoverFixMode,
             Data.IssueType.Ungrouped => UngroupedFixMode,
             Data.IssueType.CorruptArtwork => CorruptArtworkFixMode,
+            Data.IssueType.FormatCompatibility => FormatCompatibilityFixMode,
             _ => FixMode.DetectOnly
         };
     }
@@ -839,6 +892,7 @@ public class PluginConfiguration : BasePluginConfiguration
             Data.IssueType.HeavyTranscode => HeavyTranscodeDisposal,
             Data.IssueType.FailedTranscode => FailedTranscodeDisposal,
             Data.IssueType.EmbeddedCoverArt => EmbeddedCoverDisposal,
+            Data.IssueType.FormatCompatibility => FormatCompatibilityDisposal,
             _ => DisposalMethod.RecycleBin
         };
     }
