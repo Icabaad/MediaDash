@@ -14,6 +14,7 @@ using MediaBrowser.Controller;
 using MediaBrowser.Controller.Plugins;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Swashbuckle.AspNetCore.SwaggerGen;
 
 namespace Jellyfin.Plugin.MediaDash;
@@ -109,6 +110,11 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         // scan silently produces zero issues until Phase 2 wires the first converter.
         serviceCollection.AddSingleton<IFormatConverterRegistry, FormatConverterRegistry>();
         serviceCollection.AddSingleton<ILibraryCollectionResolver, LibraryCollectionResolver>();
+        serviceCollection.AddSingleton<IToolchainDownloader, NoOpToolchainDownloader>();
+        serviceCollection.AddSingleton(sp => new CalibreToolchain(
+            sp.GetRequiredService<IToolchainDownloader>(),
+            sp.GetRequiredService<ILogger<CalibreToolchain>>(),
+            Path.Combine(MediaDashDb.DataDirectory ?? string.Empty)));
         serviceCollection.AddSingleton<LibraryGuard>();
         serviceCollection.AddSingleton<RecycleBin>();
         // 05-B: single owner of the "restore a recycled file back to a library" workflow.
