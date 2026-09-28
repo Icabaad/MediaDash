@@ -22,17 +22,20 @@ public class FormatCompatibilityScannerTests
         params BaseItem[] items)
         => scanner.ScanAsync(items, new Progress<double>(_ => { }), CancellationToken.None).GetAwaiter().GetResult();
 
-    private static BaseItem MakeItem(string path, CollectionType? libraryType)
-        => new FakeBaseItem(path, libraryType);
-
-    private static FormatCompatibilityScanner Scanner(params IFormatConverter[] converters)
-        => new(new FormatConverterRegistry(converters), NullLogger<FormatCompatibilityScanner>.Instance);
+    private static (FormatCompatibilityScanner scanner, FakeResolver resolver) Scanner(params IFormatConverter[] converters)
+    {
+        var resolver = new FakeResolver();
+        var registry = new FormatConverterRegistry(converters);
+        var scanner = new FormatCompatibilityScanner(registry, resolver, NullLogger<FormatCompatibilityScanner>.Instance);
+        return (scanner, resolver);
+    }
 
     [Fact]
     public void EmitsIssueForUnrenderableExtension()
     {
-        var scanner = Scanner(new FakeConverter("ebook", MediaKind.Ebook, CollectionType.books));
-        var item = MakeItem(@"C:\books\thing.mobi", CollectionType.books);
+        var (scanner, resolver) = Scanner(new FakeConverter("ebook", MediaKind.Ebook, CollectionType.books));
+        var item = new FakeBaseItem(@"C:\books\thing.mobi");
+        resolver.Assign(item, CollectionType.books);
         var issues = Run(scanner, item);
         var issue = Assert.Single(issues);
         Assert.Equal(IssueType.FormatCompatibility, issue.Type);
@@ -43,24 +46,27 @@ public class FormatCompatibilityScannerTests
     [Fact]
     public void SkipsRenderableExtensions()
     {
-        var scanner = Scanner(new FakeConverter("ebook", MediaKind.Ebook, CollectionType.books));
-        var item = MakeItem(@"C:\books\thing.epub", CollectionType.books);
+        var (scanner, resolver) = Scanner(new FakeConverter("ebook", MediaKind.Ebook, CollectionType.books));
+        var item = new FakeBaseItem(@"C:\books\thing.epub");
+        resolver.Assign(item, CollectionType.books);
         Assert.Empty(Run(scanner, item));
     }
 
     [Fact]
     public void SkipsWhenLibraryTypeOutsideConverterAllowedSet()
     {
-        var scanner = Scanner(new FakeConverter("ebook", MediaKind.Ebook, CollectionType.books));
-        var item = MakeItem(@"C:\movies\thing.mobi", CollectionType.movies);
+        var (scanner, resolver) = Scanner(new FakeConverter("ebook", MediaKind.Ebook, CollectionType.books));
+        var item = new FakeBaseItem(@"C:\movies\thing.mobi");
+        resolver.Assign(item, CollectionType.movies);
         Assert.Empty(Run(scanner, item));
     }
 
     [Fact]
     public void EmitsIssueInMixedLibraryButFlagsUserReviewOnly()
     {
-        var scanner = Scanner(new FakeConverter("ebook", MediaKind.Ebook, CollectionType.books));
-        var item = MakeItem(@"C:\mixed\thing.mobi", null);
+        var (scanner, resolver) = Scanner(new FakeConverter("ebook", MediaKind.Ebook, CollectionType.books));
+        var item = new FakeBaseItem(@"C:\mixed\thing.mobi");
+        resolver.Assign(item, null);
         var issue = Assert.Single(Run(scanner, item));
         Assert.Contains("mixed", issue.DetailsJson, StringComparison.OrdinalIgnoreCase);
     }
@@ -68,24 +74,27 @@ public class FormatCompatibilityScannerTests
     [Fact]
     public void SkipsWhenNoConverterKnowsTheExtension()
     {
-        var scanner = Scanner(new FakeConverter("music", MediaKind.Music, CollectionType.music));
-        var item = MakeItem(@"C:\books\thing.mobi", CollectionType.books);
+        var (scanner, resolver) = Scanner(new FakeConverter("music", MediaKind.Music, CollectionType.music));
+        var item = new FakeBaseItem(@"C:\books\thing.mobi");
+        resolver.Assign(item, CollectionType.books);
         Assert.Empty(Run(scanner, item));
     }
 
     [Fact]
     public void SkipsUnknownExtensions()
     {
-        var scanner = Scanner(new FakeConverter("ebook", MediaKind.Ebook, CollectionType.books));
-        var item = MakeItem(@"C:\books\thing.xyz", CollectionType.books);
+        var (scanner, resolver) = Scanner(new FakeConverter("ebook", MediaKind.Ebook, CollectionType.books));
+        var item = new FakeBaseItem(@"C:\books\thing.xyz");
+        resolver.Assign(item, CollectionType.books);
         Assert.Empty(Run(scanner, item));
     }
 
     [Fact]
     public void SetsIssueStatusToDetected()
     {
-        var scanner = Scanner(new FakeConverter("ebook", MediaKind.Ebook, CollectionType.books));
-        var item = MakeItem(@"C:\books\thing.mobi", CollectionType.books);
+        var (scanner, resolver) = Scanner(new FakeConverter("ebook", MediaKind.Ebook, CollectionType.books));
+        var item = new FakeBaseItem(@"C:\books\thing.mobi");
+        resolver.Assign(item, CollectionType.books);
         var issue = Assert.Single(Run(scanner, item));
         Assert.Equal(IssueStatus.Detected, issue.Status);
     }
@@ -108,20 +117,24 @@ public class FormatCompatibilityScannerTests
             => Task.FromResult(ConverterAvailability.Ready);
     }
 
-    private sealed class FakeBaseItem : BaseItem
+    private sealed class FakeResolver : ILibraryCollectionResolver
     {
-        private readonly CollectionType? _collectionType;
+        private readonly Dictionary<BaseItem, CollectionType?> _map = new();
 
-        public FakeBaseItem(string path, CollectionType? collectionType)
+        public void Assign(BaseItem item, CollectionType? type)
         {
-            Path = path;
-            _collectionType = collectionType;
+            _map[item] = type;
         }
 
-        // FormatCompatibilityScanner reads BaseItem.Path and resolves CollectionType via
-        // an ILibraryCollectionResolver we inject; the fake resolver in these tests
-        // pulls the value straight off this stashed field. See the resolver contract in
-        // FormatCompatibilityScanner.cs.
-        internal CollectionType? StashedCollectionType => _collectionType;
+        public CollectionType? Resolve(BaseItem item)
+            => _map.TryGetValue(item, out var t) ? t : null;
+    }
+
+    private sealed class FakeBaseItem : BaseItem
+    {
+        public FakeBaseItem(string path)
+        {
+            Path = path;
+        }
     }
 }

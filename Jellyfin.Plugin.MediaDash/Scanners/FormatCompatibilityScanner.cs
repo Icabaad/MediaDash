@@ -36,12 +36,6 @@ public sealed class FormatCompatibilityScanner : IScanner
         _logger = logger;
     }
 
-    // Test-only convenience ctor; production DI uses the 3-arg one above.
-    internal FormatCompatibilityScanner(IFormatConverterRegistry registry, ILogger<FormatCompatibilityScanner> logger)
-        : this(registry, new TestPathResolver(), logger)
-    {
-    }
-
     /// <inheritdoc />
     public IssueType Type => IssueType.FormatCompatibility;
 
@@ -116,18 +110,5 @@ public sealed class FormatCompatibilityScanner : IScanner
         }
 
         return Task.FromResult<IReadOnlyList<Issue>>(issues);
-    }
-
-    // ponytail: unit tests pass a FakeBaseItem that stashes the CollectionType on itself; this
-    // shim reflects that field via the same accessor. Production always uses the DI resolver.
-    private sealed class TestPathResolver : ILibraryCollectionResolver
-    {
-        public CollectionType? Resolve(BaseItem item)
-        {
-            var field = item.GetType().GetProperty(
-                "StashedCollectionType",
-                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-            return field?.GetValue(item) as CollectionType?;
-        }
     }
 }
