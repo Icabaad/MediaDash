@@ -31,8 +31,8 @@ public class FormatCompatibilityScannerTests
     [Fact]
     public void EmitsIssueForUnrenderableExtension()
     {
-        var scanner = Scanner(new FakeConverter("ebook", MediaKind.Ebook, CollectionType.Books));
-        var item = MakeItem(@"C:\books\thing.mobi", CollectionType.Books);
+        var scanner = Scanner(new FakeConverter("ebook", MediaKind.Ebook, CollectionType.books));
+        var item = MakeItem(@"C:\books\thing.mobi", CollectionType.books);
         var issues = Run(scanner, item);
         var issue = Assert.Single(issues);
         Assert.Equal(IssueType.FormatCompatibility, issue.Type);
@@ -43,24 +43,24 @@ public class FormatCompatibilityScannerTests
     [Fact]
     public void SkipsRenderableExtensions()
     {
-        var scanner = Scanner(new FakeConverter("ebook", MediaKind.Ebook, CollectionType.Books));
-        var item = MakeItem(@"C:\books\thing.epub", CollectionType.Books);
+        var scanner = Scanner(new FakeConverter("ebook", MediaKind.Ebook, CollectionType.books));
+        var item = MakeItem(@"C:\books\thing.epub", CollectionType.books);
         Assert.Empty(Run(scanner, item));
     }
 
     [Fact]
     public void SkipsWhenLibraryTypeOutsideConverterAllowedSet()
     {
-        var scanner = Scanner(new FakeConverter("ebook", MediaKind.Ebook, CollectionType.Books));
-        var item = MakeItem(@"C:\movies\thing.mobi", CollectionType.Movies);
+        var scanner = Scanner(new FakeConverter("ebook", MediaKind.Ebook, CollectionType.books));
+        var item = MakeItem(@"C:\movies\thing.mobi", CollectionType.movies);
         Assert.Empty(Run(scanner, item));
     }
 
     [Fact]
     public void EmitsIssueInMixedLibraryButFlagsUserReviewOnly()
     {
-        var scanner = Scanner(new FakeConverter("ebook", MediaKind.Ebook, CollectionType.Books));
-        var item = MakeItem(@"C:\mixed\thing.mobi", CollectionType.MixedContent);
+        var scanner = Scanner(new FakeConverter("ebook", MediaKind.Ebook, CollectionType.books));
+        var item = MakeItem(@"C:\mixed\thing.mobi", null);
         var issue = Assert.Single(Run(scanner, item));
         Assert.Contains("mixed", issue.DetailsJson, StringComparison.OrdinalIgnoreCase);
     }
@@ -68,24 +68,24 @@ public class FormatCompatibilityScannerTests
     [Fact]
     public void SkipsWhenNoConverterKnowsTheExtension()
     {
-        var scanner = Scanner(new FakeConverter("music", MediaKind.Music, CollectionType.Music));
-        var item = MakeItem(@"C:\books\thing.mobi", CollectionType.Books);
+        var scanner = Scanner(new FakeConverter("music", MediaKind.Music, CollectionType.music));
+        var item = MakeItem(@"C:\books\thing.mobi", CollectionType.books);
         Assert.Empty(Run(scanner, item));
     }
 
     [Fact]
     public void SkipsUnknownExtensions()
     {
-        var scanner = Scanner(new FakeConverter("ebook", MediaKind.Ebook, CollectionType.Books));
-        var item = MakeItem(@"C:\books\thing.xyz", CollectionType.Books);
+        var scanner = Scanner(new FakeConverter("ebook", MediaKind.Ebook, CollectionType.books));
+        var item = MakeItem(@"C:\books\thing.xyz", CollectionType.books);
         Assert.Empty(Run(scanner, item));
     }
 
     [Fact]
     public void SetsIssueStatusToDetected()
     {
-        var scanner = Scanner(new FakeConverter("ebook", MediaKind.Ebook, CollectionType.Books));
-        var item = MakeItem(@"C:\books\thing.mobi", CollectionType.Books);
+        var scanner = Scanner(new FakeConverter("ebook", MediaKind.Ebook, CollectionType.books));
+        var item = MakeItem(@"C:\books\thing.mobi", CollectionType.books);
         var issue = Assert.Single(Run(scanner, item));
         Assert.Equal(IssueStatus.Detected, issue.Status);
     }
