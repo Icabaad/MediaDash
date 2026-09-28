@@ -41,7 +41,8 @@ public sealed class FixTask : IScheduledTask
         IssueType.CorruptNfo,
         IssueType.HeavyTranscode,
         IssueType.FailedTranscode,
-        IssueType.EmbeddedCoverArt
+        IssueType.EmbeddedCoverArt,
+        IssueType.FormatCompatibility
     ];
 
     /// <summary>
