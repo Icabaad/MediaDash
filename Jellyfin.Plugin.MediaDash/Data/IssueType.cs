@@ -60,5 +60,8 @@ public enum IssueType
     EmbeddedCoverArt = 17,
 
     /// <summary>Not scanner-generated. Records a manual delete performed via MediaDash's Files tab so the Recycle bin tab can label the entry correctly (previously mislabelled any manifest-only bin entry — including older-version auto-fix recycles that predate the history-write path — as a manual delete).</summary>
-    ManualDelete = 18
+    ManualDelete = 18,
+
+    /// <summary>A file whose format Jellyfin's browser client cannot render (e.g. MOBI ebook, CBR comic, HEIC image). The scanner suggests conversion to a renderable target format; the fixer runs it in Phase 2+.</summary>
+    FormatCompatibility = 19
 }
