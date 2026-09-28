@@ -241,8 +241,10 @@
                 action: 'Delete corrupt artwork', actionHint: 'Removes the broken image; Jellyfin\'s next library scan re-fetches from providers.', approveAll: 'Delete all {0} corrupt artwork files shown'
             },
             FormatCompatibility: {
-                title: 'Unsupported format', hint: 'Media files in formats that cannot be converted by your installed converter plugins.', color: '#7c3aed', icon: 'inventory_2',
-                action: 'Review', actionHint: 'Detect-only for now — MediaDash surfaces files that need format conversion, which will be handled in a future phase.'
+                title: 'Unsupported format', hint: 'Ebooks and comics in formats Jellyfin cannot display — converted to EPUB/PDF or CBZ so the browser reader works.', color: '#7c3aed', icon: 'inventory_2',
+                action: 'Convert', actionHint: 'Converts to the target format. The original moves to the recycle bin unless you switched disposal to permanent.',
+                doRecycle: 'Convert — original kept in recycle bin', doPermanent: 'Convert — original deleted permanently',
+                approveAll: 'Convert all {0} incompatible files shown'
             }
         },
         // Sorted alphabetically by display name so both the <datalist> picker and the chip

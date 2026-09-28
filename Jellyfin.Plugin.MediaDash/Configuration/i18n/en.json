@@ -221,9 +221,12 @@
                                      },
                   "FormatCompatibility":  {
                                               "title":  "Unsupported format",
-                                              "hint":  "Media files in formats that cannot be converted by your installed converter plugins.",
-                                              "action":  "Review",
-                                              "actionHint":  "Detect-only for now — MediaDash surfaces files that need format conversion, which will be handled in a future phase."
+                                              "hint":  "Ebooks and comics in formats Jellyfin cannot display — converted to EPUB/PDF or CBZ so the browser reader works.",
+                                              "action":  "Convert",
+                                              "actionHint":  "Converts to the target format. The original moves to the recycle bin unless you switched disposal to permanent.",
+                                              "approveAll":  "Convert all {0} incompatible files shown",
+                                              "doRecycle":  "Convert — original kept in recycle bin",
+                                              "doPermanent":  "Convert — original deleted permanently"
                                           }
               },
     "wizSteps":  [

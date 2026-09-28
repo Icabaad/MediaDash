@@ -77,7 +77,10 @@
                 // Corrupt artwork just deletes broken files so Jellyfin re-fetches on next scan; no
                 // disposal choice — the file is safe to delete outright because it lives under Jellyfin's
                 // own metadata folder, not user-placed media.
-                { key: 'CorruptArtwork', mode: 'CorruptArtworkFixMode' }
+                { key: 'CorruptArtwork', mode: 'CorruptArtworkFixMode' },
+                // Format conversion: converts ebooks/comics to Jellyfin-compatible formats; originals
+                // go to the recycle bin so the conversion is reversible.
+                { key: 'FormatCompatibility', mode: 'FormatCompatibilityFixMode', disposal: 'FormatCompatibilityDisposal' }
             ];
 
 
@@ -180,7 +183,7 @@
             // card's body (font optimizer mode + force-font dropdown at lines ~5294-5315). Putting
             // SubtitleFonts here would render a second empty "Subtitles" card since no key === 'SubtitleFonts'
             // branch exists in buildTaskCard.
-            var TASK_ORDER = ['Duplicate', 'Playability', 'Quality', 'HeavyTranscode', 'FailedTranscode', 'SubtitleLanguage', 'AudioLanguage', 'Stale', 'Misplaced', 'Ungrouped', 'MissingSubtitles', 'MalwareRisk', 'LargeTrickplay', 'EmbeddedCoverArt', 'OrphanedDebris', 'CorruptNfo', 'CorruptArtwork'];
+            var TASK_ORDER = ['Duplicate', 'Playability', 'Quality', 'HeavyTranscode', 'FailedTranscode', 'SubtitleLanguage', 'AudioLanguage', 'Stale', 'Misplaced', 'Ungrouped', 'MissingSubtitles', 'MalwareRisk', 'LargeTrickplay', 'EmbeddedCoverArt', 'OrphanedDebris', 'CorruptNfo', 'CorruptArtwork', 'FormatCompatibility'];
 
 
             // Ink used for the selected-accent segment. Derived by hand from the mock — near-black
@@ -200,7 +203,8 @@
                 CorruptNfo: '#1a0410',
                 HeavyTranscode: '#1a0d02',
                 FailedTranscode: '#1f0303',
-                EmbeddedCoverArt: '#150520'
+                EmbeddedCoverArt: '#150520',
+                FormatCompatibility: '#120421'
             };
 
 
@@ -221,7 +225,8 @@
                 CorruptNfo: 'rgba(225,29,72,.28)',
                 HeavyTranscode: 'rgba(249,115,22,.28)',
                 FailedTranscode: 'rgba(220,38,38,.32)',
-                EmbeddedCoverArt: 'rgba(168,85,247,.28)'
+                EmbeddedCoverArt: 'rgba(168,85,247,.28)',
+                FormatCompatibility: 'rgba(124,58,237,.28)'
             };
 
 
@@ -248,7 +253,8 @@
                 EmbeddedCoverArt: 'Music or audiobook folders where every track has embedded cover art but no folder-level cover.jpg. The fixer extracts one shared cover.jpg (and optionally strips the redundant per-file copies to save space).',
                 OrphanedDebris: 'Empty folders, orphan subtitle sidecars, orphan trickplay folders, orphan metadata whose parent media file no longer exists. The fixer recycles them.',
                 CorruptNfo: 'Zero-byte, malformed, or unrecognised-root .nfo metadata sidecars that stop Jellyfin from reading item info. The fixer recycles them so Jellyfin regenerates fresh metadata on the next refresh.',
-                CorruptArtwork: 'Poster / backdrop / thumb / logo files inside the metadata folder Jellyfin manages that are zero-byte, truncated, or fail to decode. The fixer removes them so Jellyfin re-fetches on the next metadata pass. User-placed artwork alongside your media is never touched.'
+                CorruptArtwork: 'Poster / backdrop / thumb / logo files inside the metadata folder Jellyfin manages that are zero-byte, truncated, or fail to decode. The fixer removes them so Jellyfin re-fetches on the next metadata pass. User-placed artwork alongside your media is never touched.',
+                FormatCompatibility: 'Ebooks and comics in formats Jellyfin\'s browser reader cannot display (MOBI, AZW3, DjVu, CBR, CB7). The fixer converts them to EPUB or PDF (via Calibre) and CBZ respectively; originals go to the recycle bin so conversions are reversible.'
             };
 
 
@@ -268,7 +274,8 @@
                 CorruptNfo: 'rgba(225,29,72,.14)',
                 HeavyTranscode: 'rgba(249,115,22,.14)',
                 FailedTranscode: 'rgba(220,38,38,.18)',
-                EmbeddedCoverArt: 'rgba(168,85,247,.14)'
+                EmbeddedCoverArt: 'rgba(168,85,247,.14)',
+                FormatCompatibility: 'rgba(124,58,237,.14)'
             };
 
 
@@ -802,6 +809,34 @@
                         '</div>' +
                         '</div>' +
                         '<span class="mdFieldHint">Detect-only — Stale content never gets deleted automatically.</span>';
+                }
+                if (key === 'FormatCompatibility') {
+                    return '<div class="mdFieldGrid mdFieldGrid-2">' +
+                        disposalField('FormatCompatibility', 'Converted originals go to') +
+                        '<div class="mdField">' +
+                            '<label for="mdEbookPreferredTarget" title="Target format for ebook conversion. EPUB is Jellyfin\'s native format; PDF preserves complex layouts at the cost of reflow.">Preferred ebook target</label>' +
+                            '<select is="emby-select" id="mdEbookPreferredTarget" class="emby-select-withcolor emby-select">' +
+                                '<option value="">Let Calibre decide</option>' +
+                                '<option value="epub">EPUB (recommended)</option>' +
+                                '<option value="pdf">PDF</option>' +
+                            '</select>' +
+                        '</div>' +
+                        '</div>' +
+                        '<label class="mdInsetRow" style="cursor:pointer;" title="Convert MOBI, AZW3 and DjVu files to EPUB or PDF using Calibre. Originals go to the recycle bin.">' +
+                            '<input id="mdConvertEbooks" type="checkbox" class="mdInsetCheck" />' +
+                            '<span style="font-size:13px;font-weight:600;flex:0 0 auto;">Convert ebooks (MOBI, AZW3, DjVu → EPUB/PDF)</span>' +
+                            '<span class="mdFieldHint" style="margin:0;flex:1;">Requires Calibre (ebook-convert). Leave the path below empty to use the system PATH or let MediaDash auto-download on first use.</span>' +
+                        '</label>' +
+                        '<label class="mdInsetRow" style="cursor:pointer;" title="Convert CBR and CB7 comic archives to CBZ. Originals go to the recycle bin.">' +
+                            '<input id="mdConvertComics" type="checkbox" class="mdInsetCheck" />' +
+                            '<span style="font-size:13px;font-weight:600;flex:0 0 auto;">Convert comics (CBR, CB7 → CBZ)</span>' +
+                            '<span class="mdFieldHint" style="margin:0;flex:1;">No extra tool needed — repacked in-process.</span>' +
+                        '</label>' +
+                        '<div class="mdField" style="margin-top:.6em;">' +
+                            '<label for="mdCalibreOverridePath" title="Full path to the ebook-convert binary. Leave empty to use the system PATH or let MediaDash auto-download Calibre on first fix.">Calibre override path</label>' +
+                            '<input id="mdCalibreOverridePath" type="text" is="emby-input" placeholder="/usr/bin/ebook-convert or C:\\Program Files\\Calibre2\\ebook-convert.exe" />' +
+                            '<span class="mdFieldHint">Leave empty to use system PATH or auto-download on first fix.</span>' +
+                        '</div>';
                 }
                 return '';
             }
@@ -1741,6 +1776,10 @@
                 view.querySelector('#mdOrphanSubs').checked = c.OrphanScanSubtitles !== false;
                 view.querySelector('#mdOrphanTrickplay').checked = c.OrphanScanTrickplay !== false;
                 view.querySelector('#mdOrphanMetadata').checked = c.OrphanScanMetadata !== false;
+                view.querySelector('#mdConvertEbooks').checked = !!c.ConvertEbooks;
+                view.querySelector('#mdConvertComics').checked = !!c.ConvertComics;
+                view.querySelector('#mdCalibreOverridePath').value = c.CalibreOverridePath || '';
+                view.querySelector('#mdEbookPreferredTarget').value = c.EbookPreferredTarget || '';
             }
 
 
@@ -1930,6 +1969,10 @@
                 c.OrphanScanSubtitles = view.querySelector('#mdOrphanSubs').checked;
                 c.OrphanScanTrickplay = view.querySelector('#mdOrphanTrickplay').checked;
                 c.OrphanScanMetadata = view.querySelector('#mdOrphanMetadata').checked;
+                c.ConvertEbooks = view.querySelector('#mdConvertEbooks').checked;
+                c.ConvertComics = view.querySelector('#mdConvertComics').checked;
+                c.CalibreOverridePath = (view.querySelector('#mdCalibreOverridePath').value || '').trim();
+                c.EbookPreferredTarget = view.querySelector('#mdEbookPreferredTarget').value || '';
             }
 
 
