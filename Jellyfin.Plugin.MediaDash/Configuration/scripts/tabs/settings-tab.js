@@ -148,7 +148,8 @@
                 { id: 'mdTrickplayQuality', val: 'mdTrickplayQualityVal', unit: 'unitPercent' },
                 { id: 'mdTrickplayMinSize', val: 'mdTrickplayMinSizeVal', format: function (v) { return v === '0' || v === 0 ? ' (flag every folder)' : ' ' + v + ' MB'; } },
                 { id: 'mdBinWarnThreshold', val: 'mdBinWarnThresholdVal', format: function (v) { return v === '0' || v === 0 ? ' (off)' : ' ' + v + ' GB'; } },
-                { id: 'mdBinPauseAt', val: 'mdBinPauseAtVal', format: function (v) { return v === '0' || v === 0 ? ' (off)' : ' ' + v + ' GB'; } }
+                { id: 'mdBinPauseAt', val: 'mdBinPauseAtVal', format: function (v) { return v === '0' || v === 0 ? ' (off)' : ' ' + v + ' GB'; } },
+                { id: 'mdLowSpaceThreshold', val: 'mdLowSpaceThresholdVal', format: function (v) { return v === '0' || v === 0 ? ' (off)' : ' ' + v + ' % used'; } }
             ];
 
 
@@ -452,8 +453,15 @@
                                 '</label>' +
                                 '<label class="mdInsetRow--stack" style="cursor:pointer;">' +
                                     '<span class="mdInsetRowMain">' +
+                                        '<input id="mdRepairAudioReencode" type="checkbox" class="mdInsetCheck" />' +
+                                        '<span style="font-size:13px;font-weight:600;">4. Re-encode audio only</span>' +
+                                    '</span>' +
+                                    '<span class="mdFieldHint mdInsetRowHint">When the file\'s only audio track is broken. Copies video, minutes not hours.</span>' +
+                                '</label>' +
+                                '<label class="mdInsetRow--stack" style="cursor:pointer;">' +
+                                    '<span class="mdInsetRowMain">' +
                                         '<input id="mdRepairReencode" type="checkbox" class="mdInsetCheck" />' +
-                                        '<span style="font-size:13px;font-weight:600;">4. Re-encode video</span>' +
+                                        '<span style="font-size:13px;font-weight:600;">5. Re-encode video</span>' +
                                     '</span>' +
                                     '<span class="mdFieldHint mdInsetRowHint">Last resort. Can take hours per file, runs in the background.</span>' +
                                 '</label>' +
@@ -543,6 +551,16 @@
                                         '<label for="mdFileTypes">Only re-encode these file types</label>' +
                                         '<input id="mdFileTypes" type="text" is="emby-input" placeholder="all file types" />' +
                                         '<span class="mdFieldHint">Comma-separated: "avi, wmv, mkv". Empty = all.</span>' +
+                                    '</div>' +
+                                    '<div class="mdField">' +
+                                        '<label for="mdMinSavingsPct" title="Skip the swap when a Quality re-encode saves less than this. 0 = off (only larger-than-original is rejected).">Minimum savings (%)</label>' +
+                                        '<input id="mdMinSavingsPct" type="number" is="emby-input" min="0" max="95" step="1" />' +
+                                        '<span class="mdFieldHint">0 = off. Applies to Quality fixes only. Skipped files are not retried.</span>' +
+                                    '</div>' +
+                                    '<div class="mdField">' +
+                                        '<label for="mdMinSavingsMb" title="Skip the swap when a Quality re-encode saves fewer than this many megabytes. 0 = off. Combined with the percent rule via AND — both must be met.">Minimum savings (MB)</label>' +
+                                        '<input id="mdMinSavingsMb" type="number" is="emby-input" min="0" max="1048576" step="10" />' +
+                                        '<span class="mdFieldHint">0 = off. Combined with the % rule: both must be met.</span>' +
                                     '</div>' +
                                 '</div>' +
                                 '<label class="mdInsetRow" style="cursor:pointer;" title="HDR (BT.2020 + PQ/HLG) files need color-space plumbing MediaDash doesn\'t handle. Skipping them prevents accidentally destroying HDR metadata.">' +
@@ -1126,6 +1144,7 @@
                 { group: 'GLOBAL',        label: 'Safety',       icon: 'shield',           color: '#22d3ee', href: '#mdSet-safety' },
                 { group: 'STORAGE',       label: 'Libraries',    icon: 'video_library',    color: '#06b6d4', href: '#mdSet-libraries' },
                 { group: 'STORAGE',       label: 'Recycle bin',  icon: 'delete',           color: '#ec4899', href: '#mdSet-recycle' },
+                { group: 'GLOBAL',        label: 'Protected',    icon: 'block',            color: '#f97316', href: '#mdSet-protection' },
                 { group: 'GLOBAL',        label: 'Maintenance',  icon: 'handyman',         color: '#94a3b8', href: '#mdSet-maintenance' }
             ];
 
@@ -1676,6 +1695,8 @@
                 populateEncoderOptions(c.UseHardwareEncoder, c.PreferredGpuIndex);
                 view.querySelector('#mdFileTypes').value = (c.ReencodeFileTypes || []).join(', ');
                 view.querySelector('#mdTolerance').value = c.QualityTolerancePercent;
+                view.querySelector('#mdMinSavingsPct').value = c.QualityMinSavingsPercent || 0;
+                view.querySelector('#mdMinSavingsMb').value = Math.round((c.QualityMinSavingsBytes || 0) / (1024 * 1024));
                 view.querySelector('#mdAudioLangs').value = (c.AllowedAudioLanguages || []).join(', ');
                 view.querySelector('#mdSubLangs').value = (c.AllowedSubtitleLanguages || []).join(', ');
                 view.querySelector('#mdMoviesTarget').value = c.MoviesTargetPath || '';
@@ -1692,10 +1713,15 @@
                 view.querySelector('#mdRetention').value = c.RecycleBinRetentionDays;
                 view.querySelector('#mdBinWarnThreshold').value = (c.RecycleBinWarnThresholdGb != null ? c.RecycleBinWarnThresholdGb : 10);
                 view.querySelector('#mdBinPauseAt').value = (c.RecycleBinPauseFixesAtGb != null ? c.RecycleBinPauseFixesAtGb : 0);
+                // 0 == disabled — even when the master toggle is on, threshold 0 short-circuits the compute.
+                var lowSpaceOn = c.LibraryDriveLowSpaceWarningEnabled !== false;
+                var lowSpaceThreshold = (c.LibraryDriveWarnThresholdPercent != null ? c.LibraryDriveWarnThresholdPercent : 90);
+                view.querySelector('#mdLowSpaceThreshold').value = lowSpaceOn ? lowSpaceThreshold : 0;
                 view.querySelector('#mdThorough').checked = c.ThoroughPlayabilityCheck;
                 view.querySelector('#mdRepairRemux').checked = c.RepairAttemptRemux !== false;
                 view.querySelector('#mdRepairDropStreams').checked = c.RepairAttemptDropStreams !== false;
                 view.querySelector('#mdRepairContainerCoerce').checked = c.RepairAttemptContainerCoerce !== false;
+                view.querySelector('#mdRepairAudioReencode').checked = c.RepairAttemptAudioReencode !== false;
                 view.querySelector('#mdRepairReencode').checked = c.RepairAttemptReencode !== false;
                 view.querySelector('#mdSubIgnoreRate').checked = c.SubtitleIgnoreRateLimit !== false;
                 view.querySelector('#mdSubHearingImpaired').checked = !!c.SubtitleHearingImpairedMode;
@@ -1839,6 +1865,8 @@
                 c.QualityScanAudiobooks = view.querySelector('#mdQualityScanAudiobooks').checked;
                 c.ReencodeFileTypes = deps.csv(view.querySelector('#mdFileTypes').value);
                 c.QualityTolerancePercent = parseInt(view.querySelector('#mdTolerance').value, 10) || 15;
+                c.QualityMinSavingsPercent = Math.max(0, Math.min(95, parseInt(view.querySelector('#mdMinSavingsPct').value, 10) || 0));
+                c.QualityMinSavingsBytes = Math.max(0, parseInt(view.querySelector('#mdMinSavingsMb').value, 10) || 0) * 1024 * 1024;
                 c.AllowedAudioLanguages = deps.csv(view.querySelector('#mdAudioLangs').value);
                 c.AllowedSubtitleLanguages = deps.csv(view.querySelector('#mdSubLangs').value);
                 c.MoviesTargetPath = view.querySelector('#mdMoviesTarget').value.trim();
@@ -1857,10 +1885,16 @@
                 c.RecycleBinWarnThresholdGb = isNaN(warnGb) ? 10 : Math.max(0, warnGb);
                 var pauseGb = parseInt(view.querySelector('#mdBinPauseAt').value, 10);
                 c.RecycleBinPauseFixesAtGb = isNaN(pauseGb) ? 0 : Math.max(0, pauseGb);
+                var lowSpacePct = parseInt(view.querySelector('#mdLowSpaceThreshold').value, 10);
+                // 0 disables via the compute path (thresholdPercent <= 0 returns null). The enable
+                // flag stays true so re-enabling is one slider drag, not a hidden second toggle.
+                c.LibraryDriveLowSpaceWarningEnabled = true;
+                c.LibraryDriveWarnThresholdPercent = isNaN(lowSpacePct) ? 90 : Math.max(0, Math.min(99, lowSpacePct));
                 c.ThoroughPlayabilityCheck = view.querySelector('#mdThorough').checked;
                 c.RepairAttemptRemux = view.querySelector('#mdRepairRemux').checked;
                 c.RepairAttemptDropStreams = view.querySelector('#mdRepairDropStreams').checked;
                 c.RepairAttemptContainerCoerce = view.querySelector('#mdRepairContainerCoerce').checked;
+                c.RepairAttemptAudioReencode = view.querySelector('#mdRepairAudioReencode').checked;
                 c.RepairAttemptReencode = view.querySelector('#mdRepairReencode').checked;
                 c.SubtitleIgnoreRateLimit = view.querySelector('#mdSubIgnoreRate').checked;
                 c.SubtitleHearingImpairedMode = view.querySelector('#mdSubHearingImpaired').checked;
@@ -1955,9 +1989,13 @@
                         return;
                     }
 
-                    if ((c.RecycleBinPauseFixesAtGb || 0) === 0 && info && info.SuggestedPauseCapGb > 0) {
-                        c.RecycleBinPauseFixesAtGb = info.SuggestedPauseCapGb;
-                    }
+                    // #65: do NOT auto-seed the pause cap on save. The slider's `0` value is
+                    // labelled "(off)" in the UI (see slider format helper) — a user who leaves
+                    // or moves it to 0 is asking for "no cap / unlimited". Silently overwriting
+                    // that with `TotalBytes/GiB - 3` reverted the setting to a nonsense number
+                    // (162 GB on a 165 GB system disk that had nothing to do with the bin path).
+                    // The wizard finish path still seeds a default on first-run where the user
+                    // hasn't seen the slider yet. Per-run safety floor still enforced in FixTask.
 
                     // Do NOT post('Schedule/Apply') here. That endpoint hard-writes the fix trigger back
                     // to the interval default, which resurrects a trigger the user has intentionally
@@ -2030,6 +2068,200 @@
                     });
                     deps.view.querySelector('#mdSettingsForm').addEventListener('submit', saveSettings);
                     installUnsavedGuardOnce();
+                    initProtectionSection();
+            }
+
+            // Roadmap i-110-protected-media: Protected paths section. Fully server-backed; nothing
+            // here touches PluginConfiguration — rules live in the `protection_rules` DB table and
+            // apply immediately after Add / Remove (ProtectionService.Invalidate on the API side).
+            // ponytail: one mask, written to BOTH scanners_mask and fixers_mask on the wire — the
+            // schema keeps the columns separate for future granularity, but the UI never asks users
+            // to distinguish "don't scan" from "don't fix" (they always want both).
+            function initProtectionSection() {
+                var view = deps.view;
+                var addBtn = view.querySelector('#mdProtAdd');
+                if (!addBtn) return;
+                populateProtectionLibraries();
+                populateProtectionBlockGrid();
+                reloadProtectionRows();
+                var kindSel = view.querySelector('#mdProtKind');
+                kindSel.addEventListener('change', refreshProtectionTargetVisibility);
+                refreshProtectionTargetVisibility();
+                addBtn.addEventListener('click', function () {
+                    var kind = kindSel.value;
+                    var target;
+                    if (kind === 'library') {
+                        target = view.querySelector('#mdProtTargetLibrary').value || '';
+                    } else {
+                        target = (view.querySelector('#mdProtTargetFolder').value || '').trim();
+                    }
+                    var mask = readProtectionBlockMask();
+                    if (!target) { Dashboard.alert({ message: 'Target is required.', title: 'Protected paths' }); return; }
+                    if (!mask) { Dashboard.alert({ message: 'Pick at least one issue type to block (or tick All).', title: 'Protected paths' }); return; }
+                    var body = { Kind: kind, Target: target, ScannersMask: mask, FixersMask: mask, Note: (view.querySelector('#mdProtNote').value || '').trim() };
+                    ApiClient.ajax({
+                        type: 'POST',
+                        url: ApiClient.getUrl('MediaDash/Protection'),
+                        contentType: 'application/json',
+                        data: JSON.stringify(body)
+                    }).then(function () {
+                        view.querySelector('#mdProtTargetFolder').value = '';
+                        view.querySelector('#mdProtNote').value = '';
+                        resetProtectionBlockMask();
+                        reloadProtectionRows();
+                    }, function (xhr) {
+                        Dashboard.alert({ message: (xhr && xhr.responseText) || 'Failed to add rule.', title: 'Protected paths' });
+                    });
+                });
+            }
+
+            function refreshProtectionTargetVisibility() {
+                var view = deps.view;
+                var kind = view.querySelector('#mdProtKind').value;
+                view.querySelector('#mdProtTargetFolderWrap').style.display = kind === 'library' ? 'none' : '';
+                view.querySelector('#mdProtTargetLibraryWrap').style.display = kind === 'library' ? '' : 'none';
+            }
+
+            function populateProtectionLibraries() {
+                var view = deps.view;
+                var sel = view.querySelector('#mdProtTargetLibrary');
+                if (!sel) return;
+                ApiClient.getJSON(ApiClient.getUrl('MediaDash/Libraries')).then(function (libs) {
+                    sel.innerHTML = (libs || []).map(function (l) {
+                        return '<option value="' + deps.esc(l.ItemId) + '">' + deps.esc(l.Name) + '</option>';
+                    }).join('') || '<option value="" disabled>No libraries</option>';
+                }, function () {
+                    sel.innerHTML = '<option value="" disabled>Failed to load libraries</option>';
+                });
+            }
+
+            function populateProtectionBlockGrid() {
+                var view = deps.view;
+                var host = view.querySelector('#mdProtBlockGrid');
+                if (!host) return;
+                ApiClient.getJSON(ApiClient.getUrl('MediaDash/Protection/IssueTypes')).then(function (types) {
+                    var chipStyle = 'display:inline-flex;align-items:center;gap:.3em;padding:.25em .6em;border:1px solid rgba(255,255,255,.15);border-radius:999px;font-size:12px;cursor:pointer;user-select:none;';
+                    var allChip = '<label style="' + chipStyle + 'background:rgba(249,115,22,.15);border-color:#f97316;"><input type="checkbox" id="mdProtBlockAll" style="margin:0;" /><span>All</span></label>';
+                    var typeChips = (types || []).map(function (t) {
+                        return '<label class="mdProtBlockType" style="' + chipStyle + '"><input type="checkbox" value="' + deps.esc(t) + '" style="margin:0;" /><span>' + deps.esc(t) + '</span></label>';
+                    }).join('');
+                    host.innerHTML = allChip + typeChips;
+                    var allBox = host.querySelector('#mdProtBlockAll');
+                    var typeBoxes = host.querySelectorAll('.mdProtBlockType input');
+                    allBox.addEventListener('change', function () {
+                        typeBoxes.forEach(function (cb) { cb.checked = false; cb.disabled = allBox.checked; });
+                    });
+                    typeBoxes.forEach(function (cb) {
+                        cb.addEventListener('change', function () {
+                            if (cb.checked) { allBox.checked = false; }
+                        });
+                    });
+                }, function () {
+                    host.innerHTML = '<span style="opacity:.7;color:#fca5a5;">Failed to load issue types.</span>';
+                });
+            }
+
+            function readProtectionBlockMask() {
+                var view = deps.view;
+                var host = view.querySelector('#mdProtBlockGrid');
+                if (!host) return '';
+                if (host.querySelector('#mdProtBlockAll') && host.querySelector('#mdProtBlockAll').checked) return '*';
+                var picks = Array.prototype.slice.call(host.querySelectorAll('.mdProtBlockType input:checked')).map(function (cb) { return cb.value; });
+                return picks.join(',');
+            }
+
+            function resetProtectionBlockMask() {
+                var host = deps.view.querySelector('#mdProtBlockGrid');
+                if (!host) return;
+                var allBox = host.querySelector('#mdProtBlockAll');
+                if (allBox) allBox.checked = false;
+                host.querySelectorAll('.mdProtBlockType input').forEach(function (cb) { cb.checked = false; cb.disabled = false; });
+            }
+
+            function formatProtectionMask(m) {
+                if (!m) return '<span style="opacity:.5;">—</span>';
+                if (m === '*') return '<b>All</b>';
+                return deps.esc(m);
+            }
+
+            function reloadProtectionRows() {
+                var view = deps.view;
+                var host = view.querySelector('#mdProtectionRows');
+                if (!host) return;
+                host.textContent = 'Loading…';
+                // Fetch libraries too so we can render library-kind rules as friendly names.
+                Promise.all([
+                    ApiClient.getJSON(ApiClient.getUrl('MediaDash/Protection')),
+                    ApiClient.getJSON(ApiClient.getUrl('MediaDash/Libraries')).catch(function () { return []; })
+                ]).then(function (results) {
+                    var rules = results[0] || [];
+                    var libNameById = {};
+                    (results[1] || []).forEach(function (l) { libNameById[l.ItemId] = l.Name; });
+                    if (!rules.length) {
+                        host.innerHTML = '<span style="opacity:.7;">No protected paths yet. Add one below.</span>';
+                        return;
+                    }
+                    var esc = deps.esc;
+                    var orphanCount = 0;
+                    var rows = rules.map(function (r) {
+                        // Display: if scanners and fixers agree (the norm from the new UI), show one
+                        // "Blocks" column. Legacy rows with divergent masks fall back to two cells.
+                        var mergedMask = r.ScannersMask === r.FixersMask ? formatProtectionMask(r.ScannersMask) : (formatProtectionMask(r.ScannersMask) + ' <span style="opacity:.5;">scan</span> · ' + formatProtectionMask(r.FixersMask) + ' <span style="opacity:.5;">fix</span>');
+                        var displayTarget;
+                        var orphanBadge = '';
+                        var rowClass = '';
+                        if (r.Kind === 'library') {
+                            var known = libNameById[r.Target];
+                            if (known) {
+                                displayTarget = esc(known);
+                            } else {
+                                // Library was removed / renamed / re-added under a new ItemId. Rule
+                                // will silently match nothing. Flag it loudly so the user removes
+                                // it or re-adds the library.
+                                orphanCount++;
+                                rowClass = ' class="mdProtOrphanRow"';
+                                displayTarget = '<span style="opacity:.7;font-family:\'IBM Plex Mono\',monospace;">' + esc(r.Target) + '</span>';
+                                orphanBadge = ' <span class="mdProtOrphanBadge" title="This library is no longer in Jellyfin (removed, renamed, or re-added with a new id). The rule blocks nothing. Remove it or add a fresh library rule."><span class="material-icons">error</span>Missing library</span>';
+                            }
+                        } else {
+                            displayTarget = esc(r.Target);
+                        }
+                        return '<tr' + rowClass + '>' +
+                            '<td>' + esc(r.Kind) + '</td>' +
+                            '<td style="word-break:break-all;">' + displayTarget + orphanBadge + '</td>' +
+                            '<td>' + mergedMask + '</td>' +
+                            '<td style="opacity:.8;">' + esc(r.Note || '') + '</td>' +
+                            '<td><button is="emby-button" type="button" class="mdProtRemove" data-id="' + r.Id + '" title="Remove this protected-path rule. Applies immediately."><span class="material-icons">delete</span><span>Remove</span></button></td>' +
+                            '</tr>';
+                    }).join('');
+                    // Global-banner treatment matches the plugin's dry-run / recycle-bin-full pattern
+                    // (see #mdDryRunNote in configPage.html): big amber icon, bold title, secondary
+                    // hint, styled container. Keeps the visual language consistent so users read it
+                    // as the same class of "you should look at this" signal.
+                    var banner = orphanCount > 0
+                        ? '<div class="mdProtOrphanBanner">' +
+                            '<span class="material-icons mdProtOrphanBannerIcon">warning</span>' +
+                            '<div class="mdProtOrphanBannerBody">' +
+                                '<div class="mdProtOrphanBannerTitle">' + orphanCount + ' protected-path rule' + (orphanCount === 1 ? '' : 's') + ' point at a library Jellyfin no longer has</div>' +
+                                '<div class="fieldDescription">These rules block nothing. Remove them below, or add a new rule against a current library. Folder-kind rules are unaffected.</div>' +
+                            '</div>' +
+                          '</div>'
+                        : '';
+                    host.innerHTML = banner + '<table style="width:100%;border-collapse:collapse;font-size:13px;">' +
+                        '<thead><tr style="text-align:left;opacity:.7;"><th>Kind</th><th>Target</th><th>Blocks</th><th>Note</th><th></th></tr></thead>' +
+                        '<tbody>' + rows + '</tbody></table>';
+                    host.querySelectorAll('.mdProtRemove').forEach(function (btn) {
+                        btn.addEventListener('click', function () {
+                            var id = btn.getAttribute('data-id');
+                            ApiClient.ajax({ type: 'DELETE', url: ApiClient.getUrl('MediaDash/Protection/' + id) })
+                                .then(reloadProtectionRows, function (xhr) {
+                                    Dashboard.alert({ message: (xhr && xhr.responseText) || 'Failed to remove rule.', title: 'Protected paths' });
+                                });
+                        });
+                    });
+                }, function () {
+                    host.innerHTML = '<span style="opacity:.7;color:#fca5a5;">Failed to load protected paths.</span>';
+                });
             }
         return {
             activateSettings: activateSettings,

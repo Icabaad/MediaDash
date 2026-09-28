@@ -706,3 +706,59 @@
     #MediaDashConfigPage .mdWizStep h3 { font-size: 20px; }
     #MediaDashConfigPage .mdWizStep h3 .material-icons { font-size: 20px; width: 40px; height: 40px; }
 }
+
+/* Protected paths (roadmap i-110-protected-media). Table Remove button follows the plugin's
+   destructive-token pattern (var(--md-dest-*)), sized compact to fit table rows. Compact-size
+   variant of the standard .mdActionBtn so it matches Add-rule without dwarfing it. */
+#MediaDashConfigPage .mdProtRemove {
+    display: inline-flex; align-items: center; gap: 6px;
+    height: 32px; padding: 0 12px !important;
+    border-radius: 999px !important;
+    font: 600 12.5px Figtree, sans-serif !important;
+    background: var(--md-dest-fill) !important;
+    border: 1px solid var(--md-dest-border) !important;
+    color: var(--md-dest-ink) !important;
+    cursor: pointer;
+    transition: background .14s ease;
+}
+#MediaDashConfigPage .mdProtRemove:hover { background: var(--md-dest-hover) !important; }
+#MediaDashConfigPage .mdProtRemove .material-icons { font-size: 16px !important; }
+
+/* Protected paths table itself — match the plugin's meta text tone. */
+#MediaDashConfigPage #mdProtectionRows table { color: var(--md-ink); }
+#MediaDashConfigPage #mdProtectionRows th { color: var(--md-meta); font-weight: 600; padding: 4px 8px 8px; border-bottom: 1px solid var(--md-border-btn); }
+#MediaDashConfigPage #mdProtectionRows td { padding: 8px; border-bottom: 1px solid rgba(255,255,255,.06); vertical-align: middle; }
+
+/* Orphaned library-rule warning surface. Row keeps its regular layout but signals loudly:
+   subtle dest-fill wash + a pill badge next to the target. Banner at the top of the table
+   summarises the count so a user with many rules sees the problem without scrolling. */
+#MediaDashConfigPage #mdProtectionRows .mdProtOrphanRow td {
+    background: color-mix(in srgb, var(--md-dest-fill) 45%, transparent);
+}
+#MediaDashConfigPage .mdProtOrphanBadge {
+    display: inline-flex; align-items: center; gap: 4px;
+    margin-left: 8px; padding: 2px 8px;
+    border-radius: 999px;
+    font: 600 11.5px Figtree, sans-serif;
+    background: var(--md-dest-fill);
+    border: 1px solid var(--md-dest-border);
+    color: var(--md-dest-ink);
+}
+#MediaDashConfigPage .mdProtOrphanBadge .material-icons { font-size: 14px; }
+/* Orphaned-library global banner. Matches the visual weight of #mdDryRunNote /
+   #mdRecycleWarn: 12px radius, 2px amber border, tinted amber fill, big icon on the
+   left, bold title + secondary hint on the right. Same signal, same language. */
+#MediaDashConfigPage .mdProtOrphanBanner {
+    display: flex; gap: .8em; align-items: center; flex-wrap: wrap;
+    margin-bottom: 1em; padding: .8em 1.2em;
+    border-radius: 12px;
+    background: rgba(245, 158, 11, .16);
+    border: 2px solid #f59e0b;
+}
+#MediaDashConfigPage .mdProtOrphanBannerIcon {
+    color: #f59e0b; font-size: 1.8em;
+}
+#MediaDashConfigPage .mdProtOrphanBannerBody { flex: 1; min-width: 16em; }
+#MediaDashConfigPage .mdProtOrphanBannerTitle {
+    font-weight: 700; color: #f59e0b;
+}

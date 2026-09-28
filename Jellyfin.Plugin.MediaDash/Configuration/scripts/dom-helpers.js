@@ -239,6 +239,10 @@
             CorruptArtwork: {
                 title: 'Corrupt artwork', hint: 'Poster / backdrop / thumb files inside Jellyfin\'s metadata folder that are zero-byte, truncated, or fail to decode.', color: '#e11d48', icon: 'broken_image',
                 action: 'Delete corrupt artwork', actionHint: 'Removes the broken image; Jellyfin\'s next library scan re-fetches from providers.', approveAll: 'Delete all {0} corrupt artwork files shown'
+            },
+            FormatCompatibility: {
+                title: 'Unsupported format', hint: 'Media files in formats that cannot be converted by your installed converter plugins.', color: '#7c3aed', icon: 'inventory_2',
+                action: 'Review', actionHint: 'Detect-only for now — MediaDash surfaces files that need format conversion, which will be handled in a future phase.'
             }
         },
         // Sorted alphabetically by display name so both the <datalist> picker and the chip

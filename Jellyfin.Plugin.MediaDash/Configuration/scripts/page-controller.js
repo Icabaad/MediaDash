@@ -1107,6 +1107,24 @@
                         }, 200);
                     });
 
+                    view.querySelector('#mdStaleQueueClear').addEventListener('click', function () {
+                        // Confirm because "clear queued items" is a queue-state change users will
+                        // notice — even though Dismissed is recoverable via Revert.
+                        var proceed = window.confirm(
+                            'Dismiss every queued issue whose library is no longer enabled?\n\n' +
+                            'These are the items the last fix run skipped. Dismissed rows still show on the Issues tab under "Dismissed" and can be brought back with Revert.'
+                        );
+                        if (!proceed) return;
+                        view.querySelector('#mdStaleQueueWarn').style.display = 'none';
+                        postJson('Issues/DismissStaleQueued').then(function (count) {
+                            var n = (typeof count === 'number') ? count : 0;
+                            if (window.Dashboard && Dashboard.alert) {
+                                Dashboard.alert({ title: 'Stale queue cleared', message: 'Dismissed ' + n + ' queued item' + (n === 1 ? '' : 's') + '. Revert them from the Issues tab if needed.' });
+                            }
+                            lifetime.timeout(refresh, 500);
+                        });
+                    });
+
                     // Delegated so future banners with class="mdDismissBanner" don't need separate wiring.
                     view.querySelectorAll('.mdDismissBanner').forEach(function (btn) {
                         btn.addEventListener('click', function () {

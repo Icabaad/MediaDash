@@ -151,6 +151,23 @@
     padding: 8px 12px !important;
 }
 #MediaDashConfigPage #mdWizSkip:hover { color: var(--md-ink) !important; }
+/* Back mirrors Next as a pill, but neutral (secondary) so Continue stays the primary action.
+   Same 44px min-height + pill radius as .mdWizNext; transparent fill + subtle border keeps
+   it recessive against the panel in both themes. */
+#MediaDashConfigPage #mdWizBack {
+    background: transparent !important;
+    color: var(--md-body) !important;
+    border: 1px solid var(--md-border-btn) !important;
+    border-radius: 999px !important;
+    padding: 10px 20px !important;
+    font-weight: 600 !important;
+    font-size: 100% !important;
+    min-height: 44px;
+}
+#MediaDashConfigPage #mdWizBack:hover {
+    background: var(--md-inner-hover) !important;
+    color: var(--md-ink) !important;
+}
 #MediaDashConfigPage .mdWizNext {
     background: var(--md-primary) !important;
     color: var(--md-primary-ink) !important;

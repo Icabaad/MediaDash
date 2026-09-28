@@ -218,7 +218,13 @@
                                          "action":  "Delete corrupt artwork",
                                          "actionHint":  "Removes the broken image; Jellyfin\u0027s next library scan re-fetches from providers.",
                                          "approveAll":  "Delete all {0} corrupt artwork files shown"
-                                     }
+                                     },
+                  "FormatCompatibility":  {
+                                              "title":  "Unsupported format",
+                                              "hint":  "Media files in formats that cannot be converted by your installed converter plugins.",
+                                              "action":  "Review",
+                                              "actionHint":  "Detect-only for now — MediaDash surfaces files that need format conversion, which will be handled in a future phase."
+                                          }
               },
     "wizSteps":  [
                      "Step 1 of 17 — Welcome",

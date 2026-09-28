@@ -25,6 +25,56 @@
             }
 
 
+            // Renders the Playability repair-ladder tally card. Fed by status.Repair (populated by
+            // MediaDashDb.GetRepairSummary on the server). Card hides when no repair has ever run
+            // (CountLifetime === 0) so a user who hasn't hit a broken file doesn't see an empty
+            // panel. Bytes-rescued totals only cover repair rows written from schema v9 onwards;
+            // pre-v9 rows carry 0 and the footer discloses this rather than silently understating.
+            var REPAIR_RUNG_LABELS = {
+                'remux': 'Quick remux',
+                'drop': 'Dropped broken streams',
+                'coerce': 'Container coerced to MKV',
+                'audio-reencode': 'Audio re-encoded',
+                'reencode': 'Video re-encoded',
+                'other': 'Other'
+            };
+            function renderRepairSummary(s) {
+                var host = deps.view.querySelector('#mdRepairSummary');
+                if (!host) return;
+                var r = s && s.Repair;
+                if (!r || !r.CountLifetime) { host.innerHTML = ''; return; }
+                var rungs = Array.isArray(r.Rungs30d) ? r.Rungs30d : [];
+                var chipStyle = 'display:inline-flex;align-items:baseline;gap:.5em;padding:.35em .7em;margin:.15em;border-radius:8px;background:rgba(6,182,212,.12);border:1px solid rgba(6,182,212,.3);font-size:90%;';
+                var chips = rungs.map(function (row) {
+                    var label = REPAIR_RUNG_LABELS[row.Rung] || row.Rung;
+                    var bytesPart = row.SavedBytes > 0 ? ' · ' + deps.bytes(row.SavedBytes) : '';
+                    return '<span style="' + chipStyle + '">'
+                        + '<span>' + deps.esc(label) + '</span>'
+                        + '<span style="font-weight:600;color:#67e8f9;">' + row.Count + '</span>'
+                        + '<span style="opacity:.75;">' + deps.esc(bytesPart) + '</span>'
+                        + '</span>';
+                }).join('');
+                var bytes30d = r.SavedBytes30d > 0
+                    ? '<div style="margin-top:.3em;opacity:.85;">≈ ' + deps.bytes(r.SavedBytes30d) + ' rescued from deletion</div>'
+                    : '';
+                var lifetimeBytes = r.SavedBytesLifetime > 0 ? ' · ' + deps.bytes(r.SavedBytesLifetime) + ' rescued' : '';
+                var lifetime = '<div style="margin-top:.8em;opacity:.7;font-size:90%;">All time: ' + r.CountLifetime + ' repaired' + lifetimeBytes + '</div>';
+                var footer = '<div style="margin-top:.4em;opacity:.55;font-size:80%;">Byte totals count from v1.0.8.0 onwards; earlier repair rows are counted but not sized.</div>';
+                var body = '<div style="padding:.5em 0 .5em .2em;">'
+                    + '<div style="display:flex;align-items:baseline;gap:.6em;">'
+                    + '<span style="font:600 2.2em \'IBM Plex Mono\', monospace;color:#67e8f9;">' + r.Count30d + '</span>'
+                    + '<span>broken files repaired in the last 30 days</span>'
+                    + '</div>'
+                    + bytes30d
+                    + (chips ? '<div style="margin-top:.7em;">' + chips + '</div>' : '')
+                    + lifetime
+                    + footer
+                    + '</div>';
+                var head = '<div class="mdSecHead"><span class="material-icons">healing</span><span>Broken files repaired</span></div>';
+                host.innerHTML = '<div class="mdCard">' + head + body + '</div>';
+            }
+
+
             // libCardHtml + donutSvg moved to scripts/library-breakdown.js (06-FOLLOWUP-2a).
 
 
@@ -43,6 +93,8 @@
             var fixSucceededSincePageLoad = 0;
 
             var fixFailedSincePageLoad = 0;
+
+            var fixSkippedSincePageLoad = 0;
 
             var fixAlertShown = false;
 
@@ -199,6 +251,49 @@
             var mdSmartMonitoringEnabled = true;
 
             var mdDrivesLast = null;
+
+            // Client-side 7-day dismissal for low-space warnings, per drive root. Deliberately not
+            // wired through the server: this is advisory only, and the condition self-clears the
+            // moment the user frees space or moves the library. Dismissal survives browser restarts.
+            var LOW_SPACE_DISMISS_MS = 7 * 24 * 60 * 60 * 1000;
+            function lowSpaceDismissedKey(root) { return 'mdLowSpaceDismissedUntil:' + root; }
+            function lowSpaceIsDismissed(root) {
+                try {
+                    var raw = localStorage.getItem(lowSpaceDismissedKey(root));
+                    return !!raw && parseInt(raw, 10) > Date.now();
+                } catch (e) { return false; }
+            }
+            function lowSpaceDismiss(root) {
+                try { localStorage.setItem(lowSpaceDismissedKey(root), String(Date.now() + LOW_SPACE_DISMISS_MS)); } catch (e) {}
+            }
+
+            function renderLowSpaceWarnings(drives) {
+                var host = deps.view.querySelector('#mdLowSpaceWarnings');
+                if (!host) return;
+                var warned = drives.filter(function (d) { return d.LowSpaceWarning && !lowSpaceIsDismissed(d.Root); });
+                if (warned.length === 0) { host.innerHTML = ''; return; }
+                host.innerHTML = warned.map(function (d) {
+                    var role = d.IsLibraryDrive ? 'Library drive' : (d.IsPluginDataDrive ? 'Plugin data drive' : (d.IsRecycleBinDrive ? 'Recycle bin drive' : 'Drive'));
+                    return '<div class="mdLowSpaceBanner" data-root="' + deps.esc(d.Root) + '" style="margin-bottom:1em;padding:.8em 1.2em;border-radius:12px;background:rgba(245,158,11,.16);border:2px solid #f59e0b;">' +
+                        '<div style="display:flex;gap:.8em;align-items:center;flex-wrap:wrap;">' +
+                        '<span class="material-icons" style="color:#f59e0b;font-size:1.5em;">warning</span>' +
+                        '<div style="flex:1;min-width:20em;">' +
+                        '<div style="font-weight:600;color:#f59e0b;">' + deps.esc(role) + ' ' + deps.esc(d.Root) + '</div>' +
+                        '<div class="fieldDescription" style="margin-top:.2em;">' + deps.esc(d.LowSpaceWarning) + '</div>' +
+                        '</div>' +
+                        '<button is="emby-button" type="button" class="mdLowSpaceDismiss" style="background:transparent;border:0;color:#f59e0b;padding:.3em;min-width:0;" title="Hide this warning for 7 days on this drive."><span class="material-icons" style="font-size:1.2em;">close</span></button>' +
+                        '</div>' +
+                        '</div>';
+                }).join('');
+                host.querySelectorAll('.mdLowSpaceDismiss').forEach(function (btn) {
+                    btn.addEventListener('click', function () {
+                        var banner = btn.closest('.mdLowSpaceBanner');
+                        if (!banner) return;
+                        lowSpaceDismiss(banner.getAttribute('data-root'));
+                        banner.style.display = 'none';
+                    });
+                });
+            }
 
 
             function renderSystemStats(sys) {
@@ -598,14 +693,18 @@
                     fixRunsSincePageLoad++;
                     fixSucceededSincePageLoad += (curr.Succeeded || 0);
                     fixFailedSincePageLoad += (curr.Failed || 0);
+                    fixSkippedSincePageLoad += (curr.Skipped || 0);
                     if (!fixAlertShown && fixFailedSincePageLoad > 0) {
                         fixAlertShown = true;
                         var reason = curr.TopFailureReason || 'unknown';
                         var runsPhrase = fixRunsSincePageLoad === 1
                             ? 'Fix run finished: '
                             : 'Fix runs since you opened this page (' + fixRunsSincePageLoad + '): ';
-                        var msg = runsPhrase + fixSucceededSincePageLoad + ' succeeded, ' + fixFailedSincePageLoad + ' failed.\n\n'
-                            + 'Most common reason in the latest run: ' + reason + '.\n\n'
+                        var skippedPhrase = fixSkippedSincePageLoad > 0
+                            ? ', ' + fixSkippedSincePageLoad + ' skipped (nothing to do or safe refusal)'
+                            : '';
+                        var msg = runsPhrase + fixSucceededSincePageLoad + ' succeeded, ' + fixFailedSincePageLoad + ' failed' + skippedPhrase + '.\n\n'
+                            + 'Most common failure reason in the latest run: ' + reason + '.\n\n'
                             + 'See the Errors tab for the specific files. Reload the page to be alerted about future runs.';
                         if (reason === 'Permission denied') {
                             msg += '\n\nFix on the host: give the user Jellyfin runs as (typically "jellyfin" on Linux) read+write on your library folders. Example: sudo chown -R jellyfin:jellyfin /mnt/media && sudo find /mnt/media -type d -exec chmod g+rwx {} +';
@@ -616,6 +715,15 @@
                             Dashboard.alert({ title: 'Fix run finished with failures', message: msg });
                         } else {
                             alert(msg);
+                        }
+                    } else if (!fixAlertShown && fixSkippedSincePageLoad > 0 && fixFailedSincePageLoad === 0 && fixSucceededSincePageLoad === 0) {
+                        // Every attempted item was a safe skip (e.g. all destination collisions, all
+                        // already-healthy). No errors to alert about, but "0 fixed" needs to explain
+                        // itself so the user doesn't think the plugin is broken.
+                        fixAlertShown = true;
+                        var info = 'Fix run finished — 0 succeeded, ' + fixSkippedSincePageLoad + ' skipped (nothing needed doing, or MediaDash safely refused to overwrite / touch DRM / touch outside your library). Open each row on the Issues tab for the specific reason.';
+                        if (window.Dashboard && Dashboard.alert) {
+                            Dashboard.alert({ title: 'Fix run finished — no changes', message: info });
                         }
                     }
                 }
@@ -658,7 +766,7 @@
                     var scanItemsPart = scannersTotal > 0
                         ? ' · ' + scannersDone + ' / ' + scannersTotal + ' scanners done'
                         : '';
-                    state.textContent = deps.fmt(deps.STR.scanRunning, scanItemsPct) + scanItemsPart;
+                    state.textContent = deps.STR.scanRunning + scanItemsPart;
                     setProgress(true, scanItemsPct);
                     deps.schedulePoll();
                 } else if (s.IsFixing) {
@@ -684,7 +792,12 @@
                     var itemsPart = progressStart.fixPendingBase > 0
                         ? ' · ' + remaining + ' / ' + progressStart.fixPendingBase + ' items left'
                         : (remaining > 0 ? ' · ' + remaining + ' item' + (remaining === 1 ? '' : 's') + ' left' : '');
-                    state.textContent = deps.fmt(deps.STR.fixRunning, itemsPct) + itemsPart;
+                    // Per-file % (fraction 0..1) from ffmpeg -progress. Only shown when the current
+                    // fixer is actually reporting it; cheap fixers (delete, rename, tag write) omit it.
+                    var opPart = (typeof s.CurrentOperationProgress === 'number')
+                        ? ' · this file ' + Math.round(s.CurrentOperationProgress * 100) + '%'
+                        : '';
+                    state.textContent = deps.STR.fixRunning + itemsPart + opPart;
                     setProgress(true, itemsPct);
                     deps.schedulePoll();
                 } else if (busy.scan) {
@@ -757,6 +870,25 @@
                         'Move the recycle bin onto the same volume as your media (e.g. "/mnt/media/.mediadash-recycle") to make recycles instant.';
                 } else {
                     recycleWarn.style.display = 'none';
+                }
+
+                renderLowSpaceWarnings(s.Drives || []);
+
+                // Stale-queue banner: the last completed fix run recorded queued items outside
+                // any enabled library. Session-dismissible via the standard dismissBanner path
+                // (data-banner="mdStaleQueueWarn"). Refreshes whenever the LastFixRun timestamp
+                // changes, so a re-run that still has skipped items resurfaces the banner.
+                var staleWarn = deps.view.querySelector('#mdStaleQueueWarn');
+                if (staleWarn) {
+                    var skipCount = (curr && curr.SkippedLibraryDisabled) || 0;
+                    if (skipCount > 0 && !deps.bannerDismissed('mdStaleQueueWarn')) {
+                        deps.view.querySelector('#mdStaleQueueWarnText').textContent =
+                            skipCount + ' queued issue' + (skipCount === 1 ? '' : 's') +
+                            ' were skipped because their library is no longer enabled in Settings → Libraries. Re-enable the library to have them run, or clear them here (recoverable from the Issues tab via Revert).';
+                        staleWarn.style.display = '';
+                    } else {
+                        staleWarn.style.display = 'none';
+                    }
                 }
 
                 var redlBanner = deps.view.querySelector('#mdRedownloadWarn');
@@ -941,6 +1073,8 @@
                 });
 
                 deps.view.querySelector('#mdEmpty').textContent = counts.length === 0 && !s.IsScanning ? deps.STR.noIssues : '';
+
+                renderRepairSummary(s);
             }
 
 

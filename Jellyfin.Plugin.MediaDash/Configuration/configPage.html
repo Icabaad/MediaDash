@@ -596,6 +596,18 @@
                             <button is="emby-button" type="button" class="mdDismissBanner" data-banner="mdRecycleWarn" data-persistent="1" style="background:transparent;border:0;color:#f59e0b;padding:.3em;min-width:0;" title="Hide this notice permanently. It stays dismissed across sessions — clear your browser's local storage for this site to bring it back."><span class="material-icons" style="font-size:1.2em;">close</span></button>
                         </div>
                     </div>
+                    <div id="mdLowSpaceWarnings"></div>
+                    <div id="mdStaleQueueWarn" style="display:none;margin-bottom:1em;padding:.8em 1.2em;border-radius:12px;background:rgba(59,130,246,.12);border:2px solid #3b82f6;">
+                        <div style="display:flex;gap:.8em;align-items:center;flex-wrap:wrap;">
+                            <span class="material-icons" style="color:#3b82f6;font-size:1.5em;">info</span>
+                            <div style="flex:1;min-width:20em;">
+                                <div style="font-weight:600;color:#3b82f6;">The last fix run skipped queued items outside your enabled libraries</div>
+                                <div class="fieldDescription" id="mdStaleQueueWarnText" style="margin-top:.2em;"></div>
+                            </div>
+                            <button is="emby-button" type="button" id="mdStaleQueueClear" class="raised" style="font-size:80%;" title="Dismisses every queued issue whose path isn't inside a currently-enabled MediaDash library. Recoverable from the Issues tab via Revert."><span>Clear stale queued items</span></button>
+                            <button is="emby-button" type="button" class="mdDismissBanner" data-banner="mdStaleQueueWarn" style="background:transparent;border:0;color:#3b82f6;padding:.3em;min-width:0;" title="Hide until the next fix run reports the same condition."><span class="material-icons" style="font-size:1.2em;">close</span></button>
+                        </div>
+                    </div>
                     <div id="mdSystem"></div>
                     <div id="mdSysCtxMenu" class="mdCtxMenu"></div>
                     <div id="mdDrives"></div>
@@ -603,6 +615,7 @@
                     <div id="mdHero"></div>
                     <div id="mdCards"></div>
                     <div id="mdLibraryBreakdown"></div>
+                    <div id="mdRepairSummary"></div>
                     <div id="mdEmpty" class="fieldDescription" style="margin-top:1em;"></div>
                 </div>
 
@@ -618,7 +631,7 @@
                         <input id="mdTypeFilter" type="hidden" value="" />
                         <div id="mdIssueLangRow" style="display:none;align-items:center;gap:.5em;flex-wrap:wrap;margin-top:.4em;">
                             <span class="fieldDescription" id="mdIssueLangLabel">Filter by audio language:</span>
-                            <select id="mdIssueLangFilter" is="emby-select" style="max-width:14em;"></select>
+                            <select id="mdIssueLangFilter" is="emby-select" class="emby-select-withcolor emby-select" style="max-width:14em;"></select>
                         </div>
                         <div class="mdIssueFilterActionRow">
                             <div class="mdIssueSearchWrap">
@@ -856,6 +869,14 @@
                                 </div>
                                 <div class="fieldDescription" style="margin-top:6px;">Leave both on "Any time" to run any time (default). Pick both to restrict scheduled runs to a window — e.g. 22:00–05:00 for overnight only. A run whose window closes mid-fix is cancelled and requeued for the next window. "Run fixes now" ignores the window.</div>
                             </div>
+                            <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--md-border);">
+                                <div style="font-weight:600;margin-bottom:8px;">Low disk space <span style="font-weight:400;color:var(--md-ink-muted);font-size:.9em;">— advisory banner on Overview, never blocks fixes</span></div>
+                                <div class="inputContainer" style="margin:0;max-width:32em;">
+                                    <label class="inputLabel" for="mdLowSpaceThreshold">Warn when library or plugin-data drive exceeds<span class="mdSliderVal" id="mdLowSpaceThresholdVal"></span></label>
+                                    <input id="mdLowSpaceThreshold" type="range" min="0" max="99" step="1" />
+                                    <div class="fieldDescription">Fires when any monitored drive crosses this % used. ZFS and Btrfs auto-tighten by 5 % because their allocators fragment sooner. 0 disables. The Recycle bin's "Pause fixes at" cap still owns the hard stop.</div>
+                                </div>
+                            </div>
                             <div class="fieldDescription" style="margin-top:14px;">Scan and fix schedules can also be changed in Dashboard → Scheduled Tasks ("Scan libraries for issues" and "Apply approved fixes").</div>
                         </section>
 
@@ -905,6 +926,47 @@
                                 <div id="mdBinAccessResults" class="fieldDescription" style="flex:1;min-width:16em;"></div>
                             </div>
                             <div id="mdBinDiskWarn" style="display:none;margin-top:1em;padding:.75em 1em;background:rgba(220,38,38,.08);border:1px solid #dc2626;border-radius:6px;color:#fecaca;font-size:13px;line-height:1.5;"></div>
+                        </section>
+
+                        <section id="mdSet-protection" class="mdSetCard mdSetCard--safety mdSetCard--collapsible mdSetCard--full">
+                            <h2 class="mdSetHead">
+                                <span class="mdSetIcon"><span class="material-icons">block</span></span>
+                                <span class="mdSetHeadText">
+                                    <span class="mdSetTitle">Protected paths</span>
+                                    <span class="mdSetSubtitle">Folders and libraries that MediaDash must not touch. Applied at scan time (nothing flagged) and at fix time (nothing modified).</span>
+                                </span>
+                                <span class="material-icons mdSetHeadChevron">expand_more</span>
+                            </h2>
+                            <div id="mdProtectionRows" class="fieldDescription" style="margin-bottom:1em;">Loading…</div>
+                            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(16em,1fr));gap:12px 16px;align-items:end;">
+                                <div class="inputContainer" style="margin:0;">
+                                    <label class="inputLabel inputLabelUnfocused" for="mdProtKind">Kind</label>
+                                    <select id="mdProtKind" is="emby-select" class="emby-select-withcolor emby-select">
+                                        <option value="folder">Folder</option>
+                                        <option value="library">Library</option>
+                                    </select>
+                                </div>
+                                <div class="inputContainer" id="mdProtTargetFolderWrap" style="margin:0;grid-column:span 2;">
+                                    <label class="inputLabel inputLabelUnfocused" for="mdProtTargetFolder">Folder path</label>
+                                    <input id="mdProtTargetFolder" type="text" is="emby-input" placeholder="Absolute folder path" />
+                                </div>
+                                <div class="inputContainer" id="mdProtTargetLibraryWrap" style="margin:0;grid-column:span 2;display:none;">
+                                    <label class="inputLabel inputLabelUnfocused" for="mdProtTargetLibrary">Library</label>
+                                    <select id="mdProtTargetLibrary" is="emby-select" class="emby-select-withcolor emby-select"></select>
+                                </div>
+                                <div class="inputContainer" style="margin:0;grid-column:1 / -1;">
+                                    <label class="inputLabel inputLabelUnfocused">Block</label>
+                                    <div id="mdProtBlockGrid" style="display:flex;flex-wrap:wrap;gap:.4em .8em;padding:.5em 0;">Loading…</div>
+                                </div>
+                                <div class="inputContainer" style="margin:0;grid-column:span 2;">
+                                    <label class="inputLabel inputLabelUnfocused" for="mdProtNote">Note (optional)</label>
+                                    <input id="mdProtNote" type="text" is="emby-input" placeholder="Why this exists" />
+                                </div>
+                                <div>
+                                    <button is="emby-button" type="button" id="mdProtAdd" class="raised mdActionBtn" title="Save this protected-path rule. Applies immediately."><span class="material-icons">add</span><span>Add rule</span></button>
+                                </div>
+                            </div>
+                            <div class="fieldDescription" style="margin-top:.6em;">Tick <b>All</b> to block every scanner and fixer for this location, or pick individual issue types. Selection blocks both detection and repair. Applies immediately after Add.</div>
                         </section>
 
                         <section id="mdSet-maintenance" class="mdSetCard mdSetCard--maintenance mdSetCard--collapsible mdSetCard--full">

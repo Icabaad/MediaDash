@@ -47,6 +47,7 @@ public class PluginConfiguration : BasePluginConfiguration
         RepairAttemptRemux = true;
         RepairAttemptDropStreams = true;
         RepairAttemptContainerCoerce = true;
+        RepairAttemptAudioReencode = true;
         RepairAttemptReencode = true;
         RecycleBinPath = string.Empty;
         RecycleBinRetentionDays = 30;
@@ -133,6 +134,10 @@ public class PluginConfiguration : BasePluginConfiguration
         DuplicateExactHashEnabled = true;
         DuplicateTitleJaccardVeto = 0.40;
         DuplicateRuntimeVetoPct = 15;
+        QualityMinSavingsPercent = 0;
+        QualityMinSavingsBytes = 0;
+        LibraryDriveLowSpaceWarningEnabled = true;
+        LibraryDriveWarnThresholdPercent = 90;
     }
 
     /// <summary>
@@ -184,6 +189,9 @@ public class PluginConfiguration : BasePluginConfiguration
     /// <summary>Gets or sets a value indicating whether rung 3 (container coercion to MKV) is attempted before deletion. Container change causes Jellyfin to re-index the file and reset watch history.</summary>
     public bool RepairAttemptContainerCoerce { get; set; }
 
+    /// <summary>Gets or sets a value indicating whether rung 4a (audio-only re-encode) is attempted before the full video re-encode. Fires when the file's single audio track is broken and rung 2 refused because dropping it would leave zero audio streams. Cheap — minutes instead of hours because video is copied.</summary>
+    public bool RepairAttemptAudioReencode { get; set; }
+
     /// <summary>Gets or sets a value indicating whether rung 4 (full video re-encode) is attempted before deletion. Can take hours per file; runs on the background scheduled scan.</summary>
     public bool RepairAttemptReencode { get; set; }
 
@@ -229,6 +237,22 @@ public class PluginConfiguration : BasePluginConfiguration
     /// Dry-run runs ignore this because no bytes actually reach the bin.
     /// </summary>
     public int RecycleBinPauseFixesAtGb { get; set; }
+
+    /// <summary>
+    /// Gets or sets a value indicating whether Overview surfaces a dismissible banner when a
+    /// library drive (or the plugin-data drive) crosses the low-space warning threshold.
+    /// Advisory only — this never blocks fixes. The recycle-bin cap
+    /// (<see cref="RecycleBinPauseFixesAtGb"/>) owns the hard stop.
+    /// </summary>
+    public bool LibraryDriveLowSpaceWarningEnabled { get; set; }
+
+    /// <summary>
+    /// Gets or sets the % used above which a drive triggers the low-space warning banner.
+    /// Default 90. Copy-on-write filesystems (zfs, btrfs) auto-tighten this by 5 % because
+    /// their allocators degrade earlier as free extents fragment. Set to 0 to disable per-drive
+    /// warnings entirely — same effect as <see cref="LibraryDriveLowSpaceWarningEnabled"/> = false.
+    /// </summary>
+    public int LibraryDriveWarnThresholdPercent { get; set; }
 
     /// <summary>
     /// Gets or sets a value indicating whether the plugin has already seeded the fix task's
@@ -299,6 +323,20 @@ public class PluginConfiguration : BasePluginConfiguration
     /// Gets or sets the tolerance percentage above the ceilings before a file is flagged, to avoid churn on borderline files.
     /// </summary>
     public int QualityTolerancePercent { get; set; }
+
+    /// <summary>
+    /// Gets or sets the minimum percentage saved (0-95) a Quality re-encode must achieve to be kept.
+    /// 0 = disabled (existing larger-than-original rejection still applies). Applies to Quality fixes only —
+    /// repair and compatibility conversions use their own acceptance rules.
+    /// </summary>
+    public int QualityMinSavingsPercent { get; set; }
+
+    /// <summary>
+    /// Gets or sets the minimum bytes saved a Quality re-encode must achieve to be kept.
+    /// 0 = disabled. Applies to Quality fixes only. When both this and <see cref="QualityMinSavingsPercent"/>
+    /// are set, both must be satisfied.
+    /// </summary>
+    public long QualityMinSavingsBytes { get; set; }
 
     /// <summary>
     /// Gets or sets the ISO 639-2 codes of audio languages to keep. Empty means the audio language scanner is not configured and stays off.

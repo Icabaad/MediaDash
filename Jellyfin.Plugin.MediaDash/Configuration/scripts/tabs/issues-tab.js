@@ -238,7 +238,11 @@
                     actionButtons = verifyBtn +
                         '<button is="emby-button" type="button" class="raised mdUndoAction" data-id="' + i.Id + '" style="font-size:80%;" title="' + esc(strings.undoActionHint) + '"><span class="material-icons" style="font-size:1em;vertical-align:-2px;margin-right:.25em;">undo</span><span>' + esc(strings.undoAction) + '</span></button>' +
                         '<button is="emby-button" type="button" class="raised mdDismiss" data-id="' + i.Id + '" style="font-size:80%;"><span>' + esc(strings.dismiss) + '</span></button>';
-                    actionHint = '<span class="material-icons" style="font-size:15px;vertical-align:middle;color:var(--md-primary);">schedule</span> Queued for next fix run — click "Run fixes now" on Overview. Change your mind? Click Undo.';
+                    if (i.LastAttemptSuccess === false) {
+                        actionHint = '<span class="material-icons" style="font-size:15px;vertical-align:middle;color:#ef4444;">error_outline</span> Retry on next fix run — the last attempt failed. Details below. Dismiss to stop retrying.';
+                    } else {
+                        actionHint = '<span class="material-icons" style="font-size:15px;vertical-align:middle;color:var(--md-primary);">schedule</span> Queued for next fix run — click "Run fixes now" on Overview. Change your mind? Click Undo.';
+                    }
                 } else {
                     actionButtons = verifyBtn +
                         '<button is="emby-button" type="button" class="raised button-submit mdApprove" data-id="' + i.Id + '" style="font-size:80%;" title="' + esc(t.actionHint || '') + '"><span>' + esc(t.action || strings.approve) + '</span></button>' +
@@ -285,6 +289,9 @@
                     '</div>' +
                     '<div class="mdIssueFooter">' +
                         '<div class="mdIssueActionHint">' + actionHint + '</div>' +
+                        (i.LastAttemptSuccess === false && i.LastAttemptMessage
+                            ? '<div class="fieldDescription" style="margin-top:.3em;color:#ef4444;"><span class="material-icons" style="font-size:15px;vertical-align:middle;">error_outline</span> Last attempt failed: ' + esc(i.LastAttemptMessage) + (i.LastAttemptAtUtc ? ' <span style="color:var(--md-ink-muted);">(' + esc(new Date(i.LastAttemptAtUtc).toLocaleString()) + ')</span>' : '') + '</div>'
+                            : '') +
                         '<div class="fieldDescription mdRowMsg mdIssueRowMsg"></div>' +
                     '</div>' +
                 '</div>';
@@ -329,17 +336,35 @@
             var id = button.getAttribute('data-id');
             post('Issues/' + id + '/' + action).then(function () {
                 var row = button.closest('[data-issue]');
-                row.querySelector('.mdRowMsg').textContent = doneText;
-                row.style.opacity = '.55';
                 // Keep the in-memory issue list in sync with the server. Without this the
                 // renderFiltered fingerprint (Id + Status) stays stale, and a follow-up
                 // activate() short-circuits its DOM re-render because "nothing changed" — that's
                 // the class of bug that broke undo before we mutated Status here.
                 var issue = lastIssueList.find(function (i) { return String(i.Id) === String(id); });
                 if (issue) issue.Status = (action === 'Approve') ? 'Queued' : 'Dismissed';
-                // Replace the action cluster with a single Undo button. Users often mis-click
-                // Approve / Dismiss; the Fix task runs on a schedule so there's a real window to
-                // change your mind. Revert flips the issue back to Detected on the server.
+                if (action === 'Dismiss') {
+                    // Row disappears immediately without a re-fetch — a fresh /Issues call would
+                    // unmask any items the user's current filter / pagination was hiding, so 2
+                    // visible items could become 48. Instead: drop the row from DOM, drop it from
+                    // the cached list, update the badge, and rebuild the fingerprint so a later
+                    // renderFiltered doesn't accidentally re-add it. Undo is still available from
+                    // the Dismissed filter tab.
+                    var listEl = root.querySelector('#mdIssueList');
+                    var idx = lastIssueList.findIndex(function (x) { return String(x.Id) === String(id); });
+                    if (idx >= 0) lastIssueList.splice(idx, 1);
+                    row.remove();
+                    updateTabBadge('#mdIssueBadge', lastIssueList.length);
+                    if (listEl) listEl.removeAttribute('data-fingerprint');
+                    renderFiltered();
+                    refresh(true);
+                    return;
+                }
+
+                row.querySelector('.mdRowMsg').textContent = doneText;
+                row.style.opacity = '.55';
+                // Replace the action cluster with a single Undo button. Approve users often
+                // mis-click; the Fix task runs on a schedule so there's a real window to change
+                // your mind. Revert flips the issue back to Detected on the server.
                 var actionsCell = row.querySelector('.mdIssueActions');
                 if (actionsCell) {
                     actionsCell.innerHTML = '<button is="emby-button" type="button" class="raised mdUndoAction" data-id="' + id + '" style="font-size:80%;"><span class="material-icons" style="font-size:1em;vertical-align:-2px;margin-right:.25em;">undo</span><span>' + esc(strings.undoAction) + '</span></button>';
