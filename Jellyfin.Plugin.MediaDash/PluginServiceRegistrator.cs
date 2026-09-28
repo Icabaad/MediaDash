@@ -6,6 +6,7 @@ using Jellyfin.Plugin.MediaDash.Api;
 using Jellyfin.Plugin.MediaDash.Configuration;
 using Jellyfin.Plugin.MediaDash.Data;
 using Jellyfin.Plugin.MediaDash.Fixers;
+using Jellyfin.Plugin.MediaDash.Fixers.Converters;
 using Jellyfin.Plugin.MediaDash.Probing;
 using Jellyfin.Plugin.MediaDash.Scanners;
 using Jellyfin.Plugin.MediaDash.ScheduledTasks;
@@ -62,6 +63,10 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         // 05-C.6: RestoreOperationStore owns the `restore_operations` table (schema v7). Consumed
         // by RestoreService for the owner-tokened claim workflow.
         serviceCollection.AddSingleton<RestoreOperationStore>(sp => sp.GetRequiredService<MediaDashDb>().RestoreOps);
+        // Roadmap i-110-protected-media: ProtectionStore owns `protection_rules` (schema v8).
+        // ProtectionService caches the ruleset and runs the runtime path/library matching.
+        serviceCollection.AddSingleton<ProtectionStore>(sp => sp.GetRequiredService<MediaDashDb>().Protection);
+        serviceCollection.AddSingleton<ProtectionService>();
         // 05-C.7: StatusQueryService composes GET /MediaDash/Status. Centralises the drive scan +
         // SMART probe + aggregate history reads + recycle-bin contents + config reads out of the
         // controller so /Status has one owner instead of a 170-line controller inline block.
@@ -98,6 +103,12 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddSingleton<IScanner, QualityScanner>();
         serviceCollection.AddSingleton<IScanner, EmbeddedCoverArtScanner>();
         serviceCollection.AddSingleton<IScanner, PlayabilityScanner>();
+        serviceCollection.AddSingleton<IScanner, FormatCompatibilityScanner>();
+        // Converter registry: DI-fed IEnumerable<IFormatConverter> → dictionary. Phase 1 registers
+        // no IFormatConverter instances; the registry lands empty and every FormatCompatibility
+        // scan silently produces zero issues until Phase 2 wires the first converter.
+        serviceCollection.AddSingleton<IFormatConverterRegistry, FormatConverterRegistry>();
+        serviceCollection.AddSingleton<ILibraryCollectionResolver, LibraryCollectionResolver>();
         serviceCollection.AddSingleton<LibraryGuard>();
         serviceCollection.AddSingleton<RecycleBin>();
         // 05-B: single owner of the "restore a recycled file back to a library" workflow.
