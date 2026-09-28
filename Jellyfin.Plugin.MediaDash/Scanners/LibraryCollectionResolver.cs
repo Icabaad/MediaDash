@@ -1,38 +1,74 @@
 using System;
+using System.Collections.Generic;
 using Jellyfin.Data.Enums;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Model.Entities;
 
 namespace Jellyfin.Plugin.MediaDash.Scanners;
 
-/// <summary>Production resolver — walks BaseItem.GetTopParent to reach the CollectionFolder.</summary>
+/// <summary>
+/// Production resolver — path-prefix lookup against Jellyfin's virtual-folder list.
+/// </summary>
+/// <remarks>
+/// Book items on Jellyfin 10.11 don't surface their <see cref="CollectionFolder"/> via
+/// <c>GetTopParent()</c> — that walk climbs to <c>AggregateFolder</c> instead.
+/// A path-prefix match against <c>ILibraryManager.GetVirtualFolders()</c> is the
+/// reliable cross-type way to identify which library a file lives in.
+/// </remarks>
 public sealed class LibraryCollectionResolver : ILibraryCollectionResolver
 {
+    private readonly Func<IEnumerable<VirtualFolderInfo>> _getFolders;
+
     /// <summary>Initializes a new instance of the <see cref="LibraryCollectionResolver"/> class.</summary>
     /// <param name="libraryManager">Jellyfin library manager.</param>
     public LibraryCollectionResolver(ILibraryManager libraryManager)
+        : this(libraryManager.GetVirtualFolders)
     {
-        // ponytail: parked for Phase 2+ use — GetTopParent() does the walk itself in Phase 1.
-        _ = libraryManager;
+    }
+
+    // ponytail: internal seam so tests inject folder data without stubbing all of ILibraryManager.
+    internal LibraryCollectionResolver(Func<IEnumerable<VirtualFolderInfo>> getFolders)
+    {
+        _getFolders = getFolders;
     }
 
     /// <inheritdoc />
     public CollectionType? Resolve(BaseItem item)
     {
-        try
+        var path = item.Path;
+        if (string.IsNullOrEmpty(path))
         {
-            var top = item.GetTopParent();
-            if (top is CollectionFolder cf)
-            {
-                return cf.CollectionType;
-            }
+            return null;
+        }
 
-            return null;
-        }
-        catch (InvalidOperationException)
+        foreach (var folder in _getFolders())
         {
-            // Item detached from the library tree; treat as unresolved.
+            foreach (var location in folder.Locations ?? [])
+            {
+                if (!string.IsNullOrEmpty(location) &&
+                    path.StartsWith(location, StringComparison.OrdinalIgnoreCase))
+                {
+                    return ToCollectionType(folder.CollectionType);
+                }
+            }
+        }
+
+        return null;
+    }
+
+    // VirtualFolderInfo uses CollectionTypeOptions (MediaBrowser.Model), while the scanner
+    // contract uses CollectionType (Jellyfin.Data.Enums). Same lowercase names, different types.
+    // CollectionTypeOptions.mixed means no specific type → return null.
+    private static CollectionType? ToCollectionType(CollectionTypeOptions? raw)
+    {
+        if (raw is null || raw == CollectionTypeOptions.mixed)
+        {
             return null;
         }
+
+        return Enum.TryParse<CollectionType>(raw.ToString(), ignoreCase: true, out var parsed)
+            ? parsed
+            : null;
     }
 }
