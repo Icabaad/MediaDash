@@ -1,0 +1,5 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0" xmlns:l="http://www.w3.org/1999/xlink">
+<description><title-info><genre>prose_classic</genre><author><first-name>Test</first-name><last-name>Fixture</last-name></author><book-title>Sample FictionBook</book-title><lang>en</lang></title-info></description>
+<body><section><title><p>Sample FictionBook 2.0</p></title><p>This is a minimal FictionBook 2.0 format test fixture for the MediaDash format compatibility test harness. Public domain stub.</p></section></body>
+</FictionBook>

@@ -27,4 +27,8 @@
     <ProjectReference Include="..\Jellyfin.Plugin.MediaDash\Jellyfin.Plugin.MediaDash.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="fixtures\**\*.*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>
