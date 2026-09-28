@@ -103,4 +103,25 @@ internal enum FixReason
 
     /// <summary>02-B: the type is in <see cref="Configuration.FixMode.ManualApprove"/> and no per-issue approval exists — a nonempty language allow-list is NOT approval.</summary>
     ManualApprovalRequired,
+
+    /// <summary>Quality re-encode produced an output that missed the configured minimum savings threshold; original kept. Terminal so the queue doesn't re-attempt an identical encode forever.</summary>
+    InsufficientSavings,
+
+    /// <summary>Format-compat: parent CollectionType outside converter's AllowedLibraryTypes.</summary>
+    LibraryTypeMismatch,
+
+    /// <summary>Format-compat: CollectionType could not be resolved for the item.</summary>
+    LibraryTypeUnknown,
+
+    /// <summary>Format-compat: mixed-content library, no per-row approve on record.</summary>
+    MixedLibraryUserReviewOnly,
+
+    /// <summary>Format-compat: converter toolchain missing and lazy-download failed.</summary>
+    ConverterUnavailable,
+
+    /// <summary>Format-compat: converter ran but its output failed post-conversion probe.</summary>
+    ConverterFailed,
+
+    /// <summary>Format-compat: matrix row has no target extension for this file (DRM advisory).</summary>
+    SourceExtensionNotConvertible,
 }
