@@ -497,6 +497,20 @@ public sealed class IssueStore
         return cmd.ExecuteNonQuery();
     }
 
+    /// <summary>Overwrites the details column for a single issue row.</summary>
+    /// <param name="issueId">The issue id.</param>
+    /// <param name="detailsJson">The replacement JSON string.</param>
+    /// <returns>True when the row was found and updated; false when no such row exists.</returns>
+    public bool UpdateDetails(long issueId, string detailsJson)
+    {
+        using var connection = _connectionFactory.Open();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = "UPDATE issues SET details = @details WHERE id = @id";
+        cmd.Parameters.AddWithValue("@details", detailsJson);
+        cmd.Parameters.AddWithValue("@id", issueId);
+        return cmd.ExecuteNonQuery() > 0;
+    }
+
     /// <summary>Gets a single issue by id.</summary>
     /// <param name="issueId">The issue id.</param>
     /// <returns>The issue, or null when the row is gone or malformed.</returns>

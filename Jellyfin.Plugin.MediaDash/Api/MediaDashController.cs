@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.Json;
 using System.Threading.Tasks;
 using Jellyfin.Plugin.MediaDash.Data;
 using Jellyfin.Plugin.MediaDash.Fixers;
@@ -46,6 +48,7 @@ public class MediaDashController : ControllerBase
     private readonly ScheduledTasks.RunState _runState;
     private readonly RestoreService _restoreService;
     private readonly StatusQueryService _statusQuery;
+    private readonly Fixers.ProtectionService _protection;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="MediaDashController"/> class.
@@ -65,6 +68,7 @@ public class MediaDashController : ControllerBase
     /// <param name="runState">The shared run-state holder (02-A) — used to arm bypass-idle-once and read the fix pause reason.</param>
     /// <param name="restoreService">05-B: single owner of the restore workflow (owner-tokened claim + FS + DB bookkeeping).</param>
     /// <param name="statusQuery">05-C.7: composes the /Status payload. Owns drive scan, SMART probe, aggregate history reads, recycle-bin contents and library-drive classification.</param>
+    /// <param name="protection">Roadmap i-110-protected-media: applied to targeted rescans; also backs the /Protection CRUD endpoints.</param>
     public MediaDashController(
         MediaDashDb db,
         IssueStore issues,
@@ -80,7 +84,8 @@ public class MediaDashController : ControllerBase
         LibraryGuard libraryGuard,
         ScheduledTasks.RunState runState,
         RestoreService restoreService,
-        StatusQueryService statusQuery)
+        StatusQueryService statusQuery,
+        Fixers.ProtectionService protection)
     {
         _db = db;
         _issues = issues;
@@ -97,6 +102,7 @@ public class MediaDashController : ControllerBase
         _runState = runState;
         _restoreService = restoreService;
         _statusQuery = statusQuery;
+        _protection = protection;
         // 02-A: bridge to Plugin.AttachedRunState so the display-only Plugin.CurrentActivity /
         // ScanScannersDone/Total facades resolve to this same instance. Idempotent — ScanTask
         // and FixTask do the same on their own resolution.
@@ -133,6 +139,10 @@ public class MediaDashController : ControllerBase
         // explains why an auto-mode type isn't queuing on its own. Cache the restored path set per
         // IssueType so we do one query per distinct type in the result, not one per row.
         var restoredByType = new Dictionary<IssueType, IReadOnlySet<string>>();
+        // Per-row last-attempt lookup: one batched query for the whole page, keyed by issue id.
+        // Empty on a Detected-only page (nothing's been attempted yet); populated when Queued
+        // rows keep failing silently so the UI can render "last attempt: X, Y ago".
+        var lastAttempts = _history.GetLatestAttemptsByIssueIds(rows.Select(r => r.Id).ToList());
         var dtos = new List<IssueDto>(rows.Count);
         foreach (var issue in rows)
         {
@@ -144,6 +154,13 @@ public class MediaDashController : ControllerBase
             }
 
             dto.WasPreviouslyRestored = restored.Contains(issue.Path);
+            if (lastAttempts.TryGetValue(issue.Id, out var lastAttempt))
+            {
+                dto.LastAttemptMessage = lastAttempt.Action;
+                dto.LastAttemptAtUtc = lastAttempt.FixedAtUtc;
+                dto.LastAttemptSuccess = lastAttempt.Success;
+            }
+
             dtos.Add(dto);
         }
 
@@ -189,6 +206,8 @@ public class MediaDashController : ControllerBase
         var start = DateTime.UtcNow;
         var progress = new Progress<double>();
         var issues = await scanner.RunScanAsync(progress, HttpContext.RequestAborted).ConfigureAwait(false);
+        // Roadmap i-110-protected-media: apply protection to targeted rescans too.
+        issues = _protection.FilterEmittable(issues, scanner.Type);
         _issues.ReplaceDetectedIssues(scanner.Type, issues, null);
         return Ok(new
         {
@@ -210,12 +229,67 @@ public class MediaDashController : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public ActionResult ApproveIssue([FromRoute] long id)
     {
+        // For FormatCompatibility issues in a mixed library, patch approvedInMixedLibrary=true
+        // so FormatCompatibilityFixer will honor the user's explicit approval.
+        var issue = _issues.GetIssue(id);
+        if (issue is { Type: IssueType.FormatCompatibility, DetailsJson: { } json })
+        {
+            var patched = PatchApprovedInMixedLibrary(json);
+            if (patched is not null)
+            {
+                _issues.UpdateDetails(id, patched);
+            }
+        }
+
         return _issues.TryTransitionIssueStatus(id, ApproveFromDetected, IssueStatus.Queued) switch
         {
             StatusTransitionResult.Applied => NoContent(),
             StatusTransitionResult.NotFound => NotFound(),
             _ => Conflict("Approve is only legal from Detected. The issue is no longer in that state — refresh the Issues tab to see its current status.")
         };
+    }
+
+    /// <summary>
+    /// Returns a new DetailsJson with <c>approvedInMixedLibrary: true</c> added when the input
+    /// has <c>mixedLibrary: true</c>; returns null when no patch is needed.
+    /// </summary>
+    /// <param name="detailsJson">The existing DetailsJson string to inspect and patch.</param>
+    /// <returns>Patched JSON string, or null when no patch is required.</returns>
+    internal static string? PatchApprovedInMixedLibrary(string detailsJson)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(detailsJson);
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("mixedLibrary", out var m) || m.ValueKind != JsonValueKind.True)
+            {
+                return null;
+            }
+
+            // Already approved — no-op.
+            if (root.TryGetProperty("approvedInMixedLibrary", out var a) && a.ValueKind == JsonValueKind.True)
+            {
+                return null;
+            }
+
+            // Copy all existing properties, append the flag.
+            using var ms = new System.IO.MemoryStream();
+            using var writer = new Utf8JsonWriter(ms);
+            writer.WriteStartObject();
+            foreach (var prop in root.EnumerateObject())
+            {
+                prop.WriteTo(writer);
+            }
+
+            writer.WriteBoolean("approvedInMixedLibrary", true);
+            writer.WriteEndObject();
+            writer.Flush();
+            return System.Text.Encoding.UTF8.GetString(ms.ToArray());
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -421,12 +495,35 @@ public class MediaDashController : ControllerBase
     }
 
     /// <summary>
-    /// Bulk-updates a set of issues by id. Used by the Issues tab's filtered "approve all shown"
-    /// and the context-menu "ignore all in this folder / of this type / etc." actions — the client
-    /// computes the id list, the server just applies the status.
+    /// Dismisses every Queued issue whose current path isn't inside a MediaDash-enabled library
+    /// location. Companion to the Overview "Last fix run" summary's <c>SkippedLibraryDisabled</c>
+    /// count: gives users a one-click way to clean up a queue that outlives library-selection
+    /// changes. Dismissed rows are recoverable via the standard Revert flow, so this is not
+    /// destructive. Silently no-ops on an empty queue or when every queued row is in scope.
     /// </summary>
-    /// <param name="request">Ids and target action ("Approve", "Dismiss", or "Revert").</param>
-    /// <returns>The number of issues updated.</returns>
+    /// <returns>The number of queued rows just dismissed.</returns>
+    [HttpPost("Issues/DismissStaleQueued")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public ActionResult<int> DismissStaleQueued()
+    {
+        var config = Plugin.Instance!.Configuration;
+        var enabledLocations = _libraryGuard.GetEnabledLibraryLocations(config.EnabledLibraries);
+        var staleIds = _issues.GetIssues(status: IssueStatus.Queued)
+            .Where(i => !LibraryGuard.IsInEnabledLocations(i.Path, enabledLocations))
+            .Select(i => i.Id)
+            .ToList();
+        if (staleIds.Count == 0)
+        {
+            return Ok(0);
+        }
+
+        var dismissed = _issues.BulkUpdateOpenIssueStatus(staleIds, IssueStatus.Dismissed);
+        return Ok(dismissed.Count);
+    }
+
+    /// <summary>Bulk-updates a set of open issues (Approve → Queued, Dismiss → Dismissed) or reverts a dismissed set.</summary>
+    /// <param name="request">Bulk action + ids to apply it to.</param>
+    /// <returns>The number of rows actually transitioned.</returns>
     [HttpPost("Issues/Bulk")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
@@ -837,6 +934,176 @@ public class MediaDashController : ControllerBase
         }
 
         return Ok(seen.OrderBy(g => g, StringComparer.OrdinalIgnoreCase).ToList());
+    }
+
+    /// <summary>
+    /// Lists every persistent "Never modify" protection rule. Roadmap i-110-protected-media.
+    /// </summary>
+    /// <returns>The full ruleset in insertion order.</returns>
+    [HttpGet("Protection")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public ActionResult<IReadOnlyList<ProtectionRuleDto>> ListProtection()
+    {
+        var rules = _protection.GetRules()
+            .Select(r => new ProtectionRuleDto
+            {
+                Id = r.Id,
+                Kind = r.Kind,
+                Target = r.Target,
+                ScannersMask = r.ScannersMask,
+                FixersMask = r.FixersMask,
+                Note = r.Note,
+                CreatedAtUtc = r.CreatedAtUtc,
+            })
+            .ToList();
+        return Ok(rules);
+    }
+
+    /// <summary>Creates a new "Never modify" rule for a folder or library.</summary>
+    /// <param name="request">The rule to add.</param>
+    /// <returns>The created rule with its assigned id.</returns>
+    [HttpPost("Protection")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public ActionResult<ProtectionRuleDto> CreateProtection([FromBody] ProtectionRuleDto request)
+    {
+        if (request is null || string.IsNullOrWhiteSpace(request.Target))
+        {
+            return BadRequest(new { Error = "Target is required." });
+        }
+
+        var kind = string.Equals(request.Kind, "library", StringComparison.OrdinalIgnoreCase) ? "library" : "folder";
+        if (kind == "folder" && !Path.IsPathRooted(request.Target))
+        {
+            return BadRequest(new { Error = "Folder target must be an absolute path." });
+        }
+
+        // A rule that blocks nothing is a no-op stored forever — reject to keep the list honest.
+        if (string.IsNullOrWhiteSpace(request.ScannersMask) && string.IsNullOrWhiteSpace(request.FixersMask))
+        {
+            return BadRequest(new { Error = "At least one of ScannersMask or FixersMask must be non-empty (use '*' to block all)." });
+        }
+
+        // Reject unrecognised mask tokens up front. An unknown IssueType name (e.g. "NotARealIssue")
+        // otherwise persists as an ineffective rule that never matches anything.
+        if (ValidateMask(request.ScannersMask, "ScannersMask") is { } scanErr)
+        {
+            return scanErr;
+        }
+
+        if (ValidateMask(request.FixersMask, "FixersMask") is { } fixErr)
+        {
+            return fixErr;
+        }
+
+        // Canonicalize folder targets so `/`, `\`, `.` segments and trailing separators all collapse
+        // to a single stored form. ProtectionService.PathIsUnder now canonicalizes at compare time
+        // too — this store-side pass keeps the persisted list clean going forward.
+        string canonicalFolderTarget = string.Empty;
+        if (kind == "folder")
+        {
+            try
+            {
+                canonicalFolderTarget = Path.TrimEndingDirectorySeparator(Path.GetFullPath(request.Target));
+            }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+            {
+                return BadRequest(new { Error = "Folder target is not a valid absolute path: " + ex.Message });
+            }
+        }
+        else
+        {
+            // Library-kind: the target must resolve to a real virtual folder id. Without this check
+            // a rule for "no-such-library" persists forever and silently protects nothing.
+            var idLookup = Scanners.VirtualFolderIdentity.BuildIdLookup(_libraryManager);
+            var known = _libraryManager.GetVirtualFolders()
+                .Select(f => Scanners.VirtualFolderIdentity.GetId(f, idLookup))
+                .Any(id => !string.IsNullOrEmpty(id) && string.Equals(id, request.Target, StringComparison.OrdinalIgnoreCase));
+            if (!known)
+            {
+                return BadRequest(new { Error = "Library target '" + request.Target + "' does not match any known library id." });
+            }
+        }
+
+        var rule = new Data.ProtectionRule
+        {
+            Kind = kind,
+            Target = kind == "folder" ? canonicalFolderTarget : request.Target,
+            ScannersMask = (request.ScannersMask ?? string.Empty).Trim(),
+            FixersMask = (request.FixersMask ?? string.Empty).Trim(),
+            Note = (request.Note ?? string.Empty).Trim(),
+            CreatedAtUtc = DateTime.UtcNow,
+        };
+
+        var id = _db.Protection.Add(rule);
+        _protection.Invalidate();
+
+        return Ok(new ProtectionRuleDto
+        {
+            Id = id,
+            Kind = rule.Kind,
+            Target = rule.Target,
+            ScannersMask = rule.ScannersMask,
+            FixersMask = rule.FixersMask,
+            Note = rule.Note,
+            CreatedAtUtc = rule.CreatedAtUtc,
+        });
+    }
+
+    private BadRequestObjectResult? ValidateMask(string? mask, string fieldName)
+    {
+        if (string.IsNullOrWhiteSpace(mask))
+        {
+            return null;
+        }
+
+        foreach (var raw in mask.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (raw == "*")
+            {
+                continue;
+            }
+
+            if (!Enum.TryParse<IssueType>(raw, ignoreCase: true, out _))
+            {
+                return BadRequest(new { Error = fieldName + " contains unknown issue type '" + raw + "'. Use '*' or one of the values from GET /MediaDash/Protection/IssueTypes." });
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Lists every <see cref="IssueType"/> the UI can offer as a per-type block target. Ordered
+    /// by ordinal so the enum's stable numeric values also drive the display order.
+    /// </summary>
+    /// <returns>Enum names in declaration order.</returns>
+    [HttpGet("Protection/IssueTypes")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public ActionResult<IReadOnlyList<string>> GetProtectableIssueTypes()
+    {
+        var names = Enum.GetValues<IssueType>()
+            .OrderBy(v => (int)v)
+            .Select(v => v.ToString())
+            .ToList();
+        return Ok(names);
+    }
+
+    /// <summary>Removes a "Never modify" rule by id.</summary>
+    /// <param name="id">The rule id returned by <see cref="ListProtection"/> or <see cref="CreateProtection"/>.</param>
+    /// <returns>No content on success; 404 when the id is unknown.</returns>
+    [HttpDelete("Protection/{id:long}")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public ActionResult DeleteProtection(long id)
+    {
+        if (!_db.Protection.Remove(id))
+        {
+            return NotFound();
+        }
+
+        _protection.Invalidate();
+        return NoContent();
     }
 
     /// <summary>
