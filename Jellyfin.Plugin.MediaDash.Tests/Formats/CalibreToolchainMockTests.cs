@@ -67,8 +67,24 @@ public class CalibreToolchainMockTests
         var chain = new CalibreToolchain(downloader, NullLogger<CalibreToolchain>.Instance, tmp.Path);
         var result = await chain.EnsureAsync(null, null, CancellationToken.None);
 
+        // Downloader was called. The stub writes a 1-byte file (not a real installer),
+        // so extraction fails and returns Unavailable rather than the old NeedsDownload stub value.
         Assert.True(invoked);
-        Assert.Equal(ConverterAvailability.NeedsDownload, result);
+        Assert.Equal(ConverterAvailability.Unavailable, result);
+    }
+
+    [Fact]
+    public async Task FailedExtractionCleansExtractRootAndReturnsUnavailable()
+    {
+        using var tmp = new TempDir();
+        // Stub downloader writes a bogus "installer" — extraction will fail.
+        var downloader = new StubDownloader(() => "fake-checksum");
+        var chain = new CalibreToolchain(downloader, NullLogger<CalibreToolchain>.Instance, tmp.Path);
+
+        var result = await chain.EnsureAsync(null, null, CancellationToken.None);
+
+        Assert.Equal(ConverterAvailability.Unavailable, result);
+        Assert.False(chain.IsAvailable);
     }
 
     private static string ExeName()

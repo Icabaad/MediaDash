@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -100,9 +101,85 @@ public sealed class CalibreToolchain
             }
         }
 
-        // Phase 2 will hook checksum verification + archive extraction here.
-        _logger.LogInformation("Calibre download saved to {Path}; extraction not implemented until Phase 2.", archivePath);
-        return ConverterAvailability.NeedsDownload;
+        // Phase 2.5: extract the downloaded portable installer.
+        // The Calibre portable installer accepts the destination as a positional argument
+        // when invoked via cmd.exe /C (a console must be attached; without one it opens a GUI picker).
+        // Extracted tree: <extractRoot>/Calibre Portable/Calibre/ebook-convert.exe
+        var extractRoot = Path.Combine(_dataDir, "tools", "calibre");
+        if (Directory.Exists(extractRoot))
+        {
+            // Nuke any stale extraction (e.g. from an interrupted prior run).
+            try
+            {
+                Directory.Delete(extractRoot, true);
+            }
+            catch (IOException)
+            {
+            }
+        }
+
+        Directory.CreateDirectory(extractRoot);
+
+        // ponytail: cmd /C is the simplest way to attach a console so the installer runs headlessly
+        var psi = new ProcessStartInfo
+        {
+            FileName = "cmd.exe",
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+        // Wrap both paths in quotes; cmd /C "exe" "dest"
+        psi.ArgumentList.Add("/C");
+        psi.ArgumentList.Add(archivePath);
+        psi.ArgumentList.Add(extractRoot);
+
+        using (var proc = Process.Start(psi))
+        {
+            if (proc is null)
+            {
+                _logger.LogWarning("Failed to launch Calibre installer for extraction.");
+                return ConverterAvailability.Unavailable;
+            }
+
+            await proc.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            if (proc.ExitCode != 0)
+            {
+                _logger.LogWarning("Calibre installer exited {Exit}", proc.ExitCode);
+                return ConverterAvailability.Unavailable;
+            }
+        }
+
+        // Layout: <extractRoot>/Calibre Portable/Calibre/ebook-convert.exe
+        var candidates = new[]
+        {
+            Path.Combine(extractRoot, "Calibre Portable", "Calibre", ExecutableName()),
+            Path.Combine(extractRoot, "Calibre", ExecutableName()),
+            Path.Combine(extractRoot, ExecutableName()),
+        };
+
+        foreach (var candidate in candidates)
+        {
+            if (File.Exists(candidate))
+            {
+                _resolvedPath = candidate;
+
+                // Clean up the 200 MB installer now that extraction is done.
+                try
+                {
+                    File.Delete(archivePath);
+                }
+                catch (IOException)
+                {
+                }
+
+                _logger.LogInformation("Calibre extracted to {Path}", candidate);
+                return ConverterAvailability.Ready;
+            }
+        }
+
+        _logger.LogWarning("Calibre extraction completed but ebook-convert not found under {Root}", extractRoot);
+        return ConverterAvailability.Unavailable;
     }
 
     private static string ExecutableName()
