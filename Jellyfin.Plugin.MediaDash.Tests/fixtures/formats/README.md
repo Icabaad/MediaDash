@@ -53,7 +53,7 @@ a real file at test-time or be marked `[Trait("Category","LargeFixture")]`.
 | `ebook/sample.pdb` | Header-only stub — PalmDB with TEXt/REAd type+creator for Palm eReader; see task-9 note | Self-generated |
 | `ebook/sample.htmlz` | Self-generated via PowerShell — minimal ZIP containing index.html + metadata.opf | Self-generated (public domain) |
 | `ebook/sample.chm` | Header-only stub — ITSF v3 magic (4 bytes + version); see task-9 note | Self-generated |
-| `comic/sample.cbr` | Header-only stub — RAR4 magic (Rar!\x1A\x07\x00); see task-9 note | Self-generated |
+| `comic/sample.cbr` | Real RAR5 archive — 3 procedurally-generated 32×32 CC0 JPGs (solid red, green, blue) packed with WinRAR 7.11 (`Rar.exe a -ep`); replaces the task-9 header stub | Self-generated (public domain) |
 | `comic/sample.cb7` | Header-only stub — 7z magic (37 7A BC AF 27 1C); see task-9 note | Self-generated |
 | `audiobook/sample.aax` | Header-only stub — 32 bytes starting with AA\x00\x00; test asserts DRM advisory only, not audio validity | Self-generated |
 | `image/sample.heic` | Header-only stub — ISO BMFF ftyp box with heic major brand; see task-9 note | Self-generated |
