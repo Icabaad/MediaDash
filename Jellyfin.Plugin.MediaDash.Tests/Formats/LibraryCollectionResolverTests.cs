@@ -132,6 +132,19 @@ public class LibraryCollectionResolverTests
         Assert.Equal(CollectionType.books, result);
     }
 
+    [Fact]
+    public void DoesNotFalsePositiveOnSharedPrefix()
+    {
+        var resolver = Resolver(
+            new VirtualFolderInfo { Locations = [@"C:\media\books"], CollectionType = CollectionTypeOptions.books },
+            new VirtualFolderInfo { Locations = [@"C:\media\books_extended"], CollectionType = CollectionTypeOptions.mixed });
+
+        // books_extended shares the "C:\media\books" prefix — must not match the books library.
+        var result = resolver.Resolve(Item(@"C:\media\books_extended\thing.mobi"));
+
+        Assert.Null(result);
+    }
+
     private sealed class FakeItem : BaseItem
     {
         public FakeItem(string path) { Path = path; }

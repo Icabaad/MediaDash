@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using Jellyfin.Data.Enums;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
@@ -46,10 +47,16 @@ public sealed class LibraryCollectionResolver : ILibraryCollectionResolver
         {
             foreach (var location in folder.Locations ?? [])
             {
-                if (!string.IsNullOrEmpty(location) &&
-                    path.StartsWith(location, StringComparison.OrdinalIgnoreCase))
+                if (!string.IsNullOrEmpty(location))
                 {
-                    return ToCollectionType(folder.CollectionType);
+                    // ponytail: append separator so "C:\media\books" doesn't false-positive on "C:\media\books_extended\...".
+                    var locWithSep = location.EndsWith(Path.DirectorySeparatorChar) || location.EndsWith(Path.AltDirectorySeparatorChar)
+                        ? location
+                        : location + Path.DirectorySeparatorChar;
+                    if (path.StartsWith(locWithSep, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return ToCollectionType(folder.CollectionType);
+                    }
                 }
             }
         }
