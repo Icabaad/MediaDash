@@ -842,6 +842,21 @@
                             '<span style="font-size:13px;font-weight:600;flex:0 0 auto;">Merge numbered folder-of-MP3s audiobooks into a single M4B</span>' +
                             '<span class="mdFieldHint" style="margin:0;flex:1;">Consolidates 01.mp3, 02.mp3, etc. into one audiobook. Requires Convert audiobooks to be on.</span>' +
                         '</label>' +
+                        '<label class="mdInsetRow" style="cursor:pointer;" title="Convert HEIC, HEIF, TIFF, BMP, and camera RAW images to JPG via ffmpeg. Originals go to the recycle bin.">' +
+                            '<input id="mdConvertImages" type="checkbox" class="mdInsetCheck" />' +
+                            '<span style="font-size:13px;font-weight:600;flex:0 0 auto;">Convert images (HEIC, HEIF, TIFF, RAW → JPG)</span>' +
+                            '<span class="mdFieldHint" style="margin:0;flex:1;">Requires ffmpeg with image support. RAW formats require a build with libraw.</span>' +
+                        '</label>' +
+                        '<label class="mdInsetRow" style="cursor:pointer;" title="Convert tracker and legacy lossless formats to FLAC or MP3 via ffmpeg. Originals go to the recycle bin.">' +
+                            '<input id="mdConvertMusic" type="checkbox" class="mdInsetCheck" />' +
+                            '<span style="font-size:13px;font-weight:600;flex:0 0 auto;">Convert music (tracker + legacy lossless → FLAC/MP3)</span>' +
+                            '<span class="mdFieldHint" style="margin:0;flex:1;">Trackers and lossless (.ape, .wv, .tak, .tta) → FLAC. WMA → MP3.</span>' +
+                        '</label>' +
+                        '<label class="mdInsetRow" style="cursor:pointer;" title="Convert RMVB and other legacy video formats to MKV via ffmpeg. Originals go to the recycle bin.">' +
+                            '<input id="mdConvertVideos" type="checkbox" class="mdInsetCheck" />' +
+                            '<span style="font-size:13px;font-weight:600;flex:0 0 auto;">Convert videos (RMVB → MKV)</span>' +
+                            '<span class="mdFieldHint" style="margin:0;flex:1;">Requires ffmpeg.</span>' +
+                        '</label>' +
                         '<div class="mdField" style="margin-top:.6em;">' +
                             '<label for="mdCalibreOverridePath" title="Full path to the ebook-convert binary. Leave empty to use the system PATH or let MediaDash auto-download Calibre on first fix.">Calibre override path</label>' +
                             '<input id="mdCalibreOverridePath" type="text" is="emby-input" placeholder="/usr/bin/ebook-convert or C:\\Program Files\\Calibre2\\ebook-convert.exe" />' +
@@ -1789,6 +1804,9 @@
                 view.querySelector('#mdConvertEbooks').checked = !!c.ConvertEbooks;
                 view.querySelector('#mdConvertComics').checked = !!c.ConvertComics;
                 view.querySelector('#mdConvertAudiobooks').checked = !!c.ConvertAudiobooks;
+                view.querySelector('#mdConvertImages').checked = !!c.ConvertImages;
+                view.querySelector('#mdConvertMusic').checked = !!c.ConvertMusic;
+                view.querySelector('#mdConvertVideos').checked = !!c.ConvertVideos;
                 view.querySelector('#mdAudiobookMergeMultiFile').checked = !!c.AudiobookMergeMultiFile;
                 view.querySelector('#mdCalibreOverridePath').value = c.CalibreOverridePath || '';
                 view.querySelector('#mdEbookPreferredTarget').value = c.EbookPreferredTarget || '';
@@ -1984,6 +2002,9 @@
                 c.ConvertEbooks = view.querySelector('#mdConvertEbooks').checked;
                 c.ConvertComics = view.querySelector('#mdConvertComics').checked;
                 c.ConvertAudiobooks = view.querySelector('#mdConvertAudiobooks').checked;
+                c.ConvertImages = view.querySelector('#mdConvertImages').checked;
+                c.ConvertMusic = view.querySelector('#mdConvertMusic').checked;
+                c.ConvertVideos = view.querySelector('#mdConvertVideos').checked;
                 c.AudiobookMergeMultiFile = view.querySelector('#mdAudiobookMergeMultiFile').checked;
                 c.CalibreOverridePath = (view.querySelector('#mdCalibreOverridePath').value || '').trim();
                 c.EbookPreferredTarget = view.querySelector('#mdEbookPreferredTarget').value || '';

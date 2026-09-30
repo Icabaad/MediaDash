@@ -279,6 +279,9 @@
                  "task.fix.description":  "Applies approved and automatic fixes: removes duplicates, re-encodes oversized files, strips unwanted tracks.",
                  "tab.recyclebin":  "Recycle bin",
                  "ConvertAudiobooks":  "Convert audiobooks (AAX/AA detect-only; multi-file folders can merge)",
-                 "AudiobookMergeMultiFile":  "Merge numbered folder-of-MP3s audiobooks into a single M4B"
+                 "AudiobookMergeMultiFile":  "Merge numbered folder-of-MP3s audiobooks into a single M4B",
+                 "ConvertImages":  "Convert images (HEIC, HEIF, TIFF, RAW → JPG)",
+                 "ConvertMusic":  "Convert music (tracker + legacy lossless → FLAC/MP3)",
+                 "ConvertVideos":  "Convert videos (RMVB → MKV)"
              }
 }
