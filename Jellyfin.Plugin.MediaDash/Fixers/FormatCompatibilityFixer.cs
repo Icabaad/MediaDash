@@ -219,9 +219,13 @@ public sealed class FormatCompatibilityFixer : IFixer
                 "Converter toolchain is not ready. Install Calibre or wait for the download to complete.");
         }
 
-        // P2-7: user override — only for the ebook converter, and only when config picks one of
-        // the supported alternatives. Other converters (Comic/Image/Music/Video) ignore their
-        // preferred-target settings until Phase 4 wires them. Do NOT mutate details.
+        // P2-7 / P4-2: user override for converters that can actually honour the target choice.
+        // ponytail: ImagePreferredTarget requires plumbing into ImageConverter args; ImageConverter
+        // always emits JPEG bytes regardless of stagedTargetPath extension — skip for Phase 4.
+        // ponytail: MusicPreferredTarget requires plumbing into MusicConverter.ArgsForSource;
+        // ArgsForSource dispatches on source extension only (WMA→MP3, rest→FLAC) — skip for Phase 4.
+        // Only EbookConverter (Calibre ebook-convert respects output extension) is wired here.
+        // Do NOT mutate details.
         var targetExt = details.TargetExt;
         if (converter.Kind == MediaKind.Ebook && !string.IsNullOrWhiteSpace(config.EbookPreferredTarget))
         {

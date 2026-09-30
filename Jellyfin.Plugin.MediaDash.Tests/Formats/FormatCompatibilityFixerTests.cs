@@ -238,6 +238,61 @@ public class FormatCompatibilityFixerTests
         }
     }
 
+    /// <summary>
+    /// P4-2: ImagePreferredTarget is ignored because ImageConverter always emits JPEG bytes
+    /// regardless of the stagedTargetPath extension. The dry-run preview must show the matrix
+    /// default (.jpg) even when ImagePreferredTarget = "png".
+    /// This test locks in the current-limitation behavior documented in FormatCompatibilityFixer.cs.
+    /// </summary>
+    [Fact]
+    public async Task PreferredTargetIgnoredWhenConverterCantHonor()
+    {
+        var source = MakeTempFile(".heic");
+        try
+        {
+            var itemId = Guid.NewGuid();
+            var fakeItem = new FakeItem(itemId, source.FullName);
+
+            // imagePreferredTarget = "png" — but ImageConverter can't honour it.
+            var (fixer, resolver, registry) = Setup(
+                dryRun: true,
+                imagePreferredTarget: "png",
+                getItemById: id => id == itemId ? fakeItem : null);
+
+            registry.Register(new StubConverter("image", MediaKind.Image, new CollectionType?[] { CollectionType.homevideos }));
+            resolver.Assign(fakeItem, CollectionType.homevideos);
+
+            // Issue carries the matrix default: .jpg (what the scanner would stamp)
+            var issue = new Issue
+            {
+                Id = 99,
+                Type = IssueType.FormatCompatibility,
+                ItemId = itemId,
+                Path = source.FullName,
+                DetailsJson = JsonSerializer.Serialize(new
+                {
+                    sourceExt = ".heic",
+                    targetExt = ".jpg",
+                    converter = "image",
+                    mixedLibrary = false
+                }),
+                SuggestedFix = "Convert",
+                Status = IssueStatus.Detected
+            };
+
+            var result = await fixer.FixAsync(issue, null, CancellationToken.None);
+
+            Assert.True(result.WasDryRun);
+            // Must show matrix default .jpg — NOT the ignored .png preference.
+            Assert.Contains(".jpg", result.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(".png", result.Message, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            try { File.Delete(source.FullName); } catch { }
+        }
+    }
+
     // -- helpers --
 
     private static Issue MakeIssue(string path, bool mixedLibrary = false, Guid? itemId = null)
@@ -261,11 +316,12 @@ public class FormatCompatibilityFixerTests
     private static (FormatCompatibilityFixer fixer, StubResolver resolver, StubRegistry registry) Setup(
         bool dryRun = false,
         string ebookPreferredTarget = "",
+        string imagePreferredTarget = "",
         Func<Guid, BaseItem?>? getItemById = null)
     {
         var registry = new StubRegistry();
         var resolver = new StubResolver();
-        var config = new StubConfig(dryRun, ebookPreferredTarget);
+        var config = new StubConfig(dryRun, ebookPreferredTarget, imagePreferredTarget);
         // ponytail: guard/protection/VRS are null — all 4 tests exit via prechecks before
         // reaching them. DryRun test reaches the guard check: null guard = pass (skip check).
         var fixer = new FormatCompatibilityFixer(
@@ -286,15 +342,24 @@ public class FormatCompatibilityFixerTests
     {
         private readonly bool _dryRun;
         private readonly string _ebookPreferredTarget;
-        public StubConfig(bool dryRun, string ebookPreferredTarget = "") { _dryRun = dryRun; _ebookPreferredTarget = ebookPreferredTarget; }
+        private readonly string _imagePreferredTarget;
+        public StubConfig(bool dryRun, string ebookPreferredTarget = "", string imagePreferredTarget = "")
+        {
+            _dryRun = dryRun;
+            _ebookPreferredTarget = ebookPreferredTarget;
+            _imagePreferredTarget = imagePreferredTarget;
+        }
+
         public PluginConfiguration GetSnapshot()
             => new()
             {
                 DryRun = _dryRun,
                 ConvertEbooks = true,
                 ConvertComics = true,
+                ConvertImages = true,
                 FormatCompatibilityFixMode = FixMode.Automatic,
-                EbookPreferredTarget = _ebookPreferredTarget
+                EbookPreferredTarget = _ebookPreferredTarget,
+                ImagePreferredTarget = _imagePreferredTarget
             };
     }
 
