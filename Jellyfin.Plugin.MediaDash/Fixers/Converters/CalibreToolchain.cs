@@ -75,8 +75,9 @@ public sealed class CalibreToolchain
         }
 
         // 3. Previously-extracted portable under plugin data.
-        var extractedExe = Path.Combine(_dataDir, "tools", "calibre", ExecutableName());
-        if (File.Exists(extractedExe))
+        var previousExtractRoot = Path.Combine(_dataDir, "tools", "calibre");
+        var extractedExe = ResolveEbookConvertUnder(previousExtractRoot);
+        if (extractedExe is not null)
         {
             _resolvedPath = extractedExe;
             return ConverterAvailability.Ready;
@@ -89,7 +90,23 @@ public sealed class CalibreToolchain
             return ConverterAvailability.Unavailable;
         }
 
-        var archivePath = Path.Combine(_dataDir, "tools", "calibre.download");
+        // ponytail: name the file after what it actually is (a Windows installer EXE).
+        // `.download` triggers the Windows "How do you want to open this file?" association
+        // prompt whenever the plugin tries to execute it via ShellExecute/cmd.
+        var archivePath = Path.Combine(_dataDir, "tools", "calibre-portable-installer.exe");
+        // Clear any leftover file from the pre-fix ".download" naming so we don't leave orphans.
+        var legacyDownload = Path.Combine(_dataDir, "tools", "calibre.download");
+        if (File.Exists(legacyDownload))
+        {
+            try
+            {
+                File.Delete(legacyDownload);
+            }
+            catch (IOException)
+            {
+            }
+        }
+
         Directory.CreateDirectory(Path.GetDirectoryName(archivePath)!);
         using (var fs = File.Create(archivePath))
         {
@@ -151,35 +168,45 @@ public sealed class CalibreToolchain
         }
 
         // Layout: <extractRoot>/Calibre Portable/Calibre/ebook-convert.exe
-        var candidates = new[]
+        var resolvedExe = ResolveEbookConvertUnder(extractRoot);
+        if (resolvedExe is not null)
         {
-            Path.Combine(extractRoot, "Calibre Portable", "Calibre", ExecutableName()),
-            Path.Combine(extractRoot, "Calibre", ExecutableName()),
-            Path.Combine(extractRoot, ExecutableName()),
-        };
+            _resolvedPath = resolvedExe;
 
-        foreach (var candidate in candidates)
-        {
-            if (File.Exists(candidate))
+            // Clean up the 200 MB installer now that extraction is done.
+            try
             {
-                _resolvedPath = candidate;
-
-                // Clean up the 200 MB installer now that extraction is done.
-                try
-                {
-                    File.Delete(archivePath);
-                }
-                catch (IOException)
-                {
-                }
-
-                _logger.LogInformation("Calibre extracted to {Path}", candidate);
-                return ConverterAvailability.Ready;
+                File.Delete(archivePath);
             }
+            catch (IOException)
+            {
+            }
+
+            _logger.LogInformation("Calibre extracted to {Path}", resolvedExe);
+            return ConverterAvailability.Ready;
         }
 
         _logger.LogWarning("Calibre extraction completed but ebook-convert not found under {Root}", extractRoot);
         return ConverterAvailability.Unavailable;
+    }
+
+    private static string? ResolveEbookConvertUnder(string extractRoot)
+    {
+        var candidates = new[]
+        {
+            Path.Combine(extractRoot, "Calibre Portable", "Calibre", ExecutableName()),
+            Path.Combine(extractRoot, "Calibre", ExecutableName()),
+            Path.Combine(extractRoot, ExecutableName())
+        };
+        foreach (var candidate in candidates)
+        {
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        return null;
     }
 
     private static string ExecutableName()
