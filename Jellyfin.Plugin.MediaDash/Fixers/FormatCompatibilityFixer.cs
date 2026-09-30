@@ -200,10 +200,23 @@ public sealed class FormatCompatibilityFixer : IFixer
                 "Converter toolchain is not ready. Install Calibre or wait for the download to complete.");
         }
 
+        // P2-7: user override — only for the ebook converter, and only when config picks one of
+        // the supported alternatives. Other converters (Comic/Image/Music/Video) ignore their
+        // preferred-target settings until Phase 4 wires them. Do NOT mutate details.
+        var targetExt = details.TargetExt;
+        if (converter.Kind == MediaKind.Ebook && !string.IsNullOrWhiteSpace(config.EbookPreferredTarget))
+        {
+            var pref = config.EbookPreferredTarget.Trim().ToLowerInvariant();
+            if (pref == "epub" || pref == "pdf")
+            {
+                targetExt = "." + pref;
+            }
+        }
+
         // 11. Dry-run — return preview without touching files.
         if (config.DryRun)
         {
-            return FixResult.DryRun("convert " + Path.GetFileName(issue.Path) + " to " + details.TargetExt, 0);
+            return FixResult.DryRun("convert " + Path.GetFileName(issue.Path) + " to " + targetExt, 0);
         }
 
         // 12. Conversion.
@@ -213,7 +226,7 @@ public sealed class FormatCompatibilityFixer : IFixer
         var expectedSourceLength = sourceInfoBeforeConvert.Length;
         var expectedSourceMtimeTicks = sourceInfoBeforeConvert.LastWriteTimeUtc.Ticks;
 
-        var stagedPath = issue.Path + InflightTail + details.TargetExt;
+        var stagedPath = issue.Path + InflightTail + targetExt;
 
         // Keep converter.Kind in a local so the P1-1 policy callback below can capture it
         // without capturing the converter object itself (avoids converter keeping alive longer
@@ -243,7 +256,7 @@ public sealed class FormatCompatibilityFixer : IFixer
         }
 
         // 13. Verified replacement (swap-and-recycle protocol).
-        var destinationPath = Path.ChangeExtension(issue.Path, details.TargetExt);
+        var destinationPath = Path.ChangeExtension(issue.Path, targetExt);
         var request = new ReplacementRequest(
             SourcePath: issue.Path,
             OutputPath: conversion.StagedPath,
@@ -295,8 +308,18 @@ public sealed class FormatCompatibilityFixer : IFixer
 
         if (!replaceResult.Applied)
         {
-            SafeDelete(stagedPath);
-            return FixResult.Fail(replaceResult.Reason, replaceResult.TechnicalDetail ?? "Replacement failed.");
+            // P2-4: only delete the staged output when NEITHER a recycle nor a recovery path was
+            // recorded. If VRS moved the staged output to a recovery path, it's an artefact the
+            // user may need; deleting stagedPath is either a no-op or wrong in that case.
+            if (string.IsNullOrEmpty(replaceResult.RecyclePath) && string.IsNullOrEmpty(replaceResult.RecoveryPath))
+            {
+                SafeDelete(stagedPath);
+            }
+
+            var fail = FixResult.Fail(replaceResult.Reason, replaceResult.TechnicalDetail ?? "Replacement failed.");
+            fail.RecyclePath = replaceResult.RecyclePath;
+            fail.RecoveryPath = replaceResult.RecoveryPath;
+            return fail;
         }
 
         // 14. Post-fix library notifications.

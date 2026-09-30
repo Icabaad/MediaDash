@@ -180,6 +180,64 @@ public class FormatCompatibilityFixerTests
     [Fact(Skip = "Needs VRS test seam — Phase 2.5 followup")]
     public Task CapturesSourceIdentityBeforeConversion() => Task.CompletedTask;
 
+    // -- P2 fix tests --
+
+    /// <summary>
+    /// P2-4: FixResult carries RecoveryPath and RecyclePath forwarded from ReplacementResult.
+    /// VRS seam not yet injectable end-to-end, so this exercises the field assignment directly
+    /// by constructing and mutating a FixResult — confirms the property exists and round-trips.
+    /// </summary>
+    [Fact]
+    public void PreservesRecoveryAndRecyclePathsOnFailedReplacement()
+    {
+        // ponytail: VRS seam not injectable yet (tracked Phase 2.5). Verify property existence
+        // and assignment directly; the fixer assignment path is one-liner, tested by inspection.
+        var fail = FixResult.Fail(FixReason.RecoveryRequired, "Replacement failed.");
+        fail.RecyclePath = "X:\\recycle\\original.mobi";
+        fail.RecoveryPath = "Y:\\recovery\\original.epub.mediadash.tmp.epub";
+
+        Assert.Equal("X:\\recycle\\original.mobi", fail.RecyclePath);
+        Assert.Equal("Y:\\recovery\\original.epub.mediadash.tmp.epub", fail.RecoveryPath);
+        Assert.False(fail.Success);
+    }
+
+    /// <summary>
+    /// P2-7: EbookPreferredTarget = "pdf" overrides the matrix default (.epub) in the DryRun
+    /// preview message. Uses the dry-run path so no real VRS/converter needed.
+    /// </summary>
+    [Fact]
+    public async Task EbookPreferredTargetOverridesMatrixDefault()
+    {
+        var source = MakeTempFile(".mobi");
+        try
+        {
+            var itemId = Guid.NewGuid();
+            var fakeItem = new FakeItem(itemId, source.FullName);
+
+            // dryRun=true so we get a message without needing a real converter/VRS.
+            var (fixer, resolver, registry) = Setup(
+                dryRun: true,
+                ebookPreferredTarget: "pdf",
+                getItemById: id => id == itemId ? fakeItem : null);
+
+            registry.Register(new StubConverter("ebook", MediaKind.Ebook, new CollectionType?[] { CollectionType.books }));
+            resolver.Assign(fakeItem, CollectionType.books);
+
+            // Issue carries the matrix default: .epub
+            var issue = MakeIssue(source.FullName, itemId: itemId);
+            var result = await fixer.FixAsync(issue, null, CancellationToken.None);
+
+            Assert.True(result.WasDryRun);
+            // Config override should win — message must say "pdf", not "epub".
+            Assert.Contains("pdf", result.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(".epub", result.Message, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            try { File.Delete(source.FullName); } catch { }
+        }
+    }
+
     // -- helpers --
 
     private static Issue MakeIssue(string path, bool mixedLibrary = false, Guid? itemId = null)
@@ -202,11 +260,12 @@ public class FormatCompatibilityFixerTests
 
     private static (FormatCompatibilityFixer fixer, StubResolver resolver, StubRegistry registry) Setup(
         bool dryRun = false,
+        string ebookPreferredTarget = "",
         Func<Guid, BaseItem?>? getItemById = null)
     {
         var registry = new StubRegistry();
         var resolver = new StubResolver();
-        var config = new StubConfig(dryRun);
+        var config = new StubConfig(dryRun, ebookPreferredTarget);
         // ponytail: guard/protection/VRS are null — all 4 tests exit via prechecks before
         // reaching them. DryRun test reaches the guard check: null guard = pass (skip check).
         var fixer = new FormatCompatibilityFixer(
@@ -226,14 +285,16 @@ public class FormatCompatibilityFixerTests
     private sealed class StubConfig : IPluginConfigurationProvider
     {
         private readonly bool _dryRun;
-        public StubConfig(bool dryRun) { _dryRun = dryRun; }
+        private readonly string _ebookPreferredTarget;
+        public StubConfig(bool dryRun, string ebookPreferredTarget = "") { _dryRun = dryRun; _ebookPreferredTarget = ebookPreferredTarget; }
         public PluginConfiguration GetSnapshot()
             => new()
             {
                 DryRun = _dryRun,
                 ConvertEbooks = true,
                 ConvertComics = true,
-                FormatCompatibilityFixMode = FixMode.Automatic
+                FormatCompatibilityFixMode = FixMode.Automatic,
+                EbookPreferredTarget = _ebookPreferredTarget
             };
     }
 

@@ -58,6 +58,14 @@ public sealed class FixResult
     public string? RecyclePath { get; set; }
 
     /// <summary>
+    /// Gets or sets the path where a staged output survived when the final rename could not
+    /// complete after the original was disposed. Non-null signals a partial commit: the user
+    /// must move this file back manually. Mirrors <c>ReplacementResult.RecoveryPath</c>
+    /// semantics so history UI can render a restore instruction.
+    /// </summary>
+    public string? RecoveryPath { get; set; }
+
+    /// <summary>
     /// Gets or initializes additional files that were recycled during this fix (external subtitle
     /// sidecars, etc.). Each entry gets its own history row so the Recycle Bin tab can render a
     /// Restore button for it — a fix that recycled three files should yield three restorable rows,
