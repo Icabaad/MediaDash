@@ -163,7 +163,9 @@ public sealed class FormatCompatibilityFixer : IFixer
         // For unindexed files (ItemId == Guid.Empty) the item will be null; fall back to the
         // libraryKind the scanner froze into DetailsJson at detection time so the mixed-library gate
         // below uses the actual library type rather than treating every unindexed file as mixed.
-        var item = _getItemById(issue.ItemId);
+        // ponytail: Jellyfin's LibraryManager.GetItemById throws ArgumentException on Guid.Empty
+        // rather than returning null — guard here so folder-merge issues (ItemId always empty) don't crash.
+        var item = issue.ItemId == Guid.Empty ? null : _getItemById(issue.ItemId);
         CollectionType? libraryType;
         if (item is not null)
         {
