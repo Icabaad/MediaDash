@@ -159,8 +159,24 @@ public sealed class FormatCompatibilityFixer : IFixer
         }
 
         // 5. Resolve library type via item lookup + resolver.
+        // For unindexed files (ItemId == Guid.Empty) the item will be null; fall back to the
+        // libraryKind the scanner froze into DetailsJson at detection time so the mixed-library gate
+        // below uses the actual library type rather than treating every unindexed file as mixed.
         var item = _getItemById(issue.ItemId);
-        var libraryType = item is null ? (CollectionType?)null : _resolver.Resolve(item);
+        CollectionType? libraryType;
+        if (item is not null)
+        {
+            libraryType = _resolver.Resolve(item);
+        }
+        else if (details.MixedLibrary)
+        {
+            libraryType = null; // genuinely mixed
+        }
+        else
+        {
+            libraryType = Enum.TryParse<CollectionType>(details.LibraryKind, ignoreCase: true, out var parsed) ? parsed : (CollectionType?)null;
+        }
+
         var isMixed = libraryType is null;
 
         // 6. Mixed-library gate: require per-row approval.
@@ -373,7 +389,8 @@ public sealed class FormatCompatibilityFixer : IFixer
             var targetExt = root.TryGetProperty("targetExt", out var t) && t.ValueKind == JsonValueKind.String ? t.GetString() ?? string.Empty : string.Empty;
             var mixed = root.TryGetProperty("mixedLibrary", out var m) && m.ValueKind == JsonValueKind.True;
             var approvedInMixed = root.TryGetProperty("approvedInMixedLibrary", out var a) && a.ValueKind == JsonValueKind.True;
-            return new Details(converterKey, targetExt, mixed, approvedInMixed);
+            var libraryKind = root.TryGetProperty("libraryKind", out var lk) && lk.ValueKind == JsonValueKind.String ? lk.GetString() ?? string.Empty : string.Empty;
+            return new Details(converterKey, targetExt, mixed, approvedInMixed, libraryKind);
         }
         catch (JsonException)
         {
@@ -454,5 +471,5 @@ public sealed class FormatCompatibilityFixer : IFixer
         }
     }
 
-    private sealed record Details(string ConverterKey, string TargetExt, bool MixedLibrary, bool ApprovedInMixedLibrary);
+    private sealed record Details(string ConverterKey, string TargetExt, bool MixedLibrary, bool ApprovedInMixedLibrary, string LibraryKind = "");
 }
