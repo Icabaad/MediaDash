@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Data.Enums;
+using Jellyfin.Plugin.MediaDash.Configuration;
 using Jellyfin.Plugin.MediaDash.Data;
 using Jellyfin.Plugin.MediaDash.Fixers.Converters;
 using MediaBrowser.Controller.Entities;
@@ -32,19 +33,22 @@ public sealed class FormatCompatibilityScanner : IScanner
     private readonly IFormatConverterRegistry _registry;
     private readonly ILibraryCollectionResolver _resolver;
     private readonly Func<IEnumerable<VirtualFolderInfo>> _getFolders;
+    private readonly IPluginConfigurationProvider _configProvider;
     private readonly ILogger<FormatCompatibilityScanner> _logger;
 
     /// <summary>Initializes a new instance of the <see cref="FormatCompatibilityScanner"/> class.</summary>
     /// <param name="registry">Converter registry.</param>
     /// <param name="resolver">Library-collection-type resolver.</param>
     /// <param name="libraryManager">Jellyfin library manager (for filesystem sweep of unindexed formats).</param>
+    /// <param name="configProvider">Plugin configuration provider.</param>
     /// <param name="logger">Logger.</param>
     public FormatCompatibilityScanner(
         IFormatConverterRegistry registry,
         ILibraryCollectionResolver resolver,
         ILibraryManager libraryManager,
+        IPluginConfigurationProvider configProvider,
         ILogger<FormatCompatibilityScanner> logger)
-        : this(registry, resolver, libraryManager.GetVirtualFolders, logger)
+        : this(registry, resolver, libraryManager.GetVirtualFolders, configProvider, logger)
     {
     }
 
@@ -53,11 +57,13 @@ public sealed class FormatCompatibilityScanner : IScanner
         IFormatConverterRegistry registry,
         ILibraryCollectionResolver resolver,
         Func<IEnumerable<VirtualFolderInfo>> getFolders,
+        IPluginConfigurationProvider configProvider,
         ILogger<FormatCompatibilityScanner> logger)
     {
         _registry = registry;
         _resolver = resolver;
         _getFolders = getFolders;
+        _configProvider = configProvider;
         _logger = logger;
     }
 
@@ -141,6 +147,7 @@ public sealed class FormatCompatibilityScanner : IScanner
         }
 
         ScanUnindexedFiles(issues, now, cancellationToken);
+        ScanAudiobookFolders(issues, now, cancellationToken);
 
         return Task.FromResult<IReadOnlyList<Issue>>(issues);
     }
@@ -228,6 +235,162 @@ public sealed class FormatCompatibilityScanner : IScanner
         }
     }
 
+    private void ScanAudiobookFolders(List<Issue> issues, DateTime now, CancellationToken cancellationToken)
+    {
+        var cfg = _configProvider.GetSnapshot();
+        if (!cfg.AudiobookMergeMultiFile)
+        {
+            return;
+        }
+
+        var converter = _registry.Get("audiobook");
+        if (converter is null)
+        {
+            return;
+        }
+
+        foreach (var folder in _getFolders())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var libraryType = ToCollectionType(folder.CollectionType);
+            // Only Books libraries. Mixed-library merge doesn't make sense; user should move first.
+            if (libraryType != CollectionType.books)
+            {
+                continue;
+            }
+
+            foreach (var location in folder.Locations ?? Array.Empty<string>())
+            {
+                if (string.IsNullOrEmpty(location) || !Directory.Exists(location))
+                {
+                    continue;
+                }
+
+                foreach (var dir in Directory.EnumerateDirectories(location, "*", WalkOptions))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    // Quick rejection: already has an m4b — merge target exists.
+                    if (Directory.EnumerateFiles(dir, "*.m4b", SearchOption.TopDirectoryOnly).Any())
+                    {
+                        continue;
+                    }
+
+                    var candidate = ClassifyFolderAsAudiobookMerge(dir);
+                    if (candidate is null)
+                    {
+                        continue;
+                    }
+
+                    var details = new
+                    {
+                        kind = "audiobook-folder-merge",
+                        files = candidate.Files,
+                        converter = "audiobook",
+                        targetExt = ".m4b",
+                        libraryKind = "books",
+                        mixedLibrary = false
+                    };
+
+                    issues.Add(new Issue
+                    {
+                        Type = IssueType.FormatCompatibility,
+                        ItemId = Guid.Empty,
+                        Path = dir,
+                        DetailsJson = JsonSerializer.Serialize(details),
+                        SuggestedFix = "Merge " + candidate.Files.Count + " chapter files into a single M4B for better Jellyfin browsing.",
+                        SizeSavings = 0,
+                        Status = IssueStatus.Detected,
+                        DetectedAtUtc = now
+                    });
+                }
+            }
+        }
+    }
+
+    private static AudiobookMergeCandidate? ClassifyFolderAsAudiobookMerge(string dir)
+    {
+        var mp3s = Directory.GetFiles(dir, "*.mp3", SearchOption.TopDirectoryOnly);
+        var m4as = Directory.GetFiles(dir, "*.m4a", SearchOption.TopDirectoryOnly);
+
+        // Prefer whichever is majority; refuse mixed extensions.
+        string[] files;
+        string ext;
+        if (mp3s.Length >= 3 && m4as.Length == 0)
+        {
+            files = mp3s;
+            ext = ".mp3";
+        }
+        else if (m4as.Length >= 3 && mp3s.Length == 0)
+        {
+            files = m4as;
+            ext = ".m4a";
+        }
+        else
+        {
+            return null;
+        }
+
+        var numbered = new List<(int Num, string Path)>();
+        foreach (var f in files)
+        {
+            if (TryReadTrackNumber(Path.GetFileNameWithoutExtension(f), out var n))
+            {
+                numbered.Add((n, f));
+            }
+            else
+            {
+                return null; // one un-numbered file → whole folder disqualified
+            }
+        }
+
+        // Strictly ascending, no duplicates.
+        numbered.Sort((a, b) => a.Num.CompareTo(b.Num));
+        for (int i = 1; i < numbered.Count; i++)
+        {
+            if (numbered[i].Num == numbered[i - 1].Num)
+            {
+                return null; // duplicate number
+            }
+        }
+
+        return new AudiobookMergeCandidate(
+            numbered.Select(x => x.Path).ToList(),
+            ext);
+    }
+
+    /// <summary>
+    /// Extracts the last digit run from a filename stem (e.g. "01 - Chapter" → 1, "Chapter 03" → 3).
+    /// Returns false when no digit run is found.
+    /// </summary>
+    /// <param name="filenameStem">Filename without extension.</param>
+    /// <param name="number">The extracted track number, or 0 on failure.</param>
+    /// <returns><see langword="true"/> if a digit run was found; otherwise <see langword="false"/>.</returns>
+    internal static bool TryReadTrackNumber(string filenameStem, out int number)
+    {
+        number = 0;
+        int i = filenameStem.Length - 1;
+        // Skip trailing non-digits.
+        while (i >= 0 && !char.IsDigit(filenameStem[i]))
+        {
+            i--;
+        }
+
+        if (i < 0)
+        {
+            return false;
+        }
+
+        int end = i;
+        while (i >= 0 && char.IsDigit(filenameStem[i]))
+        {
+            i--;
+        }
+
+        int start = i + 1;
+        return int.TryParse(filenameStem.AsSpan(start, end - start + 1), out number);
+    }
+
     // VirtualFolderInfo uses CollectionTypeOptions (MediaBrowser.Model), while the scanner
     // contract uses CollectionType (Jellyfin.Data.Enums). Same lowercase names, different types.
     // CollectionTypeOptions.mixed means no specific type → return null.
@@ -242,4 +405,6 @@ public sealed class FormatCompatibilityScanner : IScanner
             ? parsed
             : null;
     }
+
+    private sealed record AudiobookMergeCandidate(IReadOnlyList<string> Files, string Extension);
 }

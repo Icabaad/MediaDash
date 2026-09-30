@@ -2,9 +2,11 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Data.Enums;
+using Jellyfin.Plugin.MediaDash.Configuration;
 using Jellyfin.Plugin.MediaDash.Data;
 using Jellyfin.Plugin.MediaDash.Fixers.Converters;
 using Jellyfin.Plugin.MediaDash.Scanners;
@@ -25,12 +27,14 @@ public class FormatCompatibilityScannerTests
 
     private static (FormatCompatibilityScanner scanner, FakeResolver resolver) Scanner(
         IEnumerable<VirtualFolderInfo>? folders = null,
+        bool audiobookMerge = false,
         params IFormatConverter[] converters)
     {
         var resolver = new FakeResolver();
         var registry = new FormatConverterRegistry(converters);
         var folderList = folders?.ToList() ?? new List<VirtualFolderInfo>();
-        var scanner = new FormatCompatibilityScanner(registry, resolver, () => folderList, NullLogger<FormatCompatibilityScanner>.Instance);
+        var cfg = new FakeConfigProvider(audiobookMerge);
+        var scanner = new FormatCompatibilityScanner(registry, resolver, () => folderList, cfg, NullLogger<FormatCompatibilityScanner>.Instance);
         return (scanner, resolver);
     }
 
@@ -209,6 +213,176 @@ public class FormatCompatibilityScannerTests
         public FakeBaseItem(string path)
         {
             Path = path;
+        }
+    }
+
+    private sealed class FakeConfigProvider : IPluginConfigurationProvider
+    {
+        private readonly bool _audiobookMerge;
+
+        public FakeConfigProvider(bool audiobookMerge = false) => _audiobookMerge = audiobookMerge;
+
+        public PluginConfiguration GetSnapshot() => new() { AudiobookMergeMultiFile = _audiobookMerge };
+    }
+
+    // ── TryReadTrackNumber unit tests ─────────────────────────────────────────
+
+    [Fact]
+    public void TryReadTrackNumber_NumericPrefix()
+    {
+        Assert.True(FormatCompatibilityScanner.TryReadTrackNumber("01 - Chapter", out var n));
+        Assert.Equal(1, n);
+    }
+
+    [Fact]
+    public void TryReadTrackNumber_NumericSuffix()
+    {
+        Assert.True(FormatCompatibilityScanner.TryReadTrackNumber("Chapter 03", out var n));
+        Assert.Equal(3, n);
+    }
+
+    [Fact]
+    public void TryReadTrackNumber_ZeroPadded()
+    {
+        Assert.True(FormatCompatibilityScanner.TryReadTrackNumber("Part 001", out var n));
+        Assert.Equal(1, n);
+    }
+
+    [Fact]
+    public void TryReadTrackNumber_None()
+    {
+        Assert.False(FormatCompatibilityScanner.TryReadTrackNumber("Chapter", out _));
+    }
+
+    // ── Audiobook folder merge integration tests ──────────────────────────────
+
+    [Fact]
+    public void AudiobookFolderMergeDetectedWhenToggleOn()
+    {
+        var tmp = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tmp);
+        try
+        {
+            File.WriteAllText(Path.Combine(tmp, "01 - Chapter One.mp3"), string.Empty);
+            File.WriteAllText(Path.Combine(tmp, "02 - Chapter Two.mp3"), string.Empty);
+            File.WriteAllText(Path.Combine(tmp, "03 - Chapter Three.mp3"), string.Empty);
+
+            var folder = new VirtualFolderInfo
+            {
+                CollectionType = CollectionTypeOptions.books,
+                Locations = new[] { Path.GetDirectoryName(tmp)! }
+            };
+
+            var (scanner, _) = Scanner(
+                folders: new[] { folder },
+                audiobookMerge: true,
+                converters: new FakeConverter("audiobook", MediaKind.Music, CollectionType.books));
+
+            var issues = Run(scanner);
+
+            var issue = Assert.Single(issues);
+            Assert.Equal(tmp, issue.Path, StringComparer.OrdinalIgnoreCase);
+            Assert.Equal(Guid.Empty, issue.ItemId);
+            Assert.Equal(IssueStatus.Detected, issue.Status);
+            var doc = JsonDocument.Parse(issue.DetailsJson).RootElement;
+            Assert.Equal("audiobook-folder-merge", doc.GetProperty("kind").GetString());
+            Assert.Equal(3, doc.GetProperty("files").GetArrayLength());
+        }
+        finally
+        {
+            Directory.Delete(tmp, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void AudiobookFolderMergeSkippedWhenToggleOff()
+    {
+        var tmp = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tmp);
+        try
+        {
+            File.WriteAllText(Path.Combine(tmp, "01 - Chapter One.mp3"), string.Empty);
+            File.WriteAllText(Path.Combine(tmp, "02 - Chapter Two.mp3"), string.Empty);
+            File.WriteAllText(Path.Combine(tmp, "03 - Chapter Three.mp3"), string.Empty);
+
+            var folder = new VirtualFolderInfo
+            {
+                CollectionType = CollectionTypeOptions.books,
+                Locations = new[] { Path.GetDirectoryName(tmp)! }
+            };
+
+            var (scanner, _) = Scanner(
+                folders: new[] { folder },
+                audiobookMerge: false,
+                converters: new FakeConverter("audiobook", MediaKind.Music, CollectionType.books));
+
+            Assert.Empty(Run(scanner));
+        }
+        finally
+        {
+            Directory.Delete(tmp, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void AudiobookFolderMergeSkippedWhenM4bAlreadyPresent()
+    {
+        var tmp = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tmp);
+        try
+        {
+            File.WriteAllText(Path.Combine(tmp, "01 - Chapter One.mp3"), string.Empty);
+            File.WriteAllText(Path.Combine(tmp, "02 - Chapter Two.mp3"), string.Empty);
+            File.WriteAllText(Path.Combine(tmp, "03 - Chapter Three.mp3"), string.Empty);
+            File.WriteAllText(Path.Combine(tmp, "book.m4b"), string.Empty);
+
+            var folder = new VirtualFolderInfo
+            {
+                CollectionType = CollectionTypeOptions.books,
+                Locations = new[] { Path.GetDirectoryName(tmp)! }
+            };
+
+            var (scanner, _) = Scanner(
+                folders: new[] { folder },
+                audiobookMerge: true,
+                converters: new FakeConverter("audiobook", MediaKind.Music, CollectionType.books));
+
+            Assert.Empty(Run(scanner));
+        }
+        finally
+        {
+            Directory.Delete(tmp, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void AudiobookFolderMergeSkippedWhenNumberingBroken()
+    {
+        var tmp = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tmp);
+        try
+        {
+            // No numeric stem — TryReadTrackNumber returns false → folder disqualified.
+            File.WriteAllText(Path.Combine(tmp, "chapter.mp3"), string.Empty);
+            File.WriteAllText(Path.Combine(tmp, "intro.mp3"), string.Empty);
+            File.WriteAllText(Path.Combine(tmp, "outro.mp3"), string.Empty);
+
+            var folder = new VirtualFolderInfo
+            {
+                CollectionType = CollectionTypeOptions.books,
+                Locations = new[] { Path.GetDirectoryName(tmp)! }
+            };
+
+            var (scanner, _) = Scanner(
+                folders: new[] { folder },
+                audiobookMerge: true,
+                converters: new FakeConverter("audiobook", MediaKind.Music, CollectionType.books));
+
+            Assert.Empty(Run(scanner));
+        }
+        finally
+        {
+            Directory.Delete(tmp, recursive: true);
         }
     }
 }
