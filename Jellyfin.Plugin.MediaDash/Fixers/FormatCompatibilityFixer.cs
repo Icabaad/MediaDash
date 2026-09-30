@@ -132,17 +132,18 @@ public sealed class FormatCompatibilityFixer : IFixer
     {
         var config = _configProvider.GetSnapshot();
 
-        // 1. Source must exist.
-        if (!File.Exists(issue.Path))
-        {
-            return FixResult.Fail(FixReason.SourceMissing, "The source file is missing; re-scan to refresh the issue list.");
-        }
-
-        // 2. Details must parse.
+        // 2. Details must parse (done first so we know the kind before the existence check).
         var details = ParseDetails(issue.DetailsJson);
         if (details is null || string.IsNullOrEmpty(details.ConverterKey) || string.IsNullOrEmpty(details.TargetExt))
         {
             return FixResult.Refused(FixReason.SourceExtensionNotConvertible, "Issue details are missing the conversion target.");
+        }
+
+        // 1. Source must exist — for folder-merge, the path is a directory.
+        var isFolderMerge = string.Equals(details.Kind, "audiobook-folder-merge", StringComparison.OrdinalIgnoreCase);
+        if (isFolderMerge ? !Directory.Exists(issue.Path) : !File.Exists(issue.Path))
+        {
+            return FixResult.Fail(FixReason.SourceMissing, "The source file is missing; re-scan to refresh the issue list.");
         }
 
         // 3. Converter must be registered.
@@ -236,13 +237,71 @@ public sealed class FormatCompatibilityFixer : IFixer
         }
 
         // 12. Conversion.
+        var destinationPath = Path.ChangeExtension(issue.Path, targetExt);
+
+        // Folder-merge: converter writes a new M4B next to the source folder; the source folder
+        // is left untouched (VRS cannot handle a directory source). No recycle, no swap protocol.
+        // ponytail: VRS bypass for folder-merge — VRS.GetLength on a directory throws or returns 0;
+        // no swap needed because we're creating a new sibling file, not replacing any existing one.
+        if (isFolderMerge)
+        {
+            var stagedPath = issue.Path + InflightTail + targetExt;
+            ConversionResult folderConversion;
+            try
+            {
+                folderConversion = await converter.ConvertAsync(issue.Path, stagedPath, progress, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                SafeDelete(stagedPath);
+                throw;
+            }
+            catch (Exception ex)
+            {
+                SafeDelete(stagedPath);
+                return FixResult.Fail(FixReason.ConverterFailed, "Converter threw unexpectedly.", ex.Message);
+            }
+
+            if (!folderConversion.Success || folderConversion.StagedPath is null || !File.Exists(folderConversion.StagedPath))
+            {
+                SafeDelete(stagedPath);
+                return FixResult.Fail(FixReason.ConverterFailed, folderConversion.Reason, folderConversion.TechnicalDetail);
+            }
+
+            // Verify then rename staged → destination directly.
+            var verifyError = await VerifyOutputAsync(folderConversion.StagedPath, cancellationToken).ConfigureAwait(false);
+            if (verifyError is not null)
+            {
+                SafeDelete(stagedPath);
+                return FixResult.Fail(FixReason.VerificationFailed, verifyError);
+            }
+
+            try
+            {
+                File.Move(folderConversion.StagedPath, destinationPath, overwrite: true);
+            }
+            catch (IOException ex)
+            {
+                SafeDelete(stagedPath);
+                return FixResult.Fail(FixReason.ProcessFailed, "Could not rename staged M4B to destination.", ex.Message);
+            }
+
+            _libraryMonitor?.ReportFileSystemChanged(destinationPath);
+            _logger.LogInformation("FormatCompatibilityFixer: folder-merged {Source} → {Dest}", issue.Path, destinationPath);
+            return new FixResult
+            {
+                Success = true,
+                Message = "Merged " + Path.GetFileName(issue.Path) + " → " + Path.GetFileName(destinationPath)
+            };
+        }
+
         // P1-2: capture source identity BEFORE conversion so a mid-conversion source mutation
         // is detected by VRS's identity recheck and the stale encode is refused.
         var sourceInfoBeforeConvert = new FileInfo(issue.Path);
         var expectedSourceLength = sourceInfoBeforeConvert.Length;
         var expectedSourceMtimeTicks = sourceInfoBeforeConvert.LastWriteTimeUtc.Ticks;
 
-        var stagedPath = issue.Path + InflightTail + targetExt;
+        var stagedFilePath = issue.Path + InflightTail + targetExt;
 
         // Keep converter.Kind in a local so the P1-1 policy callback below can capture it
         // without capturing the converter object itself (avoids converter keeping alive longer
@@ -252,27 +311,26 @@ public sealed class FormatCompatibilityFixer : IFixer
         ConversionResult conversion;
         try
         {
-            conversion = await converter.ConvertAsync(issue.Path, stagedPath, progress, cancellationToken).ConfigureAwait(false);
+            conversion = await converter.ConvertAsync(issue.Path, stagedFilePath, progress, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
-            SafeDelete(stagedPath);
+            SafeDelete(stagedFilePath);
             throw;
         }
         catch (Exception ex)
         {
-            SafeDelete(stagedPath);
+            SafeDelete(stagedFilePath);
             return FixResult.Fail(FixReason.ConverterFailed, "Converter threw unexpectedly.", ex.Message);
         }
 
         if (!conversion.Success || conversion.StagedPath is null || !File.Exists(conversion.StagedPath))
         {
-            SafeDelete(stagedPath);
+            SafeDelete(stagedFilePath);
             return FixResult.Fail(FixReason.ConverterFailed, conversion.Reason, conversion.TechnicalDetail);
         }
 
         // 13. Verified replacement (swap-and-recycle protocol).
-        var destinationPath = Path.ChangeExtension(issue.Path, targetExt);
         var request = new ReplacementRequest(
             SourcePath: issue.Path,
             OutputPath: conversion.StagedPath,
@@ -329,7 +387,7 @@ public sealed class FormatCompatibilityFixer : IFixer
             // user may need; deleting stagedPath is either a no-op or wrong in that case.
             if (string.IsNullOrEmpty(replaceResult.RecyclePath) && string.IsNullOrEmpty(replaceResult.RecoveryPath))
             {
-                SafeDelete(stagedPath);
+                SafeDelete(stagedFilePath);
             }
 
             var fail = FixResult.Fail(replaceResult.Reason, replaceResult.TechnicalDetail ?? "Replacement failed.");
@@ -390,7 +448,8 @@ public sealed class FormatCompatibilityFixer : IFixer
             var mixed = root.TryGetProperty("mixedLibrary", out var m) && m.ValueKind == JsonValueKind.True;
             var approvedInMixed = root.TryGetProperty("approvedInMixedLibrary", out var a) && a.ValueKind == JsonValueKind.True;
             var libraryKind = root.TryGetProperty("libraryKind", out var lk) && lk.ValueKind == JsonValueKind.String ? lk.GetString() ?? string.Empty : string.Empty;
-            return new Details(converterKey, targetExt, mixed, approvedInMixed, libraryKind);
+            var kind = root.TryGetProperty("kind", out var k) && k.ValueKind == JsonValueKind.String ? k.GetString() ?? string.Empty : string.Empty;
+            return new Details(converterKey, targetExt, mixed, approvedInMixed, libraryKind, kind);
         }
         catch (JsonException)
         {
@@ -471,5 +530,5 @@ public sealed class FormatCompatibilityFixer : IFixer
         }
     }
 
-    private sealed record Details(string ConverterKey, string TargetExt, bool MixedLibrary, bool ApprovedInMixedLibrary, string LibraryKind = "");
+    private sealed record Details(string ConverterKey, string TargetExt, bool MixedLibrary, bool ApprovedInMixedLibrary, string LibraryKind = "", string Kind = "");
 }
