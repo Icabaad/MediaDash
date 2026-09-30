@@ -7,6 +7,7 @@ using Jellyfin.Data.Enums;
 using Jellyfin.Plugin.MediaDash.Configuration;
 using Jellyfin.Plugin.MediaDash.Data;
 using Jellyfin.Plugin.MediaDash.Fixers.Converters;
+using Jellyfin.Plugin.MediaDash.Probing;
 using Jellyfin.Plugin.MediaDash.Scanners;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
@@ -206,7 +207,19 @@ public sealed class FormatCompatibilityFixer : IFixer
         }
 
         // 12. Conversion.
+        // P1-2: capture source identity BEFORE conversion so a mid-conversion source mutation
+        // is detected by VRS's identity recheck and the stale encode is refused.
+        var sourceInfoBeforeConvert = new FileInfo(issue.Path);
+        var expectedSourceLength = sourceInfoBeforeConvert.Length;
+        var expectedSourceMtimeTicks = sourceInfoBeforeConvert.LastWriteTimeUtc.Ticks;
+
         var stagedPath = issue.Path + InflightTail + details.TargetExt;
+
+        // Keep converter.Kind in a local so the P1-1 policy callback below can capture it
+        // without capturing the converter object itself (avoids converter keeping alive longer
+        // than needed and makes the closure dependency explicit).
+        var converterKind = converter.Kind;
+
         ConversionResult conversion;
         try
         {
@@ -230,23 +243,54 @@ public sealed class FormatCompatibilityFixer : IFixer
         }
 
         // 13. Verified replacement (swap-and-recycle protocol).
-        var sourceInfo = new FileInfo(issue.Path);
         var destinationPath = Path.ChangeExtension(issue.Path, details.TargetExt);
         var request = new ReplacementRequest(
             SourcePath: issue.Path,
             OutputPath: conversion.StagedPath,
             DestinationPath: destinationPath,
-            ExpectedSourceLength: sourceInfo.Length,
-            ExpectedSourceMtimeUtcTicks: sourceInfo.LastWriteTimeUtc.Ticks,
+            ExpectedSourceLength: expectedSourceLength,
+            ExpectedSourceMtimeUtcTicks: expectedSourceMtimeTicks,
             RecycleOriginal: config.FormatCompatibilityDisposal == DisposalMethod.RecycleBin);
 
         var vrs = _replacement ?? throw new InvalidOperationException("FormatCompatibilityFixer: VerifiedReplacementService is required for the live path but was not injected.");
 
         var stagedForVerify = conversion.StagedPath;
+
+        // P1-1: re-consult live config + protection immediately before the commit so a mid-
+        // conversion dry-run flip, fixer disable, per-kind toggle off, or protection addition
+        // aborts before any file is touched. Pattern from TranscodeFixer.EvaluateCommitPolicy
+        // (external audit P1-F3, 1.0.8.0).
+        PolicyDecision CheckCurrentPolicy()
+        {
+            var freshCfg = _configProvider.GetSnapshot();
+            if (freshCfg.DryRun)
+            {
+                return PolicyDecision.Refuse(FixReason.TypeDisabled);
+            }
+
+            var mode = freshCfg.GetFixMode(IssueType.FormatCompatibility);
+            if (mode == FixMode.Off || mode == FixMode.DetectOnly)
+            {
+                return PolicyDecision.Refuse(FixReason.TypeDisabled);
+            }
+
+            if (!IsKindEnabled(freshCfg, converterKind))
+            {
+                return PolicyDecision.Refuse(FixReason.TypeDisabled);
+            }
+
+            if (_protection is not null && _protection.IsFixerBlocked(issue.Path, issue.Type))
+            {
+                return PolicyDecision.Refuse(FixReason.Protected);
+            }
+
+            return PolicyDecision.Allow;
+        }
+
         var replaceResult = await vrs.ReplaceAsync(
             request,
             ct => VerifyOutputAsync(stagedForVerify, ct),
-            () => PolicyDecision.Allow,
+            CheckCurrentPolicy,
             cancellationToken).ConfigureAwait(false);
 
         if (!replaceResult.Applied)
@@ -314,10 +358,15 @@ public sealed class FormatCompatibilityFixer : IFixer
         }
     }
 
-    private static Task<string?> VerifyOutputAsync(string stagedPath, CancellationToken ct)
+    // P1-3: dispatch to the existing BookProbeService/ComicProbeService structural probes so
+    // an unreadable or truncated converted output is refused before the original is disposed.
+    // VRS verifyOutput signature is Func<CancellationToken, Task<string?>> — stagedPath
+    // is captured by the caller's closure, ct is passed by VRS.
+    // internal for direct unit testing (InternalsVisibleTo tests project).
+    internal static Task<string?> VerifyOutputAsync(string stagedPath, CancellationToken ct)
     {
-        // Lightweight post-conversion check: file must exist and be non-empty.
-        // ponytail: deeper format-integrity probe (EPUB structure, CBZ validity) is Phase 2.5.
+        ct.ThrowIfCancellationRequested();
+
         if (!File.Exists(stagedPath))
         {
             return Task.FromResult<string?>("Converted output is missing after conversion.");
@@ -326,6 +375,43 @@ public sealed class FormatCompatibilityFixer : IFixer
         if (new FileInfo(stagedPath).Length == 0)
         {
             return Task.FromResult<string?>("Converted output is empty.");
+        }
+
+        var ext = Path.GetExtension(stagedPath).ToLowerInvariant();
+        switch (ext)
+        {
+            case ".epub":
+            case ".pdf":
+            case ".mobi":
+            case ".azw":
+            case ".azw3":
+            case ".djvu":
+            {
+                var probe = BookProbeService.Probe(stagedPath);
+                if (!probe.Ok)
+                {
+                    return Task.FromResult<string?>("Converted output failed integrity probe: " + probe.Reason);
+                }
+
+                break;
+            }
+
+            case ".cbz":
+            case ".cbr":
+            case ".cb7":
+            {
+                var probe = ComicProbeService.Probe(stagedPath);
+                if (!probe.Ok)
+                {
+                    return Task.FromResult<string?>("Converted output failed integrity probe: " + probe.Reason);
+                }
+
+                break;
+            }
+
+            // ponytail: image/music/video converters are Phase 4+; add ffprobe check when those land.
+            default:
+                break;
         }
 
         return Task.FromResult<string?>(null);
