@@ -113,6 +113,7 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddSingleton<IToolchainDownloader, CalibreDownloader>();
         serviceCollection.AddSingleton<IFormatConverter, ComicConverter>();
         serviceCollection.AddSingleton<IFormatConverter, EbookConverter>();
+        serviceCollection.AddSingleton<IFormatConverter, AudiobookConverter>();
         serviceCollection.AddSingleton(sp => new CalibreToolchain(
             sp.GetRequiredService<IToolchainDownloader>(),
             sp.GetRequiredService<ILogger<CalibreToolchain>>(),
