@@ -832,6 +832,16 @@
                             '<span style="font-size:13px;font-weight:600;flex:0 0 auto;">Convert comics (CBR, CB7 → CBZ)</span>' +
                             '<span class="mdFieldHint" style="margin:0;flex:1;">No extra tool needed — repacked in-process.</span>' +
                         '</label>' +
+                        '<label class="mdInsetRow" style="cursor:pointer;" title="Convert AAX/AA audiobooks to M4B; detect-only for DRM-protected AAX. Numbered folders of MP3s can be merged into a single M4B. Originals go to the recycle bin.">' +
+                            '<input id="mdConvertAudiobooks" type="checkbox" class="mdInsetCheck" />' +
+                            '<span style="font-size:13px;font-weight:600;flex:0 0 auto;">Convert audiobooks (AAX/AA detect-only; multi-file folders can merge)</span>' +
+                            '<span class="mdFieldHint" style="margin:0;flex:1;">AAX/AA files are detected but not converted (DRM-protected). Folder-of-MP3s audiobooks can be merged into a single M4B if enabled below.</span>' +
+                        '</label>' +
+                        '<label class="mdInsetRow" style="cursor:pointer;margin-left:1.5em;" title="When Convert audiobooks is enabled, automatically merge numbered folders of MP3s into a single M4B file.">' +
+                            '<input id="mdAudiobookMergeMultiFile" type="checkbox" class="mdInsetCheck" />' +
+                            '<span style="font-size:13px;font-weight:600;flex:0 0 auto;">Merge numbered folder-of-MP3s audiobooks into a single M4B</span>' +
+                            '<span class="mdFieldHint" style="margin:0;flex:1;">Consolidates 01.mp3, 02.mp3, etc. into one audiobook. Requires Convert audiobooks to be on.</span>' +
+                        '</label>' +
                         '<div class="mdField" style="margin-top:.6em;">' +
                             '<label for="mdCalibreOverridePath" title="Full path to the ebook-convert binary. Leave empty to use the system PATH or let MediaDash auto-download Calibre on first fix.">Calibre override path</label>' +
                             '<input id="mdCalibreOverridePath" type="text" is="emby-input" placeholder="/usr/bin/ebook-convert or C:\\Program Files\\Calibre2\\ebook-convert.exe" />' +
@@ -1778,6 +1788,8 @@
                 view.querySelector('#mdOrphanMetadata').checked = c.OrphanScanMetadata !== false;
                 view.querySelector('#mdConvertEbooks').checked = !!c.ConvertEbooks;
                 view.querySelector('#mdConvertComics').checked = !!c.ConvertComics;
+                view.querySelector('#mdConvertAudiobooks').checked = !!c.ConvertAudiobooks;
+                view.querySelector('#mdAudiobookMergeMultiFile').checked = !!c.AudiobookMergeMultiFile;
                 view.querySelector('#mdCalibreOverridePath').value = c.CalibreOverridePath || '';
                 view.querySelector('#mdEbookPreferredTarget').value = c.EbookPreferredTarget || '';
             }
@@ -1971,6 +1983,8 @@
                 c.OrphanScanMetadata = view.querySelector('#mdOrphanMetadata').checked;
                 c.ConvertEbooks = view.querySelector('#mdConvertEbooks').checked;
                 c.ConvertComics = view.querySelector('#mdConvertComics').checked;
+                c.ConvertAudiobooks = view.querySelector('#mdConvertAudiobooks').checked;
+                c.AudiobookMergeMultiFile = view.querySelector('#mdAudiobookMergeMultiFile').checked;
                 c.CalibreOverridePath = (view.querySelector('#mdCalibreOverridePath').value || '').trim();
                 c.EbookPreferredTarget = view.querySelector('#mdEbookPreferredTarget').value || '';
             }
