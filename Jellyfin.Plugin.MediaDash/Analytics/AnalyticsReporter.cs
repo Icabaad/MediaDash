@@ -48,6 +48,7 @@ public sealed class AnalyticsReporter
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(15) };
 
     private readonly HistoryStore _history;
+    private readonly IssueStore _issues;
     private readonly IServerApplicationHost _appHost;
     private readonly ILogger<AnalyticsReporter> _logger;
 
@@ -55,11 +56,13 @@ public sealed class AnalyticsReporter
     /// Initializes a new instance of the <see cref="AnalyticsReporter"/> class.
     /// </summary>
     /// <param name="history">History-table store (05-C.3), used to aggregate the current month's history.</param>
+    /// <param name="issues">Issue-table store, used for per-converter detected counts.</param>
     /// <param name="appHost">Application host, used for the Jellyfin version string.</param>
     /// <param name="logger">The logger.</param>
-    public AnalyticsReporter(HistoryStore history, IServerApplicationHost appHost, ILogger<AnalyticsReporter> logger)
+    public AnalyticsReporter(HistoryStore history, IssueStore issues, IServerApplicationHost appHost, ILogger<AnalyticsReporter> logger)
     {
         _history = history;
+        _issues = issues;
         _appHost = appHost;
         _logger = logger;
     }
@@ -86,6 +89,8 @@ public sealed class AnalyticsReporter
             var monthEnd = monthStart.AddMonths(1);
             var installId = ComputeMonthlyInstallId(_appHost.SystemId, monthStart);
             var aggregate = _history.GetMonthAggregate(monthStart, monthEnd);
+            var formatCompatHistory = _history.GroupFormatCompatibilityHistoryByConverter(monthStart, monthEnd);
+            var formatCompatDetected = _issues.GroupFormatCompatibilityIssuesByConverter();
 
             var pluginVersion = Plugin.Instance?.Version?.ToString(3) ?? string.Empty;
             var jellyfinVersion = _appHost.ApplicationVersionString ?? string.Empty;
@@ -114,7 +119,11 @@ public sealed class AnalyticsReporter
                 ["p_heavy_transcode"] = Count(aggregate, IssueType.HeavyTranscode),
                 ["p_failed_transcode"] = Count(aggregate, IssueType.FailedTranscode),
                 ["p_embedded_cover_art"] = Count(aggregate, IssueType.EmbeddedCoverArt),
-                ["p_bytes_freed"] = aggregate.BytesFreed
+                ["p_bytes_freed"] = aggregate.BytesFreed,
+                // Per-converter breakdown for FormatCompatibility (counts + bytes only — no paths/filenames).
+                ["p_format_compat_detected_by_converter"] = formatCompatDetected,
+                ["p_format_compat_fixed_by_converter"] = formatCompatHistory.FixedByConverter,
+                ["p_format_compat_bytes_reclaimed_by_converter"] = formatCompatHistory.BytesReclaimedByConverter
             };
 
             using var request = new HttpRequestMessage(HttpMethod.Post, BaseUrl + "/rest/v1/rpc/report_stats");

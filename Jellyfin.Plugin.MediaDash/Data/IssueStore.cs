@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text.Json;
 using Microsoft.Data.Sqlite;
 
 namespace Jellyfin.Plugin.MediaDash.Data;
@@ -495,6 +496,67 @@ public sealed class IssueStore
         cmd.Parameters.AddWithValue("@detected", (int)IssueStatus.Detected);
         cmd.Parameters.AddWithValue("@queued", (int)IssueStatus.Queued);
         return cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Counts open FormatCompatibility issues (Detected + Queued) grouped by the <c>converter</c>
+    /// field in each row's DetailsJson. Rows without a parsable <c>converter</c> key are bucketed
+    /// as <c>"unknown"</c>. Called by <see cref="Analytics.AnalyticsReporter"/> for the per-converter
+    /// breakdown; internal so the static helper is directly testable.
+    /// </summary>
+    /// <returns>Dictionary of converter key → count.</returns>
+    public IReadOnlyDictionary<string, int> GroupFormatCompatibilityIssuesByConverter()
+    {
+        var rows = GetIssues(IssueType.FormatCompatibility);
+        return GroupByConverter(rows.Select(i => i.DetailsJson));
+    }
+
+    /// <summary>
+    /// Extracts the <c>converter</c> string from each DetailsJson blob and groups counts by it.
+    /// Rows without a parsable <c>converter</c> string fall into the <c>"unknown"</c> bucket.
+    /// Static and internal so tests can call it without a live store.
+    /// </summary>
+    /// <param name="detailsJsonSequence">Sequence of DetailsJson strings (one per issue/history row).</param>
+    /// <returns>Dictionary of converter key → count.</returns>
+    internal static IReadOnlyDictionary<string, int> GroupByConverter(IEnumerable<string> detailsJsonSequence)
+    {
+        var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var json in detailsJsonSequence)
+        {
+            var key = ExtractConverterKey(json);
+            counts.TryGetValue(key, out var n);
+            counts[key] = n + 1;
+        }
+
+        return counts;
+    }
+
+    /// <summary>Parses the <c>converter</c> field from a DetailsJson blob; returns <c>"unknown"</c> on any parse failure.</summary>
+    /// <param name="json">The raw DetailsJson string from the DB, or null.</param>
+    /// <returns>The converter key string, or <c>"unknown"</c> when absent or unparsable.</returns>
+    internal static string ExtractConverterKey(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return "unknown";
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.TryGetProperty("converter", out var prop) &&
+                prop.ValueKind == JsonValueKind.String)
+            {
+                var val = prop.GetString();
+                return string.IsNullOrEmpty(val) ? "unknown" : val;
+            }
+        }
+        catch (JsonException)
+        {
+            // ponytail: malformed JSON → unknown bucket, not a throw
+        }
+
+        return "unknown";
     }
 
     /// <summary>Overwrites the details column for a single issue row.</summary>

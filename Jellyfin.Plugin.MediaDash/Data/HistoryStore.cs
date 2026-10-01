@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Text.Json;
 
 namespace Jellyfin.Plugin.MediaDash.Data;
 
@@ -35,8 +37,8 @@ public sealed class HistoryStore
         using var connection = _connectionFactory.Open();
         using var cmd = connection.CreateCommand();
         cmd.CommandText = """
-            INSERT INTO history (issue_id, type, path, action, bytes_freed, recycle_path, fixed_at_utc, dry_run, restored, success)
-            VALUES (@issueId, @type, @path, @action, @bytesFreed, @recyclePath, @fixedAt, @dryRun, 0, @success)
+            INSERT INTO history (issue_id, type, path, action, bytes_freed, recycle_path, fixed_at_utc, dry_run, restored, success, saved_bytes)
+            VALUES (@issueId, @type, @path, @action, @bytesFreed, @recyclePath, @fixedAt, @dryRun, 0, @success, @savedBytes)
             """;
         cmd.Parameters.AddWithValue("@issueId", entry.IssueId);
         cmd.Parameters.AddWithValue("@type", (int)entry.Type);
@@ -47,6 +49,7 @@ public sealed class HistoryStore
         cmd.Parameters.AddWithValue("@fixedAt", entry.FixedAtUtc.Ticks);
         cmd.Parameters.AddWithValue("@dryRun", entry.WasDryRun ? 1 : 0);
         cmd.Parameters.AddWithValue("@success", entry.Success ? 1 : 0);
+        cmd.Parameters.AddWithValue("@savedBytes", entry.SavedBytes);
         cmd.ExecuteNonQuery();
     }
 
@@ -156,6 +159,59 @@ public sealed class HistoryStore
     }
 
     /// <summary>
+    /// Batch lookup: for each issue id, returns the most recent non-dry-run history row
+    /// (successful or failed). Used by the Issues tab to render "last attempt: X, Y ago" on
+    /// rows that keep failing silently. Chunks the IN-list so SQLite's 999-parameter cap can't
+    /// throw on a "show 500 issues at once" page.
+    /// </summary>
+    /// <param name="issueIds">Issue ids to look up (deduplicated inside; empty is a no-op).</param>
+    /// <returns>Dictionary keyed by issue id; ids without any history row are absent.</returns>
+    public IReadOnlyDictionary<long, HistoryEntry> GetLatestAttemptsByIssueIds(IReadOnlyList<long> issueIds)
+    {
+        var result = new Dictionary<long, HistoryEntry>();
+        if (issueIds is null || issueIds.Count == 0)
+        {
+            return result;
+        }
+
+        var distinct = issueIds.Where(id => id > 0).Distinct().ToList();
+        if (distinct.Count == 0)
+        {
+            return result;
+        }
+
+        const int chunkSize = 500;
+        using var connection = _connectionFactory.Open();
+        for (var offset = 0; offset < distinct.Count; offset += chunkSize)
+        {
+            var count = Math.Min(chunkSize, distinct.Count - offset);
+            using var cmd = connection.CreateCommand();
+            var placeholders = string.Join(",", Enumerable.Range(0, count).Select(i => "@id" + i.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+#pragma warning disable CA2100, CA3001 // placeholder list is machine-composed from an int range
+            cmd.CommandText = "SELECT " + HistoryRowReader.ProjectionColumns
+                + " FROM history h1"
+                + " WHERE h1.issue_id IN (" + placeholders + ") AND h1.dry_run = 0"
+                + " AND h1.fixed_at_utc = (SELECT MAX(h2.fixed_at_utc) FROM history h2 WHERE h2.issue_id = h1.issue_id AND h2.dry_run = 0)";
+#pragma warning restore CA2100, CA3001
+            for (var i = 0; i < count; i++)
+            {
+                cmd.Parameters.AddWithValue("@id" + i.ToString(System.Globalization.CultureInfo.InvariantCulture), distinct[offset + i]);
+            }
+
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                if (HistoryRowReader.TryRead(reader, "history", out var entry) && !result.ContainsKey(entry.IssueId))
+                {
+                    result[entry.IssueId] = entry;
+                }
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
     /// Counts failed non-dry-run history rows since the given watermark (Config.HistoryHiddenBeforeUtcTicks).
     /// Powers the History tab's badge. 0 for a fresh install or when everything has been cleared.
     /// </summary>
@@ -205,6 +261,57 @@ public sealed class HistoryStore
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Groups successful, non-dry-run FormatCompatibility history rows by the <c>converter</c>
+    /// field in the originating issue's DetailsJson, for the given month window. Returns both
+    /// fix counts and bytes reclaimed per converter. Rows without a parsable converter key are
+    /// bucketed as <c>"unknown"</c>.
+    /// Called by <see cref="Analytics.AnalyticsReporter"/>; internal so tests can call it directly.
+    /// </summary>
+    /// <param name="monthStartUtc">Inclusive lower bound (UTC).</param>
+    /// <param name="monthEndUtc">Exclusive upper bound (UTC).</param>
+    /// <returns>Per-converter fixed counts and net bytes reclaimed.</returns>
+    public FormatCompatConverterAggregate GroupFormatCompatibilityHistoryByConverter(DateTime monthStartUtc, DateTime monthEndUtc)
+    {
+        // JOIN history → issues so we can read the converter key from DetailsJson.
+        // The issue row may have been deleted after the fix ran (e.g. WipeDetected), in which case
+        // the LEFT JOIN gives a NULL details column — those rows fall into the "unknown" bucket.
+        using var connection = _connectionFactory.Open();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT h.bytes_freed, i.details
+            FROM history h
+            LEFT JOIN issues i ON i.id = h.issue_id
+            WHERE h.type = @type
+              AND h.success = 1
+              AND h.dry_run = 0
+              AND h.fixed_at_utc >= @start
+              AND h.fixed_at_utc < @end
+            """;
+        cmd.Parameters.AddWithValue("@type", (int)IssueType.FormatCompatibility);
+        cmd.Parameters.AddWithValue("@start", monthStartUtc.Ticks);
+        cmd.Parameters.AddWithValue("@end", monthEndUtc.Ticks);
+
+        var fixedCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+        var bytesReclaimed = new Dictionary<string, long>(StringComparer.Ordinal);
+
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            var bytes = reader.GetInt64(0);
+            var details = reader.IsDBNull(1) ? null : reader.GetString(1);
+            var key = IssueStore.ExtractConverterKey(details);
+
+            fixedCounts.TryGetValue(key, out var n);
+            fixedCounts[key] = n + 1;
+
+            bytesReclaimed.TryGetValue(key, out var b);
+            bytesReclaimed[key] = b + bytes;
+        }
+
+        return new FormatCompatConverterAggregate(fixedCounts, bytesReclaimed);
     }
 
     /// <summary>Per-type breakdown of the lifetime reclaim total.</summary>
