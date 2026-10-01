@@ -33,7 +33,10 @@ public sealed class ImageConverter : IFormatConverter
 
     private static readonly TimeSpan ConversionTimeout = TimeSpan.FromMinutes(10);
 
-    private readonly string _ffmpegPath;
+    // ponytail: store IMediaEncoder, not EncoderPath — EncoderPath is resolved lazily by Jellyfin
+    // (empty string at DI construction time, valid path after encoder detection completes).
+    private readonly IMediaEncoder? _mediaEncoder;
+    private readonly string _ffmpegPathOverride; // used by test ctors only
     private readonly ILogger<ImageConverter> _logger;
 
     /// <summary>Initializes a new instance of the <see cref="ImageConverter"/> class for DI.</summary>
@@ -41,7 +44,8 @@ public sealed class ImageConverter : IFormatConverter
     /// <param name="logger">The logger.</param>
     public ImageConverter(IMediaEncoder mediaEncoder, ILogger<ImageConverter> logger)
     {
-        _ffmpegPath = mediaEncoder.EncoderPath;
+        _mediaEncoder = mediaEncoder;
+        _ffmpegPathOverride = string.Empty;
         _logger = logger;
     }
 
@@ -54,12 +58,14 @@ public sealed class ImageConverter : IFormatConverter
 
     internal ImageConverter(string ffmpegPath)
     {
-        _ffmpegPath = ffmpegPath;
+        _ffmpegPathOverride = ffmpegPath;
         _logger = NullLogger<ImageConverter>.Instance;
     }
 
     /// <inheritdoc />
     public string Key => "image";
+
+    private string FfmpegPath => _mediaEncoder?.EncoderPath ?? _ffmpegPathOverride;
 
     /// <inheritdoc />
     public MediaKind Kind => MediaKind.Image;
@@ -86,11 +92,17 @@ public sealed class ImageConverter : IFormatConverter
     {
         try
         {
+            var ffmpegPath = FfmpegPath;
+            if (string.IsNullOrEmpty(ffmpegPath))
+            {
+                return new ConversionResult(false, null, "ffmpeg is not available. Jellyfin's transcoding path may be misconfigured.");
+            }
+
             Directory.CreateDirectory(Path.GetDirectoryName(stagedTargetPath)!);
 
             var psi = new ProcessStartInfo
             {
-                FileName = _ffmpegPath,
+                FileName = ffmpegPath,
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
