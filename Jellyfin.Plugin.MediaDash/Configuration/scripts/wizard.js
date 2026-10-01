@@ -7,23 +7,24 @@
             // ---------- First run wizard ----------
 
             var WIZ_STEP_LABELS = [
-                'Step 1 of 17 — Welcome',
-                'Step 2 of 17 — Libraries',
-                'Step 3 of 17 — Duplicates',
-                'Step 4 of 17 — Broken files',
-                'Step 5 of 17 — Oversized files',
-                'Step 6 of 17 — Transcode-heavy files',
-                'Step 7 of 17 — Trickplay thumbnails',
-                'Step 8 of 17 — Languages',
-                'Step 9 of 17 — Music & audiobook covers',
-                'Step 10 of 17 — Media sorter',
-                'Step 11 of 17 — Broken metadata sidecars',
-                'Step 12 of 17 — Suspicious executables',
-                'Step 13 of 17 — Housekeeping',
-                'Step 14 of 17 — Safety',
-                'Step 15 of 17 — Stale content',
-                'Step 16 of 17 — Community stats',
-                'Step 17 of 17 — All done'
+                'Step 1 of 18 — Welcome',
+                'Step 2 of 18 — Libraries',
+                'Step 3 of 18 — Duplicates',
+                'Step 4 of 18 — Broken files',
+                'Step 5 of 18 — Oversized files',
+                'Step 6 of 18 — Transcode-heavy files',
+                'Step 7 of 18 — Trickplay thumbnails',
+                'Step 8 of 18 — Languages',
+                'Step 9 of 18 — Music & audiobook covers',
+                'Step 10 of 18 — Media sorter',
+                'Step 11 of 18 — Broken metadata sidecars',
+                'Step 12 of 18 — Suspicious executables',
+                'Step 13 of 18 — Housekeeping',
+                'Step 14 of 18 — Safety',
+                'Step 15 of 18 — Stale content',
+                'Step 16 of 18 — Format compatibility',
+                'Step 17 of 18 — Community stats',
+                'Step 18 of 18 — All done'
             ];
 
             var WIZ_MODE_OPTIONS = [
@@ -120,7 +121,8 @@
                     ['Suspicious executables', deps.view.querySelector('#mdWizVirusMode').value],
                     ['Orphaned debris', deps.view.querySelector('#mdWizOrphanMode').value],
                     ['Unused subtitle fonts', deps.view.querySelector('#mdWizSubFontMode').value],
-                    ['Stale content', deps.view.querySelector('#mdWizStaleEnabled').checked ? 'DetectOnly' : 'Off']
+                    ['Stale content', deps.view.querySelector('#mdWizStaleEnabled').checked ? 'DetectOnly' : 'Off'],
+                    ['Format compatibility', (function () { var r = deps.view.querySelector('input[name="mdWizFormatMode"]:checked'); return r && r.value !== 'Skip' ? 'DetectOnly' : 'Off'; }())]
                 ];
                 var enabled = modes.filter(function (m) { return m[1] !== 'Off'; }).map(function (m) { return m[0]; });
                 var off = modes.filter(function (m) { return m[1] === 'Off'; }).map(function (m) { return m[0]; });
@@ -256,6 +258,15 @@
                 deps.view.querySelector('#mdWizMusicTarget').value = c.MusicTargetPath || '';
                 deps.view.querySelector('#mdWizBooksTarget').value = c.BooksTargetPath || '';
                 deps.view.querySelector('#mdWizSortSource').value = c.MediaSortSource || 'JellyfinMetadata';
+                // Format compatibility: pre-select radio from existing config. First run defaults to DetectOnly.
+                (function () {
+                    var mode = 'DetectOnly';
+                    if (c.ConvertEbooks || c.ConvertComics || c.ConvertImages || c.ConvertMusic || c.ConvertVideos) {
+                        mode = 'Automatic';
+                    }
+                    var radio = deps.view.querySelector('input[name="mdWizFormatMode"][value="' + mode + '"]');
+                    if (radio) radio.checked = true;
+                }());
                 deps.view.querySelector('#mdWizDryRun').checked = c.DryRun !== false;
                 // Idle-guard checkbox defaults to ON when entering the wizard, regardless of what the
                 // user may have saved previously — the walkthrough is the recommended-defaults moment.
@@ -393,6 +404,34 @@
                         if (!isNaN(staleDays) && staleDays > 0) c.StaleThresholdDays = staleDays;
                         break;
                     case 15:
+                        var formatMode = deps.view.querySelector('input[name="mdWizFormatMode"]:checked');
+                        var formatModeVal = formatMode ? formatMode.value : 'DetectOnly';
+                        if (formatModeVal === 'Skip') {
+                            // Leave FormatCompatibilityFixMode at its current/default value (DetectOnly), all converters off.
+                            c.FormatCompatibilityFixMode = 'DetectOnly';
+                            c.ConvertEbooks = false;
+                            c.ConvertComics = false;
+                            c.ConvertImages = false;
+                            c.ConvertMusic = false;
+                            c.ConvertVideos = false;
+                        } else if (formatModeVal === 'Automatic') {
+                            c.FormatCompatibilityFixMode = 'Automatic';
+                            c.ConvertEbooks = true;
+                            c.ConvertComics = true;
+                            c.ConvertImages = true;
+                            c.ConvertMusic = true;
+                            c.ConvertVideos = true;
+                            // ponytail: ConvertAudiobooks deliberately left off — audiobook merge is opt-in only (bigger UX surprise)
+                        } else {
+                            c.FormatCompatibilityFixMode = 'DetectOnly';
+                            c.ConvertEbooks = false;
+                            c.ConvertComics = false;
+                            c.ConvertImages = false;
+                            c.ConvertMusic = false;
+                            c.ConvertVideos = false;
+                        }
+                        break;
+                    case 16:
                         applyAnalyticsToggle(c, deps.view.querySelector('#mdWizAnalytics').checked);
                         break;
                     default:

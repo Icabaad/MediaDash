@@ -503,6 +503,32 @@
                         </div>
 
                         <div class="mdWizStep" data-step="15">
+                            <h3><span class="material-icons" style="color:#f59e0b;">sync_alt</span>Convert files Jellyfin can't display</h3>
+                            <p class="mdWizIntro">Some files in your library might be in formats Jellyfin's browser player can't open directly — like MOBI ebooks, CBR comics, HEIC photos, or RMVB videos. MediaDash can detect them and (optionally) convert them to formats that just work.</p>
+                            <div class="checkboxContainer checkboxContainer-withDescription" style="margin-bottom:.5em;">
+                                <label class="emby-checkbox-label">
+                                    <input id="mdWizFormatDetectOnly" type="radio" name="mdWizFormatMode" value="DetectOnly" checked />
+                                    <span>Detect only (recommended)</span>
+                                </label>
+                                <div class="fieldDescription">Flags incompatible files on the Issues tab — you choose what to convert and when. Nothing changes on disk until you approve.</div>
+                            </div>
+                            <div class="checkboxContainer checkboxContainer-withDescription" style="margin-bottom:.5em;">
+                                <label class="emby-checkbox-label">
+                                    <input id="mdWizFormatAutomatic" type="radio" name="mdWizFormatMode" value="Automatic" />
+                                    <span>Automatic per-kind</span>
+                                </label>
+                                <div class="fieldDescription">Enables converters for ebooks, comics, images, music, and videos. Conversions run automatically after each scan. Calibre is required for ebook conversion — if it's not installed, ebook files will be detected but skipped until you add it.</div>
+                            </div>
+                            <div class="checkboxContainer checkboxContainer-withDescription">
+                                <label class="emby-checkbox-label">
+                                    <input id="mdWizFormatSkip" type="radio" name="mdWizFormatMode" value="Skip" />
+                                    <span>Skip</span>
+                                </label>
+                                <div class="fieldDescription">Leave format compatibility off for now — you can turn it on later in Settings.</div>
+                            </div>
+                        </div>
+
+                        <div class="mdWizStep" data-step="16">
                             <h3><span class="material-icons" style="color:#a78bfa;">analytics</span>Community stats (optional)</h3>
                             <p class="mdWizIntro">MediaDash can send anonymous aggregate stats to a community board so everyone can see how much storage the plugin is reclaiming across all users. Tick the box below to opt in — either is fine for the plugin.</p>
                             <div class="fieldDescription" style="margin:.4em 0 .8em;padding:.6em .8em;border-left:3px solid #a78bfa;background:rgba(167,139,250,.06);border-radius:4px;">
@@ -519,7 +545,7 @@
                             </div>
                         </div>
 
-                        <div class="mdWizStep" data-step="16">
+                        <div class="mdWizStep" data-step="17">
                             <h3><span class="material-icons" style="color:#22c55e;">check_circle</span>You're set up</h3>
                             <p class="mdWizIntro">MediaDash is ready to go. Every setting from this walkthrough is also on the Settings tab, and you can re-open this wizard any time from <b>Settings → Maintenance</b>.</p>
                             <div id="mdWizSummary" class="fieldDescription" style="margin:.4em 0 .8em;padding:.6em .8em;border-left:3px solid #22c55e;background:rgba(34,197,94,.06);border-radius:4px;"></div>
