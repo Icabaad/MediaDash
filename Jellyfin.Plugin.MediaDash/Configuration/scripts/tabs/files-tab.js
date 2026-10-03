@@ -293,6 +293,13 @@
                 var request = ++pickerRequest;
                 var listEl = deps.view.querySelector('#mdPickerList');
                 listEl.innerHTML = '<div class="fieldDescription" style="padding:.6em .8em;">Loading…</div>';
+                // UI-16: clear the previously accepted path and disable Accept until the new
+                // listing lands. Without this, clicking Accept while the request is in flight
+                // (or after it failed) commits the move/copy to the folder we were navigating
+                // AWAY from, silently misrouting the file.
+                picker.path = '';
+                var acceptBtn = deps.view.querySelector('#mdPickerAccept');
+                if (acceptBtn) acceptBtn.disabled = true;
                 var url = 'Files/List' + (path ? '?path=' + encodeURIComponent(path) : '');
                 deps.api(url).then(function (d) {
                     if (request !== pickerRequest || !picker.open) return;
@@ -302,6 +309,7 @@
                 }, function () {
                     if (request !== pickerRequest || !picker.open) return;
                     listEl.innerHTML = '<div class="fieldDescription" style="color:#ef4444;padding:.6em .8em;">Could not list this folder.</div>';
+                    // Accept stays disabled — no valid destination to accept to.
                 });
             }
 
@@ -492,6 +500,182 @@
                         uploadFiles(e.dataTransfer && e.dataTransfer.files);
                     });
 
+                    bindCtxMenu();
+            }
+
+
+            // ---------- Context menu (manual add + protect) ----------
+            var ctxMenu = deps.view.querySelector('#mdFileCtxMenu');
+            var ctxSubmenu = deps.view.querySelector('#mdFileCtxSubmenu');
+            var protectDialog = deps.view.querySelector('#mdProtectDialog');
+            var ctxTargetName = '';
+            var pressTimer = null;
+            var pressOrigin = null;
+
+            function isWritableContext() {
+                if (!currentFileListing) return false;
+                return !currentFileListing.IsRoot && !currentFileListing.IsRecycleBin && !currentFileListing.IsLogsDir;
+            }
+
+            function openCtxMenu(clientX, clientY, name, isDir) {
+                if (!isWritableContext()) return;
+                ctxTargetName = name;
+                // Folders can be protected but not added as an Issue — hide the Issues item.
+                ctxMenu.querySelector('[data-ctx="issues"]').style.display = isDir ? 'none' : 'flex';
+                ctxSubmenu.style.display = 'none';
+                ctxMenu.style.display = 'block';
+                // Clamp to viewport so the menu never clips off-screen.
+                ctxMenu.style.left = Math.min(clientX, window.innerWidth - 240) + 'px';
+                ctxMenu.style.top = Math.min(clientY, window.innerHeight - 180) + 'px';
+            }
+
+            function closeCtxMenu() {
+                ctxMenu.style.display = 'none';
+                ctxSubmenu.style.display = 'none';
+                ctxTargetName = '';
+            }
+
+            function openProtectDialog(path) {
+                deps.view.querySelector('#mdProtectPath').textContent = path;
+                deps.view.querySelector('#mdProtectNote').value = '';
+                deps.view.querySelector('#mdProtectScanners').value = '*';
+                deps.view.querySelector('#mdProtectFixers').value = '*';
+                protectDialog.style.display = 'flex';
+            }
+            function closeProtectDialog() { protectDialog.style.display = 'none'; }
+
+            function submitManualIssue(type, extraFields) {
+                var full = joinPath(currentFilePath, ctxTargetName);
+                var body = { Path: full, Type: type };
+                if (extraFields) Object.keys(extraFields).forEach(function (k) { body[k] = extraFields[k]; });
+                closeCtxMenu();
+                deps.api.ajax({
+                    type: 'POST',
+                    url: ApiClient.getUrl('MediaDash/Issues/Manual'),
+                    contentType: 'application/json',
+                    data: JSON.stringify(body)
+                }).then(function () {
+                    showToast('Added as ' + type + '. Switch to the Issues tab to review.');
+                }, function (xhr) {
+                    var msg = (xhr && xhr.responseText) ? xhr.responseText.replace(/^"|"$/g, '') : 'Could not add issue.';
+                    window.alert(msg);
+                });
+            }
+
+            function showToast(msg) {
+                // Jellyfin dashboard exposes a global Dashboard.alert / toast helper on most pages. Fall back to
+                // window.alert when it isn't available (keeps parity with fileMutate's error path).
+                if (window.Dashboard && typeof window.Dashboard.alert === 'function') {
+                    window.Dashboard.alert(msg);
+                } else {
+                    window.alert(msg);
+                }
+            }
+
+            function bindCtxMenu() {
+                var listEl = deps.view.querySelector('#mdFileList');
+
+                // Desktop right-click, delegated.
+                listEl.addEventListener('contextmenu', function (e) {
+                    var row = e.target.closest('.mdFileRow');
+                    if (!row) return;
+                    e.preventDefault();
+                    openCtxMenu(e.clientX, e.clientY, row.getAttribute('data-name'), row.getAttribute('data-isdir') === '1');
+                });
+
+                // Touch long-press (500ms with <10px drift).
+                listEl.addEventListener('touchstart', function (e) {
+                    var row = e.target.closest('.mdFileRow');
+                    if (!row || e.touches.length !== 1) return;
+                    var t = e.touches[0];
+                    pressOrigin = { x: t.clientX, y: t.clientY, name: row.getAttribute('data-name'), isDir: row.getAttribute('data-isdir') === '1' };
+                    pressTimer = setTimeout(function () {
+                        if (!pressOrigin) return;
+                        openCtxMenu(pressOrigin.x, pressOrigin.y, pressOrigin.name, pressOrigin.isDir);
+                        pressOrigin = null;
+                    }, 500);
+                });
+                function cancelPress() {
+                    if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+                    pressOrigin = null;
+                }
+                listEl.addEventListener('touchmove', function (e) {
+                    if (!pressOrigin || e.touches.length !== 1) return;
+                    var t = e.touches[0];
+                    if (Math.abs(t.clientX - pressOrigin.x) > 10 || Math.abs(t.clientY - pressOrigin.y) > 10) cancelPress();
+                });
+                listEl.addEventListener('touchend', cancelPress);
+                listEl.addEventListener('touchcancel', cancelPress);
+
+                // Outside-click / Escape / scroll closes the menu.
+                document.addEventListener('click', function (e) {
+                    if (ctxMenu.style.display === 'none') return;
+                    if (!ctxMenu.contains(e.target)) closeCtxMenu();
+                });
+                document.addEventListener('keydown', function (e) {
+                    if (e.key === 'Escape') closeCtxMenu();
+                });
+                listEl.addEventListener('scroll', closeCtxMenu, true);
+
+                // "Add to issues" opens the submenu.
+                ctxMenu.querySelector('[data-ctx="issues"]').addEventListener('click', function (e) {
+                    e.stopPropagation();
+                    ctxSubmenu.style.display = 'block';
+                });
+
+                // "Protect this path" opens the dialog.
+                ctxMenu.querySelector('[data-ctx="protect"]').addEventListener('click', function (e) {
+                    e.stopPropagation();
+                    var full = joinPath(currentFilePath, ctxTargetName);
+                    closeCtxMenu();
+                    openProtectDialog(full);
+                });
+
+                // Submenu type picks.
+                Array.from(ctxSubmenu.querySelectorAll('.mdCtxItem')).forEach(function (item) {
+                    item.addEventListener('click', function (e) {
+                        e.stopPropagation();
+                        var type = item.getAttribute('data-type');
+                        if (type === 'Misplaced') {
+                            var pickTargetFor = ctxTargetName;
+                            closeCtxMenu();
+                            openPicker(currentFilePath, function (targetDir) {
+                                if (!targetDir) return;
+                                // Re-set ctxTargetName so submitManualIssue uses it (closeCtxMenu cleared it).
+                                ctxTargetName = pickTargetFor;
+                                submitManualIssue('Misplaced', { TargetPath: joinPath(targetDir, pickTargetFor) });
+                                ctxTargetName = '';
+                            });
+                        } else {
+                            submitManualIssue(type, null);
+                        }
+                    });
+                });
+
+                // Protect dialog buttons.
+                deps.view.querySelector('#mdProtectCancel').addEventListener('click', closeProtectDialog);
+                deps.view.querySelector('#mdProtectAccept').addEventListener('click', function () {
+                    var path = deps.view.querySelector('#mdProtectPath').textContent;
+                    var body = {
+                        Kind: 'folder',
+                        Target: path,
+                        ScannersMask: deps.view.querySelector('#mdProtectScanners').value || '',
+                        FixersMask: deps.view.querySelector('#mdProtectFixers').value || '',
+                        Note: deps.view.querySelector('#mdProtectNote').value || ''
+                    };
+                    deps.api.ajax({
+                        type: 'POST',
+                        url: ApiClient.getUrl('MediaDash/Protection'),
+                        contentType: 'application/json',
+                        data: JSON.stringify(body)
+                    }).then(function () {
+                        closeProtectDialog();
+                        showToast('Protected ' + path + '.');
+                    }, function (xhr) {
+                        var msg = (xhr && xhr.responseText) ? xhr.responseText.replace(/^"|"$/g, '') : 'Could not add protection.';
+                        window.alert(msg);
+                    });
+                });
             }
         return {
             get currentFilePath() { return currentFilePath; },
