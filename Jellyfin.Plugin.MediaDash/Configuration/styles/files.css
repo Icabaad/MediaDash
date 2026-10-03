@@ -181,3 +181,74 @@
 #MediaDashConfigPage .mdFileHead {
     background: transparent !important;
 }
+
+/* Manual-add / protect context menu — shared element positioned to the right-click point. */
+.mdCtxMenu {
+    position: fixed;
+    z-index: 10000;
+    background: #1f2027;
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 4px;
+    box-shadow: 0 8px 20px rgba(0,0,0,0.5);
+    min-width: 14em;
+    padding: .25em 0;
+    font-size: .9em;
+}
+.mdCtxItem {
+    display: flex;
+    align-items: center;
+    gap: .55em;
+    padding: .5em .85em;
+    cursor: pointer;
+    color: #e5e7eb;
+}
+.mdCtxItem:hover,
+.mdCtxItem:focus {
+    background: rgba(255,255,255,0.08);
+    outline: none;
+}
+.mdCtxArrow {
+    margin-left: auto;
+    font-size: 1.1em;
+    opacity: .6;
+}
+.mdCtxSubmenu {
+    position: absolute;
+    left: 100%;
+    top: 0;
+    background: #1f2027;
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 4px;
+    box-shadow: 0 8px 20px rgba(0,0,0,0.5);
+    min-width: 18em;
+    padding: .25em 0;
+}
+.mdDialog {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10000;
+}
+.mdDialogInner {
+    background: #1f2027;
+    border-radius: 6px;
+    padding: 1.25em;
+    max-width: 32em;
+    width: 90%;
+    display: flex;
+    flex-direction: column;
+    gap: .75em;
+}
+.mdDialogInner label {
+    display: flex;
+    flex-direction: column;
+    gap: .25em;
+}
+.mdDialogActions {
+    display: flex;
+    gap: .5em;
+    justify-content: flex-end;
+}
