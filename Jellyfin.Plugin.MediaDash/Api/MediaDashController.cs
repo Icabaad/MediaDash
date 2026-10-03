@@ -250,6 +250,65 @@ public class MediaDashController : ControllerBase
     }
 
     /// <summary>
+    /// Creates a Detected issue from the file-browser context menu. Request fields and allowed types
+    /// documented on <see cref="ManualIssueRequest"/> and <see cref="ManualIssueType"/>. Routes through
+    /// the same <see cref="Data.IssueStore.ReplaceDetectedIssues"/> path scanners use, so Queued and
+    /// Dismissed rows for the same (type, path) suppress the insert (user asked never to see it, or
+    /// already approved it — manual add respects both).
+    /// </summary>
+    /// <param name="request">The manual-issue payload.</param>
+    /// <returns>201 with the new issue id, or an appropriate error status.</returns>
+    [HttpPost("Issues/Manual")]
+    [ProducesResponseType(StatusCodes.Status201Created)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public ActionResult<object> CreateManualIssue([FromBody] ManualIssueRequest request)
+    {
+        if (request is null || string.IsNullOrWhiteSpace(request.Path))
+        {
+            return BadRequest("Request body is missing a Path.");
+        }
+
+        // Guard: path must be inside a configured library root. Same policy every mutating file op
+        // uses — see FileBrowserController. Keeps us from recording issues against arbitrary disk paths.
+        if (!_libraryGuard.IsInsideLibrary(request.Path))
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, "That path is outside your library folders.");
+        }
+
+        var item = _libraryManager.FindByPath(request.Path, false);
+        if (item is null)
+        {
+            return NotFound("That file isn't tracked in a Jellyfin library — run a Jellyfin library scan first.");
+        }
+
+        var (issue, problem) = BuildManualIssue(request, item.Id);
+        if (issue is null)
+        {
+            return BadRequest(problem);
+        }
+
+        // Pass scannedPaths so ReplaceDetectedIssues scopes its DELETE to this single path.
+        _issues.ReplaceDetectedIssues(issue.Type, new[] { issue }, scannedPaths: new[] { issue.Path });
+
+        // Round-trip to read back the id (the single-item insert either wrote exactly one row or was
+        // suppressed by an existing Queued/Dismissed row — both are "accepted" from the user's view).
+        var existing = _issues.GetIssues(type: issue.Type, status: null);
+        long id = 0;
+        foreach (var row in existing)
+        {
+            if (row.Path == issue.Path && (row.Status == Data.IssueStatus.Detected || row.Status == Data.IssueStatus.Queued))
+            {
+                id = row.Id;
+                break;
+            }
+        }
+
+        return StatusCode(StatusCodes.Status201Created, new { Id = id });
+    }
+
+    /// <summary>
     /// Returns a new DetailsJson with <c>approvedInMixedLibrary: true</c> added when the input
     /// has <c>mixedLibrary: true</c>; returns null when no patch is needed.
     /// </summary>
