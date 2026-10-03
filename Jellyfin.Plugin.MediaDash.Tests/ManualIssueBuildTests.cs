@@ -66,4 +66,33 @@ public sealed class ManualIssueBuildTests
         Assert.False(string.IsNullOrEmpty(doc.RootElement.GetProperty("converterKey").GetString()));
         Assert.False(string.IsNullOrEmpty(doc.RootElement.GetProperty("targetExt").GetString()));
     }
+
+    [Fact]
+    public void Build_RejectsEmptyPath()
+    {
+        var (issue, problem) = MediaDashController.BuildManualIssue(
+            new ManualIssueRequest { Path = "", Type = ManualIssueType.Quality }, ItemId);
+        Assert.Null(issue);
+        Assert.NotNull(problem);
+    }
+
+    [Fact]
+    public void Build_Misplaced_RejectsMissingTargetPath()
+    {
+        var (issue, problem) = MediaDashController.BuildManualIssue(
+            new ManualIssueRequest { Path = "/lib/a.mkv", Type = ManualIssueType.Misplaced, TargetPath = null }, ItemId);
+        Assert.Null(issue);
+        Assert.Contains("target", problem!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Build_FormatCompatibility_RejectsExtensionWithNoConverter()
+    {
+        // .mkv has no FormatMatrix row that produces a conversion target — it's a video container
+        // that Jellyfin already renders. If this ever changes, pick another unknown ext.
+        var (issue, problem) = MediaDashController.BuildManualIssue(
+            new ManualIssueRequest { Path = "/lib/a.mkv", Type = ManualIssueType.FormatCompatibility }, ItemId);
+        Assert.Null(issue);
+        Assert.Contains(".mkv", problem!, StringComparison.OrdinalIgnoreCase);
+    }
 }
