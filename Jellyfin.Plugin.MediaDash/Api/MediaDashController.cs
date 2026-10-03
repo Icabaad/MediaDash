@@ -293,6 +293,101 @@ public class MediaDashController : ControllerBase
     }
 
     /// <summary>
+    /// Builds the <see cref="Data.Issue"/> that <see cref="ManualIssueRequest"/> describes, or returns
+    /// a human-readable problem message when the request is invalid for the picked type. Pure function —
+    /// no DB, no library manager — so it unit-tests directly.
+    /// </summary>
+    /// <param name="request">The deserialized request body. Must be non-null.</param>
+    /// <param name="itemId">The Jellyfin item id the caller resolved from <see cref="ManualIssueRequest.Path"/>.</param>
+    /// <returns>A tuple of (issue, problem). Exactly one is non-null.</returns>
+    public static (Data.Issue? Issue, string? Problem) BuildManualIssue(
+        ManualIssueRequest request,
+        Guid itemId)
+    {
+        if (request is null || string.IsNullOrWhiteSpace(request.Path))
+        {
+            return (null, "Request body is missing a Path.");
+        }
+
+        var now = DateTime.UtcNow;
+        switch (request.Type)
+        {
+            case ManualIssueType.Quality:
+                return (new Data.Issue
+                {
+                    Type = Data.IssueType.Quality,
+                    ItemId = itemId,
+                    Path = request.Path,
+                    DetailsJson = "{}",
+                    SuggestedFix = "Re-encode to the configured quality ceiling.",
+                    SizeSavings = 0,
+                    Status = Data.IssueStatus.Detected,
+                    DetectedAtUtc = now
+                }, null);
+
+            case ManualIssueType.HeavyTranscode:
+                return (new Data.Issue
+                {
+                    Type = Data.IssueType.HeavyTranscode,
+                    ItemId = itemId,
+                    Path = request.Path,
+                    DetailsJson = "{}",
+                    SuggestedFix = "Re-encode to a direct-play codec and bitrate.",
+                    SizeSavings = 0,
+                    Status = Data.IssueStatus.Detected,
+                    DetectedAtUtc = now
+                }, null);
+
+            case ManualIssueType.Misplaced:
+                if (string.IsNullOrWhiteSpace(request.TargetPath))
+                {
+                    return (null, "A target folder is required when adding a Misplaced issue.");
+                }
+
+                var misplacedDetails = JsonSerializer.Serialize(new { targetPath = request.TargetPath });
+                return (new Data.Issue
+                {
+                    Type = Data.IssueType.Misplaced,
+                    ItemId = itemId,
+                    Path = request.Path,
+                    DetailsJson = misplacedDetails,
+                    SuggestedFix = "Move to " + request.TargetPath + ".",
+                    SizeSavings = 0,
+                    Status = Data.IssueStatus.Detected,
+                    DetectedAtUtc = now
+                }, null);
+
+            case ManualIssueType.FormatCompatibility:
+                var row = FormatMatrix.Classify(request.Path);
+                if (row is null || string.IsNullOrEmpty(row.TargetExtension) || row.ConverterKey == "none")
+                {
+                    var ext = Path.GetExtension(request.Path);
+                    return (null, "No converter is registered for '" + ext + "' files.");
+                }
+
+                var fcDetails = JsonSerializer.Serialize(new
+                {
+                    converterKey = row.ConverterKey,
+                    targetExt = row.TargetExtension
+                });
+                return (new Data.Issue
+                {
+                    Type = Data.IssueType.FormatCompatibility,
+                    ItemId = itemId,
+                    Path = request.Path,
+                    DetailsJson = fcDetails,
+                    SuggestedFix = "Convert " + Path.GetExtension(request.Path) + " to " + row.TargetExtension + ".",
+                    SizeSavings = 0,
+                    Status = Data.IssueStatus.Detected,
+                    DetectedAtUtc = now
+                }, null);
+
+            default:
+                return (null, "Unknown manual issue type: " + request.Type + ".");
+        }
+    }
+
+    /// <summary>
     /// Dismisses an issue: it will not be re-reported by future scans. Legal from Detected or
     /// Queued (change of mind before the fix runs). Refuses Dismissed (already ignored) and Fixed
     /// (the file has already been touched) so the audit trail can't be silently rewritten.
@@ -1174,6 +1269,10 @@ public class MediaDashController : ControllerBase
                 CollectionType = f.Folder.CollectionType?.ToString()?.ToLowerInvariant()
             });
 
+        // E2E audit E2E-05: Audio, Book and Photo were missing from this query so the Overview
+        // library breakdown reported Music, Books and Photos libraries as "0 items / 0 B" even
+        // when they held real content. Added so the breakdown row matches the Jellyfin
+        // library's actual contents.
         var items = _libraryManager.GetItemList(new MediaBrowser.Controller.Entities.InternalItemsQuery
         {
             IncludeItemTypes = new[]
@@ -1181,7 +1280,10 @@ public class MediaDashController : ControllerBase
                 Jellyfin.Data.Enums.BaseItemKind.Movie,
                 Jellyfin.Data.Enums.BaseItemKind.Episode,
                 Jellyfin.Data.Enums.BaseItemKind.MusicVideo,
-                Jellyfin.Data.Enums.BaseItemKind.AudioBook
+                Jellyfin.Data.Enums.BaseItemKind.AudioBook,
+                Jellyfin.Data.Enums.BaseItemKind.Audio,
+                Jellyfin.Data.Enums.BaseItemKind.Book,
+                Jellyfin.Data.Enums.BaseItemKind.Photo
             },
             IsVirtualItem = false,
             Recursive = true
