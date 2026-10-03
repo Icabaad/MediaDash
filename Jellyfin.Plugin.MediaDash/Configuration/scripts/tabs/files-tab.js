@@ -505,9 +505,9 @@
 
 
             // ---------- Context menu (manual add + protect) ----------
-            var ctxMenu = deps.view.querySelector('#mdFileCtxMenu');
-            var ctxSubmenu = deps.view.querySelector('#mdFileCtxSubmenu');
-            var protectDialog = deps.view.querySelector('#mdProtectDialog');
+            // Resolved lazily in bindCtxMenu() — deps.view isn't populated until the tab mounts,
+            // so touching it at factory time crashes with "Cannot read properties of undefined".
+            var ctxMenu, ctxSubmenu, protectDialog;
             var ctxTargetName = '';
             var pressTimer = null;
             var pressOrigin = null;
@@ -573,6 +573,9 @@
             }
 
             function bindCtxMenu() {
+                ctxMenu = deps.view.querySelector('#mdFileCtxMenu');
+                ctxSubmenu = deps.view.querySelector('#mdFileCtxSubmenu');
+                protectDialog = deps.view.querySelector('#mdProtectDialog');
                 var listEl = deps.view.querySelector('#mdFileList');
 
                 // Desktop right-click, delegated.
