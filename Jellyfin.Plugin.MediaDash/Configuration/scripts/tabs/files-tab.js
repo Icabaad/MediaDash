@@ -557,9 +557,29 @@
                 }).then(function () {
                     showToast('Added as ' + type + '. Switch to the Issues tab to review.');
                 }, function (xhr) {
-                    var msg = (xhr && xhr.responseText) ? xhr.responseText.replace(/^"|"$/g, '') : 'Could not add issue.';
-                    window.alert(msg);
+                    extractErrorMessage(xhr, 'Could not add issue.').then(window.alert);
                 });
+            }
+
+            // ApiClient.ajax rejects with a Response (fetch) OR an XHR depending on Jellyfin version.
+            // Return a Promise<string> of the server message, falling back to HTTP status / fallback.
+            // ASP.NET returns JSON-encoded strings with ASCII escapes (', —); JSON.parse
+            // handles those; regex quote-strip leaves them literal and ugly.
+            function extractErrorMessage(xhr, fallback) {
+                var status = xhr && xhr.status;
+                var statusText = xhr && xhr.statusText;
+                var def = status ? ('HTTP ' + status + (statusText ? ': ' + statusText : '')) : (fallback || 'Request failed.');
+                var decode = function (body) {
+                    if (!body) return def;
+                    try { var parsed = JSON.parse(body); if (typeof parsed === 'string') return parsed; } catch (e) {}
+                    return body;
+                };
+                if (!xhr) return Promise.resolve(def);
+                if (typeof xhr.text === 'function') {
+                    return xhr.text().then(decode, function () { return def; });
+                }
+                if (xhr.responseText) return Promise.resolve(decode(xhr.responseText));
+                return Promise.resolve(def);
             }
 
             function showToast(msg) {
@@ -675,8 +695,7 @@
                         closeProtectDialog();
                         showToast('Protected ' + path + '.');
                     }, function (xhr) {
-                        var msg = (xhr && xhr.responseText) ? xhr.responseText.replace(/^"|"$/g, '') : 'Could not add protection.';
-                        window.alert(msg);
+                        extractErrorMessage(xhr, 'Could not add protection.').then(window.alert);
                     });
                 });
             }

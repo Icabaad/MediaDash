@@ -185,7 +185,7 @@
 /* Manual-add / protect context menu — shared element positioned to the right-click point. */
 .mdCtxMenu {
     position: fixed;
-    z-index: 10000;
+    z-index: 999999;
     background: #1f2027;
     border: 1px solid rgba(255,255,255,0.1);
     border-radius: 4px;
@@ -213,15 +213,10 @@
     opacity: .6;
 }
 .mdCtxSubmenu {
-    position: absolute;
-    left: 100%;
-    top: 0;
-    background: #1f2027;
-    border: 1px solid rgba(255,255,255,0.1);
-    border-radius: 4px;
-    box-shadow: 0 8px 20px rgba(0,0,0,0.5);
-    min-width: 18em;
-    padding: .25em 0;
+    border-top: 1px solid rgba(255,255,255,0.08);
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+    padding: .25em 0 .25em 1.5em;
+    background: rgba(255,255,255,0.03);
 }
 .mdDialog {
     position: fixed;
@@ -230,7 +225,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 10000;
+    z-index: 999999;
 }
 .mdDialogInner {
     background: #1f2027;

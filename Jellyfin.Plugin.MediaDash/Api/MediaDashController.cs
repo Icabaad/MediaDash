@@ -280,7 +280,7 @@ public class MediaDashController : ControllerBase
         var item = _libraryManager.FindByPath(request.Path, false);
         if (item is null)
         {
-            return NotFound("That file isn't tracked in a Jellyfin library — run a Jellyfin library scan first.");
+            return NotFound("Jellyfin doesn't have that file indexed — run a Jellyfin library scan first.");
         }
 
         var (issue, problem) = BuildManualIssue(request, item.Id);
