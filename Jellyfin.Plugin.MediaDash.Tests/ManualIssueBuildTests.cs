@@ -28,33 +28,6 @@ public sealed class ManualIssueBuildTests
     }
 
     [Fact]
-    public void Build_HeavyTranscode_SetsPathTypeAndEmptyDetails()
-    {
-        var req = new ManualIssueRequest { Path = "/lib/b.mp4", Type = ManualIssueType.HeavyTranscode };
-        var (issue, problem) = MediaDashController.BuildManualIssue(req, ItemId);
-        Assert.Null(problem);
-        Assert.Equal(IssueType.HeavyTranscode, issue!.Type);
-        Assert.Equal("{}", issue.DetailsJson);
-    }
-
-    [Fact]
-    public void Build_Misplaced_WritesTargetPathIntoDetails()
-    {
-        var req = new ManualIssueRequest
-        {
-            Path = "/lib/Movies/show.s01e01.mkv",
-            Type = ManualIssueType.Misplaced,
-            TargetPath = "/lib/TV/Show/Season 01/show.s01e01.mkv"
-        };
-        var (issue, problem) = MediaDashController.BuildManualIssue(req, ItemId);
-        Assert.Null(problem);
-        Assert.Equal(IssueType.Misplaced, issue!.Type);
-        using var doc = JsonDocument.Parse(issue.DetailsJson);
-        Assert.Equal("/lib/TV/Show/Season 01/show.s01e01.mkv",
-                     doc.RootElement.GetProperty("targetPath").GetString());
-    }
-
-    [Fact]
     public void Build_FormatCompatibility_PopulatesConverterKeyAndTargetExtFromMatrix()
     {
         // .mobi is a known FormatMatrix row (ebook); converter resolves to a target extension.
@@ -74,15 +47,6 @@ public sealed class ManualIssueBuildTests
             new ManualIssueRequest { Path = "", Type = ManualIssueType.Quality }, ItemId);
         Assert.Null(issue);
         Assert.NotNull(problem);
-    }
-
-    [Fact]
-    public void Build_Misplaced_RejectsMissingTargetPath()
-    {
-        var (issue, problem) = MediaDashController.BuildManualIssue(
-            new ManualIssueRequest { Path = "/lib/a.mkv", Type = ManualIssueType.Misplaced, TargetPath = null }, ItemId);
-        Assert.Null(issue);
-        Assert.Contains("target", problem!, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

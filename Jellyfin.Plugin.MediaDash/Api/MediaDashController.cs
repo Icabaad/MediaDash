@@ -384,38 +384,6 @@ public class MediaDashController : ControllerBase
                     DetectedAtUtc = now
                 }, null);
 
-            case ManualIssueType.HeavyTranscode:
-                return (new Data.Issue
-                {
-                    Type = Data.IssueType.HeavyTranscode,
-                    ItemId = itemId,
-                    Path = request.Path,
-                    DetailsJson = "{}",
-                    SuggestedFix = "Re-encode to a direct-play codec and bitrate.",
-                    SizeSavings = 0,
-                    Status = Data.IssueStatus.Detected,
-                    DetectedAtUtc = now
-                }, null);
-
-            case ManualIssueType.Misplaced:
-                if (string.IsNullOrWhiteSpace(request.TargetPath))
-                {
-                    return (null, "A target folder is required when adding a Misplaced issue.");
-                }
-
-                var misplacedDetails = JsonSerializer.Serialize(new { targetPath = request.TargetPath });
-                return (new Data.Issue
-                {
-                    Type = Data.IssueType.Misplaced,
-                    ItemId = itemId,
-                    Path = request.Path,
-                    DetailsJson = misplacedDetails,
-                    SuggestedFix = "Move to " + request.TargetPath + ".",
-                    SizeSavings = 0,
-                    Status = Data.IssueStatus.Detected,
-                    DetectedAtUtc = now
-                }, null);
-
             case ManualIssueType.FormatCompatibility:
                 var row = FormatMatrix.Classify(request.Path);
                 if (row is null || string.IsNullOrEmpty(row.TargetExtension) || row.ConverterKey == "none")

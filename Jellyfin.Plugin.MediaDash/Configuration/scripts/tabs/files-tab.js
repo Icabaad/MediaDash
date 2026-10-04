@@ -544,10 +544,8 @@
             }
             function closeProtectDialog() { protectDialog.style.display = 'none'; }
 
-            function submitManualIssue(type, extraFields) {
-                var full = joinPath(currentFilePath, ctxTargetName);
-                var body = { Path: full, Type: type };
-                if (extraFields) Object.keys(extraFields).forEach(function (k) { body[k] = extraFields[k]; });
+            function submitManualIssue(type) {
+                var body = { Path: joinPath(currentFilePath, ctxTargetName), Type: type };
                 closeCtxMenu();
                 deps.api.ajax({
                     type: 'POST',
@@ -658,20 +656,7 @@
                 Array.from(ctxSubmenu.querySelectorAll('.mdCtxItem')).forEach(function (item) {
                     item.addEventListener('click', function (e) {
                         e.stopPropagation();
-                        var type = item.getAttribute('data-type');
-                        if (type === 'Misplaced') {
-                            var pickTargetFor = ctxTargetName;
-                            closeCtxMenu();
-                            openPicker(currentFilePath, function (targetDir) {
-                                if (!targetDir) return;
-                                // Re-set ctxTargetName so submitManualIssue uses it (closeCtxMenu cleared it).
-                                ctxTargetName = pickTargetFor;
-                                submitManualIssue('Misplaced', { TargetPath: joinPath(targetDir, pickTargetFor) });
-                                ctxTargetName = '';
-                            });
-                        } else {
-                            submitManualIssue(type, null);
-                        }
+                        submitManualIssue(item.getAttribute('data-type'));
                     });
                 });
 
