@@ -186,10 +186,6 @@ foreach ($stale in $retired) {
     $p = Join-Path $fixtures $stale
     if (Test-Path $p) { Remove-Item $p -Force; Write-Host "  retired: $stale" }
 }
-# Also clean the DupeTestB (2020)/ carry-over from unrelated dedup tests.
-$dupeDir = Join-Path $fixtures 'DupeTestB (2020)'
-if (Test-Path $dupeDir) { Remove-Item $dupeDir -Recurse -Force; Write-Host "  retired: DupeTestB (2020)/" }
-
 # Manifest — validate-*.ps1 read this to know pre/post expectations.
 # All rung 1/2/4 fixtures keep their original extension. Rung 3 fixtures change to .mkv.
 $manifest = @{
@@ -205,7 +201,28 @@ $manifest = @{
         @{ name = 'neg-healthy.mkv';               preBroken = $false; targetRung = 0; postExists = 'neg-healthy.mkv' }
     )
 }
+$previousManifest = $null
+$manifestPath = Join-Path $PSScriptRoot 'fixture-manifest.json'
+if ($Only.Count -gt 0 -and (Test-Path -LiteralPath $manifestPath)) {
+    $previousManifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+}
+foreach ($fixture in $manifest.fixtures) {
+    if ($Only.Count -gt 0 -and $Only -notcontains $fixture.name) {
+        $previous = @($previousManifest.fixtures | Where-Object { $_.name -eq $fixture.name })
+        if ($previous.Count -ne 1 -or [string]$previous[0].sourceSha256 -notmatch '^[a-fA-F0-9]{64}$') {
+            throw 'Partial regeneration requires existing original hashes; run a full regeneration first.'
+        }
+        $fixture.sourceSha256 = $previous[0].sourceSha256
+        continue
+    }
+    $source = Join-Path $fixtures $fixture.name
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Missing $source; run a full regeneration first." }
+    $fixture.sourceSha256 = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+}
 $manifest | ConvertTo-Json -Depth 5 | Out-File (Join-Path $PSScriptRoot 'fixture-manifest.json') -Encoding utf8
 
-Remove-Item $tmp -Recurse -Force
+$resolvedTemp = (Resolve-Path -LiteralPath $tmp).Path
+$expectedTemp = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '.tmp'))
+if ($resolvedTemp -ne $expectedTemp) { throw 'Refusing to remove unexpected temporary directory.' }
+Remove-Item -LiteralPath $resolvedTemp -Recurse -Force
 Write-Host "`nDone. Fixtures at:`n  $fixtures`nManifest at:`n  $(Join-Path $PSScriptRoot 'fixture-manifest.json')"

@@ -1,25 +1,4 @@
-# Post-repair validator. Run AFTER MediaDash's Fix task has processed the fixtures folder.
-# For each fixture, assert that the expected output file (per fixture-manifest.json's postExists)
-# exists and decodes cleanly. Also asserts the pre-repair original is in the recycle bin.
-#
-# Exit code: 0 all pass, 1 any mismatch.
-#
-# 00-B fixes:
-#  - Recycled originals are keyed by SHA-256 of file bytes, not by basename. Two
-#    fixtures with the same base filename would previously collide silently and
-#    the recycle-cross-check would false-positive.
-#  - Missing expected recycled original for a repaired fixture is now FAIL, not
-#    WARN + exit 0. The plugin's repair path ALWAYS recycles; a missing entry is
-#    a real regression.
-#  - Healthy controls compare current file hash to the manifest's declared
-#    `sourceSha256` (if the manifest carries one). A basename-only check would
-#    accept an in-place overwrite as "still there."
-#
-# The manifest schema is additive: fixtures without `sourceSha256` skip the
-# hash check but their path/existence checks still run. `regenerate.ps1` should
-# stamp `sourceSha256` when producing new fixtures; retrofitting existing
-# fixtures is a separate task and does not gate 00-B.
-
+# Offline post-repair checks. Use run_live.py for current-run history and Jellyfin evidence.
 param(
     [string]$Ffmpeg = '',
     [string]$RecycleBinRoot = "$env:LOCALAPPDATA\jellyfin-v10\data\mediadash\recycle",
@@ -40,20 +19,23 @@ function Get-Sha256Hex {
     return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash
 }
 
-$manifest = Get-Content $ManifestPath -Raw | ConvertFrom-Json
+$null = Get-Command $Ffmpeg -ErrorAction Stop
+$manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
+if (@($manifest.fixtures).Count -eq 0) { throw 'Manifest contains no fixtures.' }
+foreach ($fixture in $manifest.fixtures) {
+    if (-not $fixture.name -or [string]$fixture.sourceSha256 -notmatch '^[a-fA-F0-9]{64}$') {
+        throw 'Every fixture requires a name and pre-repair sourceSha256. Regenerate the fixtures.'
+    }
+}
 
 # Gather recycled originals - batches are timestamped subdirs under RecycleBinRoot.
 # Keyed by SHA-256 so two fixtures that happen to share a basename never collide.
 $recycledByHash = @{}
-$recycledByPathTail = @{}   # secondary lookup: relative path from RecycleBinRoot
 if (Test-Path $RecycleBinRoot) {
-    $rootFull = (Resolve-Path -LiteralPath $RecycleBinRoot).Path
     Get-ChildItem $RecycleBinRoot -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
         $h = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash
         if (-not $recycledByHash.ContainsKey($h)) { $recycledByHash[$h] = @() }
         $recycledByHash[$h] += $_.FullName
-        $tail = $_.FullName.Substring($rootFull.Length).TrimStart('\','/')
-        $recycledByPathTail[$tail] = $_.FullName
     }
 }
 
@@ -91,14 +73,16 @@ foreach ($fx in $manifest.fixtures) {
         $status = 'FAIL'; $reason = "no repaired output at '$($fx.name)' or its .mkv variant - plugin fell through to delete"
         $chosen = ''
     }
+    elseif ($candidates.Count -gt 1) {
+        $status = 'FAIL'; $reason = 'Ambiguous output: both original and changed-extension files exist.'
+        $chosen = ''
+    }
     else {
         $chosen = $candidates[0]
-        # Strict Jellyfin-play gate: -xerror exits non-zero on any real decode failure
-        # (partial packets, corrupt frames, container/stream mismatch). If this passes,
-        # Jellyfin will direct-play the file end-to-end.
-        & cmd /c """$Ffmpeg"" -v error -xerror -i ""$chosen"" -f null - 2>NUL >NUL"
+        # Decode every audio/video stream. Client playback needs separate live verification.
+        & $Ffmpeg -nostdin -v error -xerror -i $chosen -map '0:v?' -map '0:a?' -f null - 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) {
-            $status = 'FAIL'; $reason = "output '$(Split-Path $chosen -Leaf)' fails strict decode (-xerror) - Jellyfin would not play cleanly"
+            $status = 'FAIL'; $reason = "output '$(Split-Path $chosen -Leaf)' fails strict decode (-xerror) - decode failed"
         }
         elseif ($sourceHash) {
             # We know the pre-repair bytes. A repaired fixture MUST have its exact
@@ -107,12 +91,7 @@ foreach ($fx in $manifest.fixtures) {
                 $status = 'FAIL'; $reason = "pre-repair original not in recycle bin (looked up SHA-256 $sourceHash under $RecycleBinRoot)"
             }
         }
-        elseif (-not $recycledByPathTail.Keys.Where({ $_ -match [regex]::Escape($fx.name) + '$' })) {
-            # Fallback for legacy manifests without sourceSha256. Path-tail match is still
-            # a real check but weaker than hash. Package the retrofit to stamp hashes as
-            # a follow-up so we can remove this branch.
-            $status = 'FAIL'; $reason = "pre-repair original not in recycle bin (no SHA-256 in manifest and no path-tail match for '$($fx.name)')"
-        }
+
     }
 
     $results += [pscustomobject]@{

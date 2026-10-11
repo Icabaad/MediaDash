@@ -139,9 +139,59 @@ $mp = Join-Path $s.Root 'manifest.json'; $m | Out-File -Encoding utf8 $mp
 $r = Invoke-ValidatorWithShim -Fixtures $s.Fixtures -Recycle $s.Recycle -Manifest $mp
 Assert-Case 'E. Two fixtures share basename but distinct hashes both resolve -> exit 0' ($r.ExitCode -eq 0) $r.Output
 
+# Empty manifests must not report "all 0 fixtures passed".
+$s = New-Scenario 'empty-manifest'
+$mp = Join-Path $s.Root 'manifest.json'
+'{"fixtures":[]}' | Out-File -Encoding utf8 $mp
+$r = Invoke-ValidatorWithShim -Fixtures $s.Fixtures -Recycle $s.Recycle -Manifest $mp
+Assert-Case 'F. Empty manifest -> nonzero' ($r.ExitCode -ne 0) $r.Output
+
+# A healthy fixture without a source hash cannot prove it was left intact.
+$s = New-Scenario 'missing-hash'
+Write-BytesTo (Join-Path $s.Fixtures 'healthy.mkv') ([byte[]](1..20))
+$mp = Join-Path $s.Root 'manifest.json'
+'{"fixtures":[{"name":"healthy.mkv","targetRung":0}]}' | Out-File -Encoding utf8 $mp
+$r = Invoke-ValidatorWithShim -Fixtures $s.Fixtures -Recycle $s.Recycle -Manifest $mp
+Assert-Case 'G. Missing source hash -> nonzero' ($r.ExitCode -ne 0) $r.Output
+
+# Ambiguous changed-extension output must not be silently chosen.
+$s = New-Scenario 'ambiguous-output'
+$prebytes = [byte[]](1..64)
+$scratch = Join-Path $s.Root 'source.bin'; Write-BytesTo $scratch $prebytes
+$srcHash = Get-Sha256Hex $scratch
+Write-BytesTo (Join-Path $s.Recycle 'batch/one.mp4') $prebytes
+Write-BytesTo (Join-Path $s.Fixtures 'one.mp4') ([byte[]](200..250))
+Write-BytesTo (Join-Path $s.Fixtures 'one.mkv') ([byte[]](200..250))
+$mp = Join-Path $s.Root 'manifest.json'
+@{ fixtures = @(@{ name='one.mp4'; targetRung=1; sourceSha256=$srcHash }) } | ConvertTo-Json -Depth 6 | Out-File -Encoding utf8 $mp
+$r = Invoke-ValidatorWithShim -Fixtures $s.Fixtures -Recycle $s.Recycle -Manifest $mp
+Assert-Case 'H. Both output candidates exist -> nonzero' ($r.ExitCode -ne 0) $r.Output
+
+# Failing decoder must fail even with matching recycle evidence.
+$ambiguousFile = Join-Path $s.Fixtures 'one.mkv'
+Remove-Item -LiteralPath $ambiguousFile
+@('@echo off','exit /b 1') | Out-File -Encoding ascii $ShimPath
+$r = Invoke-ValidatorWithShim -Fixtures $s.Fixtures -Recycle $s.Recycle -Manifest $mp
+Assert-Case 'I. Decoder failure -> nonzero' ($r.ExitCode -ne 0) $r.Output
+@('@echo off','exit /b 0') | Out-File -Encoding ascii $ShimPath
+
+$missingTool = Join-Path $ShimDir 'does-not-exist.exe'
+$out = & $Script:PsChild -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $Validator -Ffmpeg $missingTool -ManifestPath $mp -FixturesDir $s.Fixtures -RecycleBinRoot $s.Recycle 2>&1 | Out-String
+Assert-Case 'J. Missing decoder -> nonzero' ($LASTEXITCODE -ne 0) $out
+
+$preValidator = Join-Path $here 'validate-fixtures.ps1'
+$probeShim = Join-Path $ShimDir 'ffprobe.cmd'
+@('@echo off','echo 12','exit /b 0') | Out-File -Encoding ascii $probeShim
+'{"fixtures":[]}' | Out-File -Encoding utf8 $mp
+$out = & $Script:PsChild -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $preValidator -Ffmpeg $ShimPath -ManifestPath $mp -FixturesDir $s.Fixtures 2>&1 | Out-String
+Assert-Case 'K. Empty pre-repair manifest -> nonzero' ($LASTEXITCODE -ne 0) $out
+$out = & $Script:PsChild -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $preValidator -Ffmpeg $missingTool -ManifestPath $mp -FixturesDir $s.Fixtures 2>&1 | Out-String
+Assert-Case 'L. Pre-repair missing decoder -> nonzero' ($LASTEXITCODE -ne 0) $out
+
 # Report
 $fail = @($Script:CaseResults | Where-Object { -not $_.Passed }).Count
 $pass = @($Script:CaseResults | Where-Object { $_.Passed }).Count
 Write-Host ""
 Write-Host "Validator self-test summary: $pass passed, $fail failed"
 if ($fail -gt 0) { exit 1 } else { exit 0 }
+

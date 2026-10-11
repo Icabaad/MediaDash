@@ -1,2 +1,5 @@
 fixtures/
 .tmp/
+
+runs/
+__pycache__/
