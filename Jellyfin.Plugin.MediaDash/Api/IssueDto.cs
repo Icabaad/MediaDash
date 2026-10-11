@@ -78,6 +78,19 @@ public sealed class IssueDto
     /// </summary>
     public IReadOnlyList<IssueWarning> Warnings { get; set; } = Array.Empty<IssueWarning>();
 
+    /// <summary>Gets or sets the plain-language message from the most recent non-dry-run fix attempt,
+    /// or null when this issue has never been attempted. Present so the Issues tab can explain a
+    /// Queued row that keeps failing silently ("last attempt: eng: no matches from any provider").</summary>
+    public string? LastAttemptMessage { get; set; }
+
+    /// <summary>Gets or sets the UTC time of the most recent non-dry-run fix attempt, or null.</summary>
+    public DateTime? LastAttemptAtUtc { get; set; }
+
+    /// <summary>Gets or sets whether the most recent attempt succeeded. Null when never attempted.
+    /// A row that's still Queued but has <c>LastAttemptSuccess == false</c> is a "failed and will
+    /// retry" case; UI treats it distinctly from a never-run Queued item.</summary>
+    public bool? LastAttemptSuccess { get; set; }
+
     /// <summary>
     /// Maps a database issue to the DTO.
     /// </summary>

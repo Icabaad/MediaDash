@@ -48,21 +48,17 @@
     };
 
     ns.MediaDash.createIssuesTab = function createIssuesTab(deps) {
-        var root = deps.root, api = deps.api, strings = deps.strings;
+        var root = deps.root, api = deps.api, strings = deps.strings, lifetime = deps.lifetime;
         var fmt = deps.fmt, bytes = deps.bytes;
         var fileExtOf = deps.fileExtOf, mediaCategoryOf = deps.mediaCategoryOf;
         var refresh = deps.refresh, post = deps.post, bulkIssueAction = deps.bulkIssueAction;
         var closeIssueContextMenu = deps.closeIssueContextMenu;
         var openInFileBrowser = deps.openInFileBrowser;
         var updateTabBadge = deps.updateTabBadge;
+        var getIssueDisposal = deps.getIssueDisposal || function () { return null; };
+        var getDryRun = deps.getDryRun || function () { return false; };
         var esc = ns.MediaDash.esc;
         var issueMatchesFilters = ns.MediaDash.issueMatchesFilters;
-        // deps.lifetime is accepted for parity but not consumed — the wrapped
-        // api() already carries the page-lifetime token guard, and the
-        // in-flight `loading` flag below prevents overlapping /Issues fetches
-        // within a single lifetime (preserving the pre-refactor _issuesLoading
-        // semantics — see loadIssues comment). Adding a per-tab loadSeq would
-        // be dead code today.
         var ISSUE_PAGE_SIZE = 100;
         var lastIssueList = [];
         var lastFilteredIssues = [];
@@ -70,6 +66,17 @@
         var issueLangFilter = '';
         var showingDismissed = false;
         var loading = false;
+        // Track the lifetime generation and view mode the in-flight request was issued under.
+        // UI-03: pagehide invalidates lifetime and api() returns a never-settling promise, so the
+        // `.finally`-equivalents never fire and `loading` sticks true across pageshow. Comparing
+        // against lifetime.current() on activate() detects the stale latch and clears it.
+        // UI-04: showingDismissed can flip while the fetch is in flight; the response is then
+        // rendered against the wrong view. Capture the requested view and re-fetch on mismatch.
+        var loadingToken = null;
+        var loadingView = false;
+        // Separate open-issues count so the tab badge keeps showing open work after the user
+        // opens the Ignored view (UI-17). Only an open-view fetch updates it.
+        var openCount = 0;
 
         function sameFolder(a, b) {
             function dir(p) {
@@ -157,7 +164,14 @@
 
             // ponytail: skip re-render when the visible list is unchanged. Without this the 3s status poll
             // during a fix run replays mdFade on every card (visible flicker) and swaps click listeners mid-interaction.
-            var fingerprint = typeFilter + '|' + textFilter + '|' + issueLangFilter + '|' + issuePage + '|' + pageSlice.map(function (i) { return i.Id + ':' + i.Status; }).join(',');
+            // UI-05: include failure state (success flag + attempt timestamp + list length) so a newly-arrived
+            // LastAttemptMessage on an already-queued row forces a re-render, and so a filtered total-count
+            // change (bulk ignore of a non-visible page) updates the Approve-all label.
+            var fingerprint = typeFilter + '|' + textFilter + '|' + issueLangFilter + '|' + issuePage + '|' + list.length + '|' +
+                pageSlice.map(function (i) {
+                    var f = i.LastAttemptSuccess === false ? ('F:' + (i.LastAttemptAtUtc || '')) : 'O';
+                    return i.Id + ':' + i.Status + ':' + f;
+                }).join(',');
             if (el.getAttribute('data-fingerprint') === fingerprint) return;
             el.setAttribute('data-fingerprint', fingerprint);
 
@@ -221,6 +235,15 @@
                 var restoredBadge = i.WasPreviouslyRestored
                     ? '<span class="mdBadge" style="background:rgba(245,158,11,.20);color:#fbbf24;border:1px solid rgba(245,158,11,.5);" title="MediaDash will not auto-fix this file again because you restored it before. Click Approve to fix it anyway, or Ignore this to stop seeing it.">↩ you restored this before</span> '
                     : '';
+                // UI-01: issues can carry data-loss warnings (e.g. unwanted-subtitle fix will also drop
+                // bitmap subs that the container can't hold under a copy-only remux). The scanner marks the
+                // blocking ones; auto-queue holds them Detected and the user must consent via Approve. Hoist
+                // a "⚠ needs review" chip so the warning isn't invisible under the generic Approve copy.
+                var warnings = Array.isArray(i.Warnings) ? i.Warnings : [];
+                var blockingWarnings = warnings.filter(function (w) { return w && w.Blocking; });
+                var warningBadge = blockingWarnings.length
+                    ? '<span class="mdBadge" style="background:rgba(239,68,68,.25);color:#fecaca;border:1px solid rgba(239,68,68,.6);" title="Approving this fix also removes something that cannot be restored by the normal recycle-bin round-trip. Read the warning below.">⚠ needs review</span> '
+                    : '';
                 var verifyBtn = '';
                 if (i.Type === 'Playability' && i.ItemId && i.ItemId !== '00000000-0000-0000-0000-000000000000') {
                     verifyBtn = '<button is="emby-button" type="button" class="raised mdOpenInJellyfin" data-item="' + esc(i.ItemId) + '" style="font-size:80%;"><span class="material-icons" style="font-size:1em;vertical-align:middle;margin-right:.2em;">play_arrow</span>Try to play</button>';
@@ -247,14 +270,22 @@
                     actionButtons = verifyBtn +
                         '<button is="emby-button" type="button" class="raised button-submit mdApprove" data-id="' + i.Id + '" style="font-size:80%;" title="' + esc(t.actionHint || '') + '"><span>' + esc(t.action || strings.approve) + '</span></button>' +
                         '<button is="emby-button" type="button" class="raised mdDismiss" data-id="' + i.Id + '" style="font-size:80%;"><span>' + esc(strings.dismiss) + '</span></button>';
-                    // Label each half of the hint with the button it describes so the two
-                    // sentences don't run together and read as one confusing description of a
-                    // single action. Field report: "Downloads one via… · Excludes this file
-                    // from future scans" was parsed as one sentence.
+                    // UI-02: pick the hint variant that matches the effective disposal (Recycle vs Permanent)
+                    // when the scanner provides doRecycle / doPermanent copy, so Approve describes what will
+                    // actually happen under the user's current settings. Fallback to the generic actionHint for
+                    // fix types with no disposal (e.g. MissingSubtitles — nothing is removed).
+                    var disposal = getIssueDisposal(i.Type);
+                    var effectiveHint;
+                    if (disposal === 'Permanent' && t.doPermanent) effectiveHint = t.doPermanent;
+                    else if (disposal === 'RecycleBin' && t.doRecycle) effectiveHint = t.doRecycle;
+                    else effectiveHint = t.actionHint || strings.approveHint;
+                    if (getDryRun()) {
+                        effectiveHint = 'Dry-run: logged to History only — ' + effectiveHint;
+                    }
                     var approveLabel = esc(t.action || strings.approve);
                     var dismissLabel = esc(strings.dismiss);
                     actionHint =
-                        '<strong>' + approveLabel + ':</strong> ' + esc(t.actionHint || strings.approveHint) +
+                        '<strong>' + approveLabel + ':</strong> ' + esc(effectiveHint) +
                         ' · <strong>' + dismissLabel + ':</strong> ' + esc(strings.dismissHint);
                 }
                 var keeperPath = '';
@@ -279,6 +310,7 @@
                                 '<span class="mdIssueTagChip">' + esc(t.title) + '</span>' +
                                 statusBadge +
                                 restoredBadge +
+                                warningBadge +
                             '</div>' +
                             pathBlock +
                             '<div class="mdIssueHint">' + esc(i.SuggestedFix) +
@@ -288,6 +320,14 @@
                         '<div class="mdIssueActions">' + actionButtons + '</div>' +
                     '</div>' +
                     '<div class="mdIssueFooter">' +
+                        (warnings.length ? warnings.map(function (w) {
+                            var bg = w.Blocking ? 'rgba(239,68,68,.12)' : 'rgba(245,158,11,.10)';
+                            var icon = w.Blocking ? 'error_outline' : 'warning_amber';
+                            var color = w.Blocking ? '#fecaca' : '#fde68a';
+                            return '<div class="fieldDescription" style="margin-top:.4em;padding:.5em .7em;background:' + bg + ';border-radius:4px;color:' + color + ';">' +
+                                '<span class="material-icons" style="font-size:15px;vertical-align:middle;margin-right:.3em;">' + icon + '</span>' +
+                                esc(w.Message) + '</div>';
+                        }).join('') : '') +
                         '<div class="mdIssueActionHint">' + actionHint + '</div>' +
                         (i.LastAttemptSuccess === false && i.LastAttemptMessage
                             ? '<div class="fieldDescription" style="margin-top:.3em;color:#ef4444;"><span class="material-icons" style="font-size:15px;vertical-align:middle;">error_outline</span> Last attempt failed: ' + esc(i.LastAttemptMessage) + (i.LastAttemptAtUtc ? ' <span style="color:var(--md-ink-muted);">(' + esc(new Date(i.LastAttemptAtUtc).toLocaleString()) + ')</span>' : '') + '</div>'
@@ -324,10 +364,15 @@
             el.querySelectorAll('.mdOpenInJellyfin').forEach(function (b) {
                 b.addEventListener('click', function () {
                     var id = b.getAttribute('data-item');
-                    // Open the item's detail page in a new tab; user hits Play there. Falls out to the
-                    // web root if the id format changes between Jellyfin versions — the tab will just
-                    // land on the home screen instead of a broken deep link.
-                    window.open('/web/#/details?id=' + encodeURIComponent(id), '_blank', 'noopener');
+                    // UI-07: hard-coded '/web/' misses the base path when Jellyfin is served under
+                    // /jellyfin (reverse-proxy deployments) or hosts the web client at a different
+                    // origin. ApiClient.serverAddress() returns the full server base
+                    // (http://host:port[/base]); appending the web client path from there preserves
+                    // the deployment prefix. Fallback to the hard-coded path only if ApiClient is
+                    // somehow unavailable at the moment of click.
+                    var base = (window.ApiClient && ApiClient.serverAddress && ApiClient.serverAddress()) || '';
+                    var url = (base.replace(/\/$/, '')) + '/web/#/details?id=' + encodeURIComponent(id);
+                    window.open(url, '_blank', 'noopener');
                 });
             });
         }
@@ -473,12 +518,13 @@
 
         function renderIssues(list) {
             lastIssueList = list || [];
-            // Keep the tab badge in lock-step with the actual list length so it can't disagree
-            // with the "All: N" totals pill or the visible cards. Server's Status.OpenIssueTotal
-            // is only used as a first-paint fallback in renderStatus. Skip when viewing Dismissed —
-            // the Issues badge is meant to signal open work, not the ignore pile.
+            // UI-17: openCount tracks the latest open-view fetch and is what the Issues badge
+            // reads. Without this, loading the Ignored view overwrites lastIssueList with the
+            // ignored rows and the badge drops to that count (or zero if nothing is ignored),
+            // under-reporting open work until a status poll re-renders.
             if (!showingDismissed) {
-                updateTabBadge('#mdIssueBadge', lastIssueList.length);
+                openCount = lastIssueList.length;
+                updateTabBadge('#mdIssueBadge', openCount);
             }
             renderTotals();
             renderLangFilter();
@@ -486,20 +532,36 @@
         }
 
         function activate() {
-            // Review P2-7: prevent overlapping /Issues requests. On a 20 K-row library the
-            // response is ~10 MB and takes ~2.3 s — but Status polls at 3 s cadence and can
-            // trigger a fresh activate() before the previous one lands. Overlapping copies
-            // burn CPU, memory, and network with no benefit; only the last render "wins".
-            // Skip queued fetches when one's in flight; the next poll will pick up the delta.
+            // UI-03: pagehide invalidates lifetime and the wrapped api() returns a never-settling
+            // promise; the .then/.catch below never run and `loading` sticks true across pageshow,
+            // silently blocking every subsequent load until a full page reload. If the recorded
+            // lifetime generation differs from the current one, the previous load is lost — clear
+            // the latch and start fresh.
+            if (loading && loadingToken !== null && loadingToken !== lifetime.current()) {
+                loading = false;
+            }
             if (loading) return;
+            // Capture the view mode so a late-arriving response for the previous view (open vs
+            // ignored) can be discarded instead of rendered under the new UI (UI-04).
+            var requestedView = showingDismissed;
             loading = true;
+            loadingToken = lifetime.current();
+            loadingView = requestedView;
             // ponytail: always fetch the full list for the current view — the type filter is applied
             // client-side by renderFiltered so the totals row can show counts for every type
             // simultaneously. The Dismissed view uses the same rendering path.
-            var url = showingDismissed ? 'Issues?status=Dismissed' : 'Issues?openOnly=true';
+            var url = requestedView ? 'Issues?status=Dismissed' : 'Issues?openOnly=true';
             api(url)
-                .then(renderIssues)
-                .then(function () { loading = false; })
+                .then(function (list) {
+                    loading = false;
+                    if (requestedView !== showingDismissed) {
+                        // The user toggled the view while this fetch was outstanding — the response
+                        // is for the wrong list. Discard and kick a fresh request for the new view.
+                        activate();
+                        return;
+                    }
+                    renderIssues(list);
+                })
                 .catch(function () { loading = false; });
         }
 
@@ -544,7 +606,10 @@
             prevPage: prevPage,
             toggleShowIgnored: toggleShowIgnored,
             showingIgnored: function () { return showingDismissed; },
-            count: function () { return lastIssueList.length; },
+            // UI-17: badge-authoritative count = the last open-view fetch's size. When the user
+            // opens the ignored view, lastIssueList holds ignored rows — using its length would
+            // under-report open work. openCount is only touched by open-view fetches.
+            count: function () { return showingDismissed ? openCount : lastIssueList.length; },
             filteredIds: function () { return lastFilteredIssues.map(function (i) { return i.Id; }); },
             installContextMenu: installIssueContextMenu
         };

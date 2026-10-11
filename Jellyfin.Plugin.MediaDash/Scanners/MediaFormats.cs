@@ -41,9 +41,16 @@ public static class MediaFormats
     };
 
     /// <summary>Ebook extensions. Jellyfin's book resolver accepts these plus PDFs.</summary>
+    /// <remarks>
+    /// E2E audit E2E-01: <c>.txt</c> is Jellyfin's canonical plain-text book extension and shows
+    /// up in Books libraries as a Book item. Omitting it from this set meant
+    /// <see cref="MediaFormats.All"/> treated a Books folder holding only a <c>.txt</c> as media-free
+    /// and OrphanCleanupScanner proposed deleting the folder while FormatCompatibilityScanner
+    /// simultaneously proposed converting the file inside it. Add it so both scanners agree.
+    /// </remarks>
     public static readonly HashSet<string> Books = new(StringComparer.OrdinalIgnoreCase)
     {
-        ".epub", ".mobi", ".azw", ".azw3", ".pdf", ".djvu"
+        ".epub", ".mobi", ".azw", ".azw3", ".pdf", ".djvu", ".txt"
     };
 
     /// <summary>Comic archive extensions. Currently indexed as Book items by Jellyfin.</summary>

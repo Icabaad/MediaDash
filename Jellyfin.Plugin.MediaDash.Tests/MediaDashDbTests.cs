@@ -33,6 +33,31 @@ public sealed class MediaDashDbTests : IDisposable
     };
 
     [Fact]
+    public void InterleaveCacheRoundTripsAndInvalidatesOnFileChange()
+    {
+        Assert.Null(_db.GetCachedInterleave("A", 100, 5));
+
+        _db.StoreInterleave("A", 100, 5, 0);
+        Assert.Equal(0, _db.GetCachedInterleave("A", 100, 5));
+
+        _db.StoreInterleave("A", 100, 5, 1759.4);
+        Assert.Equal(1759.4, _db.GetCachedInterleave("A", 100, 5));
+
+        Assert.Null(_db.GetCachedInterleave("A", 101, 5));
+        Assert.Null(_db.GetCachedInterleave("A", 100, 6));
+    }
+
+    [Fact]
+    public void ResetScanStateClearsInterleaveCache()
+    {
+        _db.StoreInterleave("A", 100, 5, 12);
+
+        _db.ResetScanState();
+
+        Assert.Null(_db.GetCachedInterleave("A", 100, 5));
+    }
+
+    [Fact]
     public void ScopedScanDoesNotWipeIssuesOutsideItsScope()
     {
         _db.ReplaceDetectedIssues(IssueType.Playability, [Make("A"), Make("B")]);
@@ -124,9 +149,16 @@ public sealed class MediaDashDbTests : IDisposable
     }
 
     [Fact]
-    public void ResetScanStateWipesIssuesAndCachesButKeepsHistory()
+    public void ResetScanStateWipesDetectedAndCachesButKeepsHistoryAndDecisions()
     {
-        _db.ReplaceDetectedIssues(IssueType.Playability, [Make("A")]);
+        // UI-06: ResetScanState used to blast every row from issues, silently undoing user
+        // decisions (Approve → Queued, Ignore → Dismissed). Now only Detected rows are wiped;
+        // Queued and Dismissed survive so the user's intent persists across a reset.
+        _db.ReplaceDetectedIssues(IssueType.Playability, [Make("A"), Make("B"), Make("C")]);
+        var issues = _db.GetIssues(IssueType.Playability);
+        Assert.Equal(3, issues.Count);
+        _db.TryTransitionIssueStatus(issues.First(i => i.Path == "B").Id, [IssueStatus.Detected], IssueStatus.Queued);
+        _db.TryTransitionIssueStatus(issues.First(i => i.Path == "C").Id, [IssueStatus.Detected], IssueStatus.Dismissed);
         _db.StoreDecode("A", 1, 2, "some error");
         _db.StoreProbe("A", 1, 2, "{}");
         _db.AddHistory(new HistoryEntry
@@ -141,7 +173,11 @@ public sealed class MediaDashDbTests : IDisposable
 
         _db.ResetScanState();
 
-        Assert.Empty(_db.GetIssues());
+        var remaining = _db.GetIssues(IssueType.Playability);
+        Assert.Equal(2, remaining.Count);
+        Assert.DoesNotContain(remaining, i => i.Status == IssueStatus.Detected);
+        Assert.Contains(remaining, i => i.Status == IssueStatus.Queued && i.Path == "B");
+        Assert.Contains(remaining, i => i.Status == IssueStatus.Dismissed && i.Path == "C");
         Assert.Null(_db.GetCachedDecode("A", 1, 2));
         Assert.Null(_db.GetCachedProbe("A", 1, 2));
         Assert.Single(_db.GetHistory());

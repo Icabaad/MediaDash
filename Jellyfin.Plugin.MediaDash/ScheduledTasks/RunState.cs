@@ -114,6 +114,8 @@ public sealed class RunState
             slot.CurrentLabel = currentLabel;
             slot.Processed = processed;
             slot.Total = total;
+            // Advancing to a new file drops any leftover per-file % from the previous file.
+            slot.CurrentOperationProgress = null;
         }
     }
 
@@ -125,6 +127,23 @@ public sealed class RunState
         lock (_sync)
         {
             Get(role).PauseReason = reason;
+        }
+    }
+
+    /// <summary>Sets or clears the current file's per-operation progress (0..1). Cleared automatically by <see cref="Complete"/> and between items via <see cref="UpdateProgress"/>.</summary>
+    /// <param name="role">Which slot the progress belongs to.</param>
+    /// <param name="fraction">Fraction (0..1) of the current file's own work, or null to clear.</param>
+    public void SetCurrentOperationProgress(RunRole role, double? fraction)
+    {
+        lock (_sync)
+        {
+            var slot = Get(role);
+            if (!slot.IsRunning)
+            {
+                return;
+            }
+
+            slot.CurrentOperationProgress = fraction is null ? null : Math.Clamp(fraction.Value, 0, 1);
         }
     }
 
@@ -140,6 +159,7 @@ public sealed class RunState
             slot.CurrentLabel = null;
             slot.Processed = 0;
             slot.Total = 0;
+            slot.CurrentOperationProgress = null;
             // PauseReason intentionally sticky — see class-level invariant + PluginState behaviour.
             if (role == RunRole.Fix)
             {
@@ -162,7 +182,8 @@ public sealed class RunState
                 slot.CurrentLabel,
                 slot.Processed,
                 slot.Total,
-                slot.PauseReason);
+                slot.PauseReason,
+                slot.CurrentOperationProgress);
         }
     }
 
@@ -412,6 +433,8 @@ public sealed class RunState
 
         public string? PauseReason { get; set; }
 
+        public double? CurrentOperationProgress { get; set; }
+
         public void Reset()
         {
             IsRunning = false;
@@ -420,6 +443,7 @@ public sealed class RunState
             Processed = 0;
             Total = 0;
             PauseReason = null;
+            CurrentOperationProgress = null;
         }
     }
 }

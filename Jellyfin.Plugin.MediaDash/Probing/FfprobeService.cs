@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -84,8 +86,13 @@ public sealed class FfprobeService
     /// <param name="path">Full path of the file to check.</param>
     /// <param name="durationSeconds">The file's duration in seconds, used to locate the middle segment; 0 skips the middle check.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
+    /// <param name="isAudioOnly">
+    /// MEDIA-02 / issue #76: when true, decode selects only audio streams (<c>-vn</c>) so attached
+    /// cover-art pictures on music / audiobooks don't get picked by ffmpeg's default stream
+    /// selection and reported as "truncated at 0s". Scanner passes true for Audio / AudioBook items.
+    /// </param>
     /// <returns>The decode error output, or null when the file decodes cleanly.</returns>
-    public async Task<string?> DecodeCheckAsync(string path, double durationSeconds, CancellationToken cancellationToken)
+    public async Task<string?> DecodeCheckAsync(string path, double durationSeconds, CancellationToken cancellationToken, bool isAudioOnly = false)
     {
         var fileInfo = new FileInfo(path);
         if (!fileInfo.Exists)
@@ -106,12 +113,20 @@ public sealed class FfprobeService
         // time-shortfall heuristic, no stderr marker check (tolerantContainer=true below).
         var isAvi = string.Equals(Path.GetExtension(path), ".avi", StringComparison.OrdinalIgnoreCase);
 
+        // MEDIA-02: ffmpeg's default stream selection on an audio file with an attached JPEG picture
+        // picks the picture (treats the still frame as "best video") and decodes it. The time= stat
+        // reflects decoded video time, which stays at 0 for a single still frame — the shortfall
+        // check then falsely flags a healthy 40-second FLAC as "truncated". Adding -vn disables
+        // video selection so the probe runs against audio, which is where the duration actually
+        // lives. For true video files isAudioOnly stays false and behavior is unchanged.
+        string[] streamSelect = isAudioOnly ? ["-vn"] : Array.Empty<string>();
+
         string? error;
         if (isAvi || durationSeconds <= 0)
         {
             // ponytail: sentinel for whole-file decode (short clips where regional sampling collapses).
             // AVI always takes this branch too — see the isAvi comment above.
-            error = await RunFfmpegDecodeAsync(["-i", path, "-f", "null", "-"], expectedSeconds: 0, tolerantContainer: isAvi, cancellationToken).ConfigureAwait(false);
+            error = await RunFfmpegDecodeAsync(ConcatArgs(["-i", path], streamSelect, ["-f", "null", "-"]), expectedSeconds: 0, tolerantContainer: isAvi, cancellationToken).ConfigureAwait(false);
         }
         else
         {
@@ -119,7 +134,7 @@ public sealed class FfprobeService
             // falls significantly short of what we asked for, treat that as truncation regardless of any
             // stderr markers — ffmpeg sometimes hits EOF cleanly without emitting one.
             var startExpected = Math.Min(30.0, durationSeconds);
-            error = await RunFfmpegDecodeAsync(["-i", path, "-t", "30", "-f", "null", "-"], startExpected, tolerantContainer: false, cancellationToken).ConfigureAwait(false);
+            error = await RunFfmpegDecodeAsync(ConcatArgs(["-i", path, "-t", "30"], streamSelect, ["-f", "null", "-"]), startExpected, tolerantContainer: false, cancellationToken).ConfigureAwait(false);
 
             if (string.IsNullOrWhiteSpace(error) && durationSeconds > 90)
             {
@@ -129,20 +144,217 @@ public sealed class FfprobeService
                 // decodes <90% of the requested 30s window and the shortfall heuristic false-positives on
                 // files that play fine in Jellyfin. Exit code + truncation-marker still catch real breakage.
                 // ponytail: drop this heuristic for seeks; the start-segment shortfall check remains the truth.
-                error = await RunFfmpegDecodeAsync(["-ss", middle, "-i", path, "-t", "30", "-f", "null", "-"], expectedSeconds: 0, tolerantContainer: false, cancellationToken).ConfigureAwait(false);
+                error = await RunFfmpegDecodeAsync(ConcatArgs(["-ss", middle, "-i", path, "-t", "30"], streamSelect, ["-f", "null", "-"]), expectedSeconds: 0, tolerantContainer: false, cancellationToken).ConfigureAwait(false);
             }
 
             if (string.IsNullOrWhiteSpace(error))
             {
                 // Same reasoning as the middle segment — -sseof seeks are keyframe-anchored, so the
                 // decoded-time shortfall check false-positives here too.
-                error = await RunFfmpegDecodeAsync(["-sseof", "-30", "-i", path, "-f", "null", "-"], expectedSeconds: 0, tolerantContainer: false, cancellationToken).ConfigureAwait(false);
+                error = await RunFfmpegDecodeAsync(ConcatArgs(["-sseof", "-30", "-i", path], streamSelect, ["-f", "null", "-"]), expectedSeconds: 0, tolerantContainer: false, cancellationToken).ConfigureAwait(false);
             }
         }
 
         var result = string.IsNullOrWhiteSpace(error) ? null : error;
         _probes.StoreDecode(path, fileInfo.Length, fileInfo.LastWriteTimeUtc.Ticks, result ?? string.Empty);
         return result;
+    }
+
+    /// <summary>
+    /// Checks whether the file's audio is stored next to the video it belongs to. Samples a few
+    /// positions first (cheap); only when a sample holds video without audio is the whole file
+    /// walked to measure how far apart the two really are. Returns a tri-state result so callers
+    /// can distinguish a verified-clean file from one that could not be checked.
+    /// </summary>
+    /// <param name="path">Full path of the file to check.</param>
+    /// <param name="probe">The file's probe data.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <param name="useCache">False to measure the file afresh and leave the cache untouched.</param>
+    /// <returns>Clean, Broken(offset) when the offset exceeds <see cref="InterleaveAnalyzer.MaxOffsetSeconds"/>, or Indeterminate when the check could not run.</returns>
+    public async Task<InterleaveResult> InterleaveCheckAsync(string path, FfprobeData probe, CancellationToken cancellationToken, bool useCache = true)
+    {
+        ArgumentNullException.ThrowIfNull(probe);
+        var fileInfo = new FileInfo(path);
+        if (!fileInfo.Exists || probe.Streams is null)
+        {
+            return InterleaveResult.Indeterminate;
+        }
+
+        // Cover art is reported as a video stream with a single packet; it says nothing about layout.
+        var video = probe.Streams.FirstOrDefault(s =>
+            string.Equals(s.CodecType, "video", StringComparison.OrdinalIgnoreCase)
+            && !(s.Disposition is not null && s.Disposition.TryGetValue("attached_pic", out var pic) && pic != 0));
+        var audioIndexes = probe.Streams
+            .Where(s => string.Equals(s.CodecType, "audio", StringComparison.OrdinalIgnoreCase))
+            .Select(s => s.Index)
+            .ToHashSet();
+        if (video is null || audioIndexes.Count == 0)
+        {
+            return InterleaveResult.Clean;
+        }
+
+        if (!double.TryParse(probe.Format?.Duration, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var duration)
+            || !double.IsFinite(duration) || duration <= 0)
+        {
+            return InterleaveResult.Indeterminate;
+        }
+
+        var sampleStarts = InterleaveAnalyzer.GetSampleStarts(duration);
+        if (sampleStarts.Count == 0)
+        {
+            // File too short to sample — policy says we don't check.
+            return InterleaveResult.Clean;
+        }
+
+        if (useCache)
+        {
+            var cached = _probes.GetCachedInterleave(path, fileInfo.Length, fileInfo.LastWriteTimeUtc.Ticks);
+            if (cached is double c)
+            {
+                return c > InterleaveAnalyzer.MaxOffsetSeconds ? InterleaveResult.Broken(c) : InterleaveResult.Clean;
+            }
+        }
+
+        var sampled = new List<(int StreamIndex, double PtsSeconds)>();
+        void OnSamplePacket(int index, double pts)
+        {
+            if (sampled.Count >= 100_000)
+            {
+                throw new InvalidDataException("Interleave sample exceeded its packet limit.");
+            }
+
+            sampled.Add((index, pts));
+        }
+
+        var sampledOk = await ReadPacketTimesAsync(path, InterleaveAnalyzer.ToReadIntervals(sampleStarts), ProbeTimeout, OnSamplePacket, cancellationToken).ConfigureAwait(false);
+        if (!sampledOk || !InterleaveAnalyzer.HasVideoInEverySample(sampled, sampleStarts, video.Index))
+        {
+            return InterleaveResult.Indeterminate;
+        }
+
+        double offset = 0;
+        if (InterleaveAnalyzer.HasSampleWithoutAudio(sampled, sampleStarts, video.Index, audioIndexes))
+        {
+            // A sample without audio is only a hint: an audio track that ends early or has silent
+            // gaps looks the same. The full walk is slow on big files but only runs on suspects.
+            var walk = new InterleaveAnalyzer.PacketWalk(video.Index, audioIndexes);
+            var walkOk = await ReadPacketTimesAsync(path, readIntervals: null, TimeSpan.FromMinutes(10), walk.Add, cancellationToken).ConfigureAwait(false);
+            if (!walkOk || !walk.HasAllStreams)
+            {
+                return InterleaveResult.Indeterminate;
+            }
+
+            offset = walk.MaximumOffsetSeconds;
+        }
+
+        if (useCache)
+        {
+            _probes.StoreInterleave(path, fileInfo.Length, fileInfo.LastWriteTimeUtc.Ticks, offset);
+        }
+
+        return offset > InterleaveAnalyzer.MaxOffsetSeconds ? InterleaveResult.Broken(offset) : InterleaveResult.Clean;
+    }
+
+    private async Task<bool> ReadPacketTimesAsync(string path, string? readIntervals, TimeSpan timeout, Action<int, double> onPacket, CancellationToken cancellationToken)
+    {
+        var probePath = _mediaEncoder.ProbePath;
+        if (string.IsNullOrEmpty(probePath))
+        {
+            return false;
+        }
+
+        using var process = new Process();
+        process.StartInfo.FileName = probePath;
+        process.StartInfo.UseShellExecute = false;
+        process.StartInfo.CreateNoWindow = true;
+        process.StartInfo.RedirectStandardOutput = true;
+        process.StartInfo.RedirectStandardError = true;
+        process.StartInfo.ArgumentList.Add("-threads");
+        process.StartInfo.ArgumentList.Add(ResolveScanThreads());
+        process.StartInfo.ArgumentList.Add("-v");
+        process.StartInfo.ArgumentList.Add("error");
+        if (readIntervals is not null)
+        {
+            process.StartInfo.ArgumentList.Add("-read_intervals");
+            process.StartInfo.ArgumentList.Add(readIntervals);
+        }
+
+        foreach (var arg in new[] { "-show_entries", "packet=stream_index,pts_time", "-of", "csv=p=0", path })
+        {
+            process.StartInfo.ArgumentList.Add(arg);
+        }
+
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutCts.CancelAfter(timeout);
+
+        try
+        {
+            process.Start();
+            TryLowerPriority(process);
+            var stderrTask = process.StandardError.ReadToEndAsync(timeoutCts.Token);
+            while (await process.StandardOutput.ReadLineAsync(timeoutCts.Token).ConfigureAwait(false) is { } line)
+            {
+                if (InterleaveAnalyzer.TryParsePacketLine(line, out var streamIndex, out var pts))
+                {
+                    onPacket(streamIndex, pts);
+                }
+            }
+
+            await process.WaitForExitAsync(timeoutCts.Token).ConfigureAwait(false);
+            await stderrTask.ConfigureAwait(false);
+            return process.ExitCode == 0;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning("ffprobe packet walk timed out on {Path}", path);
+            TryKill(process);
+            return false;
+        }
+        catch (OperationCanceledException)
+        {
+            TryKill(process);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "ffprobe packet walk failed on {Path}", path);
+            TryKill(process);
+            return false;
+        }
+    }
+
+    private static string[] ConcatArgs(string[] a, string[] b, string[] c)
+    {
+        var combined = new string[a.Length + b.Length + c.Length];
+        a.CopyTo(combined, 0);
+        b.CopyTo(combined, a.Length);
+        c.CopyTo(combined, a.Length + b.Length);
+        return combined;
+    }
+
+    /// <summary>Checks every audio track when default stream selection cannot cover them all.</summary>
+    /// <param name="path">The file to decode.</param>
+    /// <param name="probe">Its stream inventory.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The first broken audio stream and its decode error, or null.</returns>
+    public async Task<(FfprobeStreamInfo Stream, string Error)?> FindBrokenAudioStreamAsync(string path, FfprobeData probe, CancellationToken cancellationToken)
+    {
+        var audioStreams = probe.Streams?.Where(s => string.Equals(s.CodecType, "audio", StringComparison.OrdinalIgnoreCase)).ToList();
+        if (audioStreams is null || audioStreams.Count < 2)
+        {
+            return null;
+        }
+
+        foreach (var stream in audioStreams)
+        {
+            var error = await DecodeStreamAsync(path, stream.Index, cancellationToken).ConfigureAwait(false);
+            if (error is not null)
+            {
+                return (stream, error);
+            }
+        }
+
+        return null;
     }
 
     /// <summary>

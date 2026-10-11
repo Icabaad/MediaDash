@@ -238,20 +238,40 @@ public sealed class PlayabilityScanner : ProbingScannerBase
             // overestimated actual VBR content by 2×+. DecodeCheckAsync already catches genuine
             // truncation via the decoded-time shortfall heuristic (FfprobeService line ~227) with
             // far fewer false positives; keeping only that.
+            // MEDIA-02 / issue #76: route audio items (Audio / AudioBook) through the audio-only
+            // decode path so attached cover art pictures don't get selected as the "best video"
+            // stream and reported as truncated-at-0s.
+            var isAudioOnly = IsAudioKind(item.GetBaseItemKind());
             var decodeError = ShouldSampleWholeFile(duration)
-                ? await Ffprobe.DecodeCheckAsync(path, durationSeconds: 0, cancellationToken).ConfigureAwait(false)
-                : await Ffprobe.DecodeCheckAsync(path, duration, cancellationToken).ConfigureAwait(false);
+                ? await Ffprobe.DecodeCheckAsync(path, durationSeconds: 0, cancellationToken, isAudioOnly).ConfigureAwait(false)
+                : await Ffprobe.DecodeCheckAsync(path, duration, cancellationToken, isAudioOnly).ConfigureAwait(false);
             if (decodeError is not null)
             {
                 reason = "decode-error";
-                detail = "The video stream is damaged and the decoder rejected part of it.";
+                detail = isAudioOnly
+                    ? "The audio stream is damaged and the decoder rejected part of it."
+                    : "The video stream is damaged and the decoder rejected part of it.";
                 technical = decodeError;
+            }
+            else
+            {
+                var brokenAudio = await Ffprobe.FindBrokenAudioStreamAsync(path, probe, cancellationToken).ConfigureAwait(false);
+                if (brokenAudio is { } audio)
+                {
+                    reason = "decode-error";
+                    detail = string.Format(
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        "Audio stream {0} ({1}) is damaged and the decoder rejected part of it.",
+                        audio.Stream.Index,
+                        audio.Stream.Language ?? audio.Stream.CodecName ?? "unknown");
+                    technical = audio.Error;
+                }
             }
         }
 
         if (reason is null)
         {
-            return null;
+            return await EvaluateInterleaveAsync(item, path, probe, cancellationToken).ConfigureAwait(false);
         }
 
         long size = 0;
@@ -278,6 +298,35 @@ public sealed class PlayabilityScanner : ProbingScannerBase
             DetailsJson = detailsJson,
             SuggestedFix = suggestedFix,
             SizeSavings = size
+        };
+    }
+
+    // Secondary check for files that passed every other playability gate but hide a seek-time
+    // failure: audio stored far from its video. Only runs with Thorough enabled, only on video
+    // items, only when the primary checks found nothing. Indeterminate verdicts don't produce
+    // issues — this is a scanner, not a "surface everything we're not sure about" alert.
+    private async Task<Issue?> EvaluateInterleaveAsync(BaseItem item, string path, FfprobeData? probe, CancellationToken cancellationToken)
+    {
+        if (!Config.ThoroughPlayabilityCheck || IsAudioKind(item.GetBaseItemKind()) || probe is null)
+        {
+            return null;
+        }
+
+        var result = await Ffprobe.InterleaveCheckAsync(path, probe, cancellationToken).ConfigureAwait(false);
+        if (result.Status != InterleaveStatus.Broken)
+        {
+            return null;
+        }
+
+        var detail = string.Format(
+            CultureInfo.InvariantCulture,
+            "Sound and picture are stored up to {0:F0} minutes apart inside this file. It plays from the start, but after skipping ahead it can stall or play without sound.",
+            Math.Ceiling(result.OffsetSeconds / 60));
+        return new Issue
+        {
+            DetailsJson = JsonSerializer.Serialize(new { reason = InterleaveAnalyzer.IssueReason, detail }),
+            SuggestedFix = "Skipping ahead in this file can stall or lose sound. Approve to rewrite it with sound and picture stored side by side — nothing is re-encoded, and the file is left untouched if the rewrite fails.",
+            SizeSavings = 0
         };
     }
 

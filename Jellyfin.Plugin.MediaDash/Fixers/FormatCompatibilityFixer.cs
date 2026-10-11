@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -28,9 +29,7 @@ public sealed class FormatCompatibilityFixer : IFixer
     private readonly IFormatConverterRegistry _converters;
     private readonly ILibraryCollectionResolver _resolver;
 
-    // ponytail: nullable — tests never exercise the VRS path (all 4 test cases exit early
-    // via refusal prechecks). Null guard below throws loudly if production code somehow
-    // reaches ReplaceAsync without DI wiring it.
+    // Precheck tests may omit replacement; the live path requires DI wiring below.
     private readonly VerifiedReplacementService? _replacement;
 
     // ponytail: nullable guard/protection — null = skip check in tests; production DI always supplies them.
@@ -46,6 +45,11 @@ public sealed class FormatCompatibilityFixer : IFixer
     private readonly ILibraryManager? _libraryManager;
     private readonly ILibraryMonitor? _libraryMonitor;
 
+    // External review #7: used to probe AV outputs (JPG/MP3/FLAC/MKV/M4B) via ffprobe for
+    // stream and duration sanity before VRS commits. Nullable — tests that stay in the refusal
+    // path never reach the AV verification branch.
+    private readonly FfprobeService? _ffprobe;
+
     private readonly ILogger<FormatCompatibilityFixer> _logger;
 
     /// <summary>
@@ -60,6 +64,7 @@ public sealed class FormatCompatibilityFixer : IFixer
     /// <param name="configProvider">Config snapshot provider.</param>
     /// <param name="libraryManager">Jellyfin library manager for post-fix item purge.</param>
     /// <param name="libraryMonitor">Jellyfin library monitor for FS-change notifications.</param>
+    /// <param name="ffprobe">ffprobe service for AV output integrity checks (external review #7).</param>
     /// <param name="logger">The logger.</param>
     public FormatCompatibilityFixer(
         IFormatConverterRegistry converters,
@@ -70,6 +75,7 @@ public sealed class FormatCompatibilityFixer : IFixer
         IPluginConfigurationProvider configProvider,
         ILibraryManager libraryManager,
         ILibraryMonitor libraryMonitor,
+        FfprobeService ffprobe,
         ILogger<FormatCompatibilityFixer> logger)
         : this(
             converters,
@@ -81,6 +87,7 @@ public sealed class FormatCompatibilityFixer : IFixer
             id => libraryManager.GetItemById(id),
             libraryManager,
             libraryMonitor,
+            ffprobe,
             logger)
     {
     }
@@ -99,6 +106,7 @@ public sealed class FormatCompatibilityFixer : IFixer
     /// <param name="getItemById">Item-lookup delegate. Return null to treat item as not found.</param>
     /// <param name="libraryManager">Optional — used only on the success path for DeleteItem.</param>
     /// <param name="libraryMonitor">Optional — used only on the success path for FS change notification.</param>
+    /// <param name="ffprobe">Optional — AV output verification seam; tests pass null.</param>
     /// <param name="logger">The logger.</param>
     internal FormatCompatibilityFixer(
         IFormatConverterRegistry converters,
@@ -110,6 +118,7 @@ public sealed class FormatCompatibilityFixer : IFixer
         Func<Guid, BaseItem?> getItemById,
         ILibraryManager? libraryManager,
         ILibraryMonitor? libraryMonitor,
+        FfprobeService? ffprobe,
         ILogger<FormatCompatibilityFixer> logger)
     {
         _converters = converters;
@@ -121,7 +130,24 @@ public sealed class FormatCompatibilityFixer : IFixer
         _getItemById = getItemById;
         _libraryManager = libraryManager;
         _libraryMonitor = libraryMonitor;
+        _ffprobe = ffprobe;
         _logger = logger;
+    }
+
+    // Overload keeping the pre-review ctor shape for tests that haven't been updated yet.
+    internal FormatCompatibilityFixer(
+        IFormatConverterRegistry converters,
+        ILibraryCollectionResolver resolver,
+        VerifiedReplacementService? replacement,
+        LibraryGuard? guard,
+        ProtectionService? protection,
+        IPluginConfigurationProvider configProvider,
+        Func<Guid, BaseItem?> getItemById,
+        ILibraryManager? libraryManager,
+        ILibraryMonitor? libraryMonitor,
+        ILogger<FormatCompatibilityFixer> logger)
+        : this(converters, resolver, replacement, guard, protection, configProvider, getItemById, libraryManager, libraryMonitor, ffprobe: null, logger)
+    {
     }
 
     /// <inheritdoc />
@@ -160,9 +186,15 @@ public sealed class FormatCompatibilityFixer : IFixer
         }
 
         // 5. Resolve library type via item lookup + resolver.
-        // For unindexed files (ItemId == Guid.Empty) the item will be null; fall back to the
-        // libraryKind the scanner froze into DetailsJson at detection time so the mixed-library gate
-        // below uses the actual library type rather than treating every unindexed file as mixed.
+        // External review #4: unindexed files used to inherit details.LibraryKind, which was
+        // frozen at scan time. A user who reclassified a Books library to mixed after the scan
+        // but before approving the fix would bypass the mixed-library approval gate below.
+        // Always re-resolve against the CURRENT library layout via ResolveByPath — the frozen
+        // libraryKind is still consulted only as a tiebreaker for files whose path no longer
+        // sits under any virtual folder (e.g. library root was renamed; the file physically
+        // moved during the fix window). The scanner itself still tags mixedLibrary=true for
+        // files that were genuinely mixed at detection; that stays as a hard override because
+        // approvedInMixedLibrary flipping to true came from that scan context.
         // ponytail: Jellyfin's LibraryManager.GetItemById throws ArgumentException on Guid.Empty
         // rather than returning null — guard here so folder-merge issues (ItemId always empty) don't crash.
         var item = issue.ItemId == Guid.Empty ? null : _getItemById(issue.ItemId);
@@ -173,11 +205,16 @@ public sealed class FormatCompatibilityFixer : IFixer
         }
         else if (details.MixedLibrary)
         {
-            libraryType = null; // genuinely mixed
+            libraryType = null; // genuinely mixed at scan time; honour the approvedInMixedLibrary gate.
         }
         else
         {
-            libraryType = Enum.TryParse<CollectionType>(details.LibraryKind, ignoreCase: true, out var parsed) ? parsed : (CollectionType?)null;
+            // Re-resolve against the current virtual-folder layout. We deliberately do NOT fall
+            // back to details.LibraryKind here — ResolveByPath returning null means either "file
+            // is outside every library" OR "owning library is now mixed." Both cases must flow
+            // through the mixed-library approval gate below; silently preferring the stale value
+            // is exactly the bypass the external review flagged.
+            libraryType = _resolver.ResolveByPath(issue.Path);
         }
 
         var isMixed = libraryType is null;
@@ -251,6 +288,29 @@ public sealed class FormatCompatibilityFixer : IFixer
         // no swap needed because we're creating a new sibling file, not replacing any existing one.
         if (isFolderMerge)
         {
+            // External review #1: refuse destination collisions BEFORE spending minutes to convert.
+            // The old `File.Move(..., overwrite: true)` silently replaced an existing sibling .m4b
+            // without recycling it. The scanner's `*.m4b` short-circuit at ClassifyFolderAsAudiobookMerge
+            // caught the common case but raced any file placed between scan and fix.
+            if (File.Exists(destinationPath))
+            {
+                return FixResult.Refused(
+                    FixReason.OutputConflict,
+                    "A file already exists at " + destinationPath + ". Move or delete it and re-scan — MediaDash will not overwrite an existing file during a folder merge.");
+            }
+
+            // External review #3: shared commit-time policy check — folder-merges used to proceed
+            // straight to the rename, so a dry-run flip, converter toggle disable, or protection
+            // rule added during the long audiobook concat silently committed anyway. Routes
+            // through the same static helper the file-conversion path uses so the two never drift.
+            var converterKindForFolder = converter.Kind;
+            PolicyDecision CheckCurrentPolicyFolder() => EvaluateCommitPolicy(
+                _configProvider.GetSnapshot(),
+                converterKindForFolder,
+                _protection,
+                issue.Path,
+                issue.Type);
+
             var stagedPath = issue.Path + InflightTail + targetExt;
             ConversionResult folderConversion;
             try
@@ -282,9 +342,28 @@ public sealed class FormatCompatibilityFixer : IFixer
                 return FixResult.Fail(FixReason.VerificationFailed, verifyError);
             }
 
+            // Live-policy recheck AFTER the long conversion but BEFORE the irreversible rename.
+            // Same pattern as the file-conversion commit path; a user who flips to dry-run or
+            // adds a protection rule mid-encode now aborts cleanly instead of silently committing.
+            var folderPolicy = CheckCurrentPolicyFolder();
+            if (!folderPolicy.Allowed)
+            {
+                SafeDelete(stagedPath);
+                return FixResult.Refused(folderPolicy.Reason, "Policy changed mid-conversion; staged merge discarded.");
+            }
+
+            // Second collision check: the destination may have appeared during the long concat.
+            if (File.Exists(destinationPath))
+            {
+                SafeDelete(stagedPath);
+                return FixResult.Refused(
+                    FixReason.OutputConflict,
+                    "A file was placed at " + destinationPath + " during the merge. Staged output discarded.");
+            }
+
             try
             {
-                File.Move(folderConversion.StagedPath, destinationPath, overwrite: true);
+                File.Move(folderConversion.StagedPath, destinationPath, overwrite: false);
             }
             catch (IOException ex)
             {
@@ -352,37 +431,18 @@ public sealed class FormatCompatibilityFixer : IFixer
         // P1-1: re-consult live config + protection immediately before the commit so a mid-
         // conversion dry-run flip, fixer disable, per-kind toggle off, or protection addition
         // aborts before any file is touched. Pattern from TranscodeFixer.EvaluateCommitPolicy
-        // (external audit P1-F3, 1.0.8.0).
-        PolicyDecision CheckCurrentPolicy()
-        {
-            var freshCfg = _configProvider.GetSnapshot();
-            if (freshCfg.DryRun)
-            {
-                return PolicyDecision.Refuse(FixReason.TypeDisabled);
-            }
-
-            var mode = freshCfg.GetFixMode(IssueType.FormatCompatibility);
-            if (mode == FixMode.Off || mode == FixMode.DetectOnly)
-            {
-                return PolicyDecision.Refuse(FixReason.TypeDisabled);
-            }
-
-            if (!IsKindEnabled(freshCfg, converterKind))
-            {
-                return PolicyDecision.Refuse(FixReason.TypeDisabled);
-            }
-
-            if (_protection is not null && _protection.IsFixerBlocked(issue.Path, issue.Type))
-            {
-                return PolicyDecision.Refuse(FixReason.Protected);
-            }
-
-            return PolicyDecision.Allow;
-        }
+        // (external audit P1-F3, 1.0.8.0). Routes through EvaluateCommitPolicy so folder-merge
+        // and tests exercise identical logic.
+        PolicyDecision CheckCurrentPolicy() => EvaluateCommitPolicy(
+            _configProvider.GetSnapshot(),
+            converterKind,
+            _protection,
+            issue.Path,
+            issue.Type);
 
         var replaceResult = await vrs.ReplaceAsync(
             request,
-            ct => VerifyOutputAsync(stagedForVerify, ct),
+            ct => VerifyOutputAsync(stagedForVerify, sourcePath: issue.Path, ct),
             CheckCurrentPolicy,
             cancellationToken).ConfigureAwait(false);
 
@@ -433,6 +493,50 @@ public sealed class FormatCompatibilityFixer : IFixer
         _ => false
     };
 
+    /// <summary>
+    /// Commit-time policy evaluator shared by the file-conversion and folder-merge paths. Both
+    /// paths used to re-implement the gate inline; the test suite then had to mirror the same
+    /// logic a third time (external review feedback: "policy tests duplicate production logic
+    /// instead of exercising the actual commit callback"). Routing everything through one
+    /// static method lets both callers and the test exercise the exact same code.
+    /// </summary>
+    /// <param name="freshConfig">Latest config snapshot (callers pass <c>_configProvider.GetSnapshot()</c>).</param>
+    /// <param name="converterKind">The converter being invoked — gates against the per-kind toggle.</param>
+    /// <param name="protection">Protection service; null skips the protection check (test seam).</param>
+    /// <param name="path">The source path being touched; used for the protection lookup.</param>
+    /// <param name="issueType">The issue type being fixed (<see cref="IssueType.FormatCompatibility"/> in practice).</param>
+    /// <returns>Allow or a refusal reason.</returns>
+    internal static PolicyDecision EvaluateCommitPolicy(
+        PluginConfiguration freshConfig,
+        MediaKind converterKind,
+        ProtectionService? protection,
+        string path,
+        IssueType issueType)
+    {
+        if (freshConfig.DryRun)
+        {
+            return PolicyDecision.Refuse(FixReason.TypeDisabled);
+        }
+
+        var mode = freshConfig.GetFixMode(IssueType.FormatCompatibility);
+        if (mode == FixMode.Off || mode == FixMode.DetectOnly)
+        {
+            return PolicyDecision.Refuse(FixReason.TypeDisabled);
+        }
+
+        if (!IsKindEnabled(freshConfig, converterKind))
+        {
+            return PolicyDecision.Refuse(FixReason.TypeDisabled);
+        }
+
+        if (protection is not null && protection.IsFixerBlocked(path, issueType))
+        {
+            return PolicyDecision.Refuse(FixReason.Protected);
+        }
+
+        return PolicyDecision.Allow;
+    }
+
     private static Details? ParseDetails(string? detailsJson)
     {
         if (string.IsNullOrWhiteSpace(detailsJson))
@@ -465,21 +569,29 @@ public sealed class FormatCompatibilityFixer : IFixer
 
     // P1-3: dispatch to the existing BookProbeService/ComicProbeService structural probes so
     // an unreadable or truncated converted output is refused before the original is disposed.
-    // VRS verifyOutput signature is Func<CancellationToken, Task<string?>> — stagedPath
-    // is captured by the caller's closure, ct is passed by VRS.
+    // External review #7: extended with ffprobe-based stream/duration checks for AV outputs
+    // (JPG/MP3/FLAC/MKV/M4B). VRS verifyOutput signature is Func<CancellationToken, Task<string?>>;
+    // stagedPath is captured by the caller's closure, ct is passed by VRS.
+    // External audit P2 #6: optional sourcePath lets the verify compare source vs output
+    // duration/stream count so a readable-but-truncated conversion is caught before VRS
+    // commits. Null preserves the previous "existence + readable" behaviour (folder-merge path
+    // where source is a directory, not a single file).
     // internal for direct unit testing (InternalsVisibleTo tests project).
-    internal static Task<string?> VerifyOutputAsync(string stagedPath, CancellationToken ct)
+    internal async Task<string?> VerifyOutputAsync(string stagedPath, CancellationToken ct)
+        => await VerifyOutputAsync(stagedPath, sourcePath: null, ct).ConfigureAwait(false);
+
+    internal async Task<string?> VerifyOutputAsync(string stagedPath, string? sourcePath, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
 
         if (!File.Exists(stagedPath))
         {
-            return Task.FromResult<string?>("Converted output is missing after conversion.");
+            return "Converted output is missing after conversion.";
         }
 
         if (new FileInfo(stagedPath).Length == 0)
         {
-            return Task.FromResult<string?>("Converted output is empty.");
+            return "Converted output is empty.";
         }
 
         var ext = Path.GetExtension(stagedPath).ToLowerInvariant();
@@ -495,7 +607,7 @@ public sealed class FormatCompatibilityFixer : IFixer
                 var probe = BookProbeService.Probe(stagedPath);
                 if (!probe.Ok)
                 {
-                    return Task.FromResult<string?>("Converted output failed integrity probe: " + probe.Reason);
+                    return "Converted output failed integrity probe: " + probe.Reason;
                 }
 
                 break;
@@ -508,18 +620,123 @@ public sealed class FormatCompatibilityFixer : IFixer
                 var probe = ComicProbeService.Probe(stagedPath);
                 if (!probe.Ok)
                 {
-                    return Task.FromResult<string?>("Converted output failed integrity probe: " + probe.Reason);
+                    return "Converted output failed integrity probe: " + probe.Reason;
                 }
 
                 break;
             }
 
-            // ponytail: image/music/video converters are Phase 4+; add ffprobe check when those land.
+            case ".mp3":
+            case ".flac":
+            case ".m4b":
+            case ".mkv":
+            {
+                var mediaError = await VerifyAvOutputAsync(stagedPath, sourcePath, requireAudio: true, requireVideo: ext == ".mkv", ct).ConfigureAwait(false);
+                if (mediaError is not null)
+                {
+                    return mediaError;
+                }
+
+                break;
+            }
+
+            case ".jpg":
+            case ".jpeg":
+            {
+                // Attached-picture / image conversions produce JPEG. ffprobe parses them as a
+                // single-frame "video" stream — probe confirms the file is readable and the
+                // image stream is present. Duration is always 0; don't gate on it.
+                var mediaError = await VerifyAvOutputAsync(stagedPath, sourcePath: null, requireAudio: false, requireVideo: true, ct).ConfigureAwait(false);
+                if (mediaError is not null)
+                {
+                    return mediaError;
+                }
+
+                break;
+            }
+
             default:
                 break;
         }
 
-        return Task.FromResult<string?>(null);
+        return null;
+    }
+
+    private async Task<string?> VerifyAvOutputAsync(string stagedPath, string? sourcePath, bool requireAudio, bool requireVideo, CancellationToken ct)
+    {
+        // No ffprobe injected (test / seam path) — fall through to the length-only check already
+        // enforced above. Production DI always supplies one.
+        if (_ffprobe is null)
+        {
+            return null;
+        }
+
+        var probe = await _ffprobe.ProbeAsync(stagedPath, ct).ConfigureAwait(false);
+        if (probe is null || probe.Error is not null || probe.Streams is null || probe.Streams.Count == 0)
+        {
+            return "Converted output could not be read back: " + (probe?.Error?.Message ?? "ffprobe returned no data");
+        }
+
+        var hasAudio = probe.Streams.Any(s => string.Equals(s.CodecType, "audio", StringComparison.OrdinalIgnoreCase));
+        var hasVideo = probe.Streams.Any(s => string.Equals(s.CodecType, "video", StringComparison.OrdinalIgnoreCase));
+
+        if (requireAudio && !hasAudio)
+        {
+            return "Converted output has no audio stream.";
+        }
+
+        if (requireVideo && !hasVideo)
+        {
+            return "Converted output has no video stream.";
+        }
+
+        double outputSeconds = 0;
+        var hasOutputDuration = requireAudio
+            && double.TryParse(probe.Format?.Duration, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out outputSeconds);
+
+        // Duration sanity — JPEG stills carry no duration, so skip the duration check when audio
+        // is not required (image-converter path). For audio outputs, zero / negative duration
+        // means the muxer produced an empty file that ffprobe can still open.
+        if (requireAudio && (!hasOutputDuration || outputSeconds <= 0.1))
+        {
+            return "Converted output has zero duration.";
+        }
+
+        // External audit P2 #6: compare against source duration + audio-stream count when a
+        // sourcePath is supplied. Catches a readable-but-truncated conversion that would
+        // otherwise be accepted and the source permanently deleted. 5% tolerance absorbs
+        // legitimate re-encode trimming (sample-rate rounding, lossy framing); anything
+        // beyond that is user data loss. Audio-stream count must match exactly — a sudden
+        // drop from 2 to 1 is track loss, not re-encode slack.
+        if (requireAudio && !string.IsNullOrEmpty(sourcePath) && File.Exists(sourcePath))
+        {
+            var sourceProbe = await _ffprobe.ProbeAsync(sourcePath, ct).ConfigureAwait(false);
+            if (sourceProbe?.Format?.Duration is not null
+                && double.TryParse(sourceProbe.Format.Duration, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var sourceSeconds)
+                && sourceSeconds > 1.0
+                && hasOutputDuration
+                && outputSeconds < sourceSeconds * 0.95)
+            {
+                return string.Format(
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    "Converted output is only {0:F1}s of the source's {1:F1}s — missing more than 5% of the content.",
+                    outputSeconds,
+                    sourceSeconds);
+            }
+
+            var sourceAudio = sourceProbe?.Streams?.Count(s => string.Equals(s.CodecType, "audio", StringComparison.OrdinalIgnoreCase)) ?? 0;
+            var outputAudio = probe.Streams.Count(s => string.Equals(s.CodecType, "audio", StringComparison.OrdinalIgnoreCase));
+            if (sourceAudio > 0 && outputAudio < sourceAudio)
+            {
+                return string.Format(
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    "Converted output has only {0} audio stream(s); source had {1}.",
+                    outputAudio,
+                    sourceAudio);
+            }
+        }
+
+        return null;
     }
 
     private static void SafeDelete(string path)

@@ -34,6 +34,8 @@
 
 
             function loadFiles(path) {
+                if (ctxMenu) closeCtxMenu();
+                cancelPress();
                 var request = ++fileRequest;
                 var listEl = deps.view.querySelector('#mdFileList');
                 listEl.innerHTML = '<div class="fieldDescription">Loading…</div>';
@@ -508,9 +510,42 @@
             // Resolved lazily in bindCtxMenu() — deps.view isn't populated until the tab mounts,
             // so touching it at factory time crashes with "Cannot read properties of undefined".
             var ctxMenu, ctxSubmenu, protectDialog;
-            var ctxTargetName = '';
+            var ctxTargetPath = '';
             var pressTimer = null;
             var pressOrigin = null;
+            var suppressTouchClick = false;
+            var ctxGlobalsBound = false;
+            var protectReturnFocus = null;
+            var ctxReturnFocus = null;
+
+            function activateFiles() {
+                if (!ctxMenu || ctxGlobalsBound) return;
+                ctxGlobalsBound = true;
+                deps.ownGlobal(document, 'click', function (e) {
+                    if (ctxMenu.style.display !== 'none' && !ctxMenu.contains(e.target)) closeCtxMenu();
+                });
+                deps.ownGlobal(document, 'keydown', function (e) {
+                    if (e.key === 'Escape') { cancelPress(); closeCtxMenu(); closeProtectDialog(); }
+                });
+                deps.lifetime.own(function () {
+                    ctxGlobalsBound = false;
+                    cancelPress();
+                    suppressTouchClick = false;
+                    closeCtxMenu();
+                    closeProtectDialog();
+                    deps.view.querySelector('#mdProtectAccept').disabled = false;
+                });
+            }
+
+            function cancelPress() {
+                if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+                pressOrigin = null;
+            }
+
+            function positionCtxMenu(x, y) {
+                ctxMenu.style.left = Math.max(0, Math.min(x, window.innerWidth - ctxMenu.offsetWidth)) + 'px';
+                ctxMenu.style.top = Math.max(0, Math.min(y, window.innerHeight - ctxMenu.offsetHeight)) + 'px';
+            }
 
             function isWritableContext() {
                 if (!currentFileListing) return false;
@@ -519,33 +554,43 @@
 
             function openCtxMenu(clientX, clientY, name, isDir) {
                 if (!isWritableContext()) return;
-                ctxTargetName = name;
+                if (ctxMenu.style.display === 'none') ctxReturnFocus = document.activeElement;
+                ctxTargetPath = joinPath(currentFilePath, name);
                 // Folders can be protected but not added as an Issue — hide the Issues item.
                 ctxMenu.querySelector('[data-ctx="issues"]').style.display = isDir ? 'none' : 'flex';
                 ctxSubmenu.style.display = 'none';
                 ctxMenu.style.display = 'block';
                 // Clamp to viewport so the menu never clips off-screen.
-                ctxMenu.style.left = Math.min(clientX, window.innerWidth - 240) + 'px';
-                ctxMenu.style.top = Math.min(clientY, window.innerHeight - 180) + 'px';
+                positionCtxMenu(clientX, clientY);
+                ctxMenu.querySelector(isDir ? '[data-ctx="protect"]' : '[data-ctx="issues"]').focus();
             }
 
             function closeCtxMenu() {
+                var wasOpen = ctxMenu.style.display !== 'none';
                 ctxMenu.style.display = 'none';
                 ctxSubmenu.style.display = 'none';
-                ctxTargetName = '';
+                ctxTargetPath = '';
+                if (wasOpen && ctxReturnFocus && typeof ctxReturnFocus.focus === 'function') ctxReturnFocus.focus();
+                ctxReturnFocus = null;
             }
 
             function openProtectDialog(path) {
+                protectReturnFocus = document.activeElement;
                 deps.view.querySelector('#mdProtectPath').textContent = path;
                 deps.view.querySelector('#mdProtectNote').value = '';
-                deps.view.querySelector('#mdProtectScanners').value = '*';
-                deps.view.querySelector('#mdProtectFixers').value = '*';
                 protectDialog.style.display = 'flex';
+                deps.view.querySelector('#mdProtectNote').focus();
             }
-            function closeProtectDialog() { protectDialog.style.display = 'none'; }
+            function closeProtectDialog() {
+                if (protectDialog.style.display === 'none') return;
+                protectDialog.style.display = 'none';
+                if (protectReturnFocus && typeof protectReturnFocus.focus === 'function') protectReturnFocus.focus();
+                protectReturnFocus = null;
+            }
 
             function submitManualIssue(type) {
-                var body = { Path: joinPath(currentFilePath, ctxTargetName), Type: type };
+                if (!ctxTargetPath) return;
+                var body = { Path: ctxTargetPath, Type: type };
                 closeCtxMenu();
                 deps.api.ajax({
                     type: 'POST',
@@ -553,7 +598,7 @@
                     contentType: 'application/json',
                     data: JSON.stringify(body)
                 }).then(function () {
-                    showToast('Added as ' + type + '. Switch to the Issues tab to review.');
+                    showToast('Added to Issues. Switch to the Issues tab to review.');
                 }, function (xhr) {
                     extractErrorMessage(xhr, 'Could not add issue.').then(window.alert);
                 });
@@ -569,7 +614,12 @@
                 var def = status ? ('HTTP ' + status + (statusText ? ': ' + statusText : '')) : (fallback || 'Request failed.');
                 var decode = function (body) {
                     if (!body) return def;
-                    try { var parsed = JSON.parse(body); if (typeof parsed === 'string') return parsed; } catch (e) {}
+                    try {
+                        var parsed = JSON.parse(body);
+                        if (typeof parsed === 'string') return parsed;
+                        if (parsed && typeof parsed.Error === 'string') return parsed.Error;
+                        if (parsed && typeof parsed.message === 'string') return parsed.message;
+                    } catch (e) {}
                     return body;
                 };
                 if (!xhr) return Promise.resolve(def);
@@ -596,6 +646,8 @@
                 protectDialog = deps.view.querySelector('#mdProtectDialog');
                 var listEl = deps.view.querySelector('#mdFileList');
 
+                activateFiles();
+
                 // Desktop right-click, delegated.
                 listEl.addEventListener('contextmenu', function (e) {
                     var row = e.target.closest('.mdFileRow');
@@ -606,6 +658,8 @@
 
                 // Touch long-press (500ms with <10px drift).
                 listEl.addEventListener('touchstart', function (e) {
+                    cancelPress();
+                    suppressTouchClick = false;
                     var row = e.target.closest('.mdFileRow');
                     if (!row || e.touches.length !== 1) return;
                     var t = e.touches[0];
@@ -613,15 +667,19 @@
                     pressTimer = setTimeout(function () {
                         if (!pressOrigin) return;
                         openCtxMenu(pressOrigin.x, pressOrigin.y, pressOrigin.name, pressOrigin.isDir);
+                        suppressTouchClick = true;
                         pressOrigin = null;
                     }, 500);
                 });
-                function cancelPress() {
-                    if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
-                    pressOrigin = null;
-                }
+                listEl.addEventListener('click', function (e) {
+                    if (!suppressTouchClick) return;
+                    suppressTouchClick = false;
+                    e.preventDefault();
+                    e.stopImmediatePropagation();
+                }, true);
                 listEl.addEventListener('touchmove', function (e) {
-                    if (!pressOrigin || e.touches.length !== 1) return;
+                    if (e.touches.length !== 1) { cancelPress(); return; }
+                    if (!pressOrigin) return;
                     var t = e.touches[0];
                     if (Math.abs(t.clientX - pressOrigin.x) > 10 || Math.abs(t.clientY - pressOrigin.y) > 10) cancelPress();
                 });
@@ -629,25 +687,27 @@
                 listEl.addEventListener('touchcancel', cancelPress);
 
                 // Outside-click / Escape / scroll closes the menu.
-                document.addEventListener('click', function (e) {
-                    if (ctxMenu.style.display === 'none') return;
-                    if (!ctxMenu.contains(e.target)) closeCtxMenu();
-                });
-                document.addEventListener('keydown', function (e) {
-                    if (e.key === 'Escape') closeCtxMenu();
-                });
                 listEl.addEventListener('scroll', closeCtxMenu, true);
 
                 // "Add to issues" opens the submenu.
                 ctxMenu.querySelector('[data-ctx="issues"]').addEventListener('click', function (e) {
                     e.stopPropagation();
                     ctxSubmenu.style.display = 'block';
+                    positionCtxMenu(parseFloat(ctxMenu.style.left), parseFloat(ctxMenu.style.top));
+                });
+                ctxMenu.addEventListener('keydown', function (e) {
+                    var item = e.target.closest('.mdCtxItem');
+                    if (item && (e.key === 'Enter' || e.key === ' ')) {
+                        e.preventDefault();
+                        item.click();
+                    }
                 });
 
                 // "Protect this path" opens the dialog.
                 ctxMenu.querySelector('[data-ctx="protect"]').addEventListener('click', function (e) {
                     e.stopPropagation();
-                    var full = joinPath(currentFilePath, ctxTargetName);
+                    var full = ctxTargetPath;
+                    if (!full) return;
                     closeCtxMenu();
                     openProtectDialog(full);
                 });
@@ -661,14 +721,26 @@
                 });
 
                 // Protect dialog buttons.
+                protectDialog.addEventListener('keydown', function (e) {
+                    if (e.key !== 'Tab') return;
+                    var controls = ['#mdProtectNote', '#mdProtectCancel', '#mdProtectAccept']
+                        .map(function (id) { return deps.view.querySelector(id); })
+                        .filter(function (el) { return !el.disabled; });
+                    var next = controls.indexOf(document.activeElement) + (e.shiftKey ? -1 : 1);
+                    e.preventDefault();
+                    controls[(next + controls.length) % controls.length].focus();
+                });
                 deps.view.querySelector('#mdProtectCancel').addEventListener('click', closeProtectDialog);
                 deps.view.querySelector('#mdProtectAccept').addEventListener('click', function () {
+                    var accept = deps.view.querySelector('#mdProtectAccept');
+                    if (accept.disabled) return;
+                    accept.disabled = true;
                     var path = deps.view.querySelector('#mdProtectPath').textContent;
                     var body = {
                         Kind: 'folder',
                         Target: path,
-                        ScannersMask: deps.view.querySelector('#mdProtectScanners').value || '',
-                        FixersMask: deps.view.querySelector('#mdProtectFixers').value || '',
+                        ScannersMask: '*',
+                        FixersMask: '*',
                         Note: deps.view.querySelector('#mdProtectNote').value || ''
                     };
                     deps.api.ajax({
@@ -677,9 +749,11 @@
                         contentType: 'application/json',
                         data: JSON.stringify(body)
                     }).then(function () {
+                        accept.disabled = false;
                         closeProtectDialog();
                         showToast('Protected ' + path + '.');
                     }, function (xhr) {
+                        accept.disabled = false;
                         extractErrorMessage(xhr, 'Could not add protection.').then(window.alert);
                     });
                 });
@@ -688,7 +762,8 @@
             get currentFilePath() { return currentFilePath; },
             set currentFilePath(value) { currentFilePath = value; },
             get loadFiles() { return loadFiles; },
-            get bindFiles() { return bindFiles; }
+            get bindFiles() { return bindFiles; },
+            get activateFiles() { return activateFiles; }
         };
     };
 })();

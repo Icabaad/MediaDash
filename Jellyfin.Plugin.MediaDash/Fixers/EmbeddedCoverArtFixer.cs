@@ -37,6 +37,9 @@ public sealed class EmbeddedCoverArtFixer : IFixer
     private readonly VerifiedReplacementService _replacement;
     private readonly IPluginConfigurationProvider _configProvider;
     private readonly ILibraryMonitor _libraryMonitor;
+    // External audit P1 #4: commit-time protection check for the cover-strip sweep. Nullable so
+    // older ctors don't force a protection dep; production DI wires it via the primary ctor.
+    private readonly ProtectionService? _protection;
     private readonly ILogger<EmbeddedCoverArtFixer> _logger;
 
     /// <summary>Initializes a new instance of the <see cref="EmbeddedCoverArtFixer"/> class.</summary>
@@ -49,6 +52,7 @@ public sealed class EmbeddedCoverArtFixer : IFixer
     /// recheck so a dry-run flip mid-strip aborts before touching the source.</param>
     /// <param name="libraryMonitor">Jellyfin library monitor — reports post-fix so it re-scans.</param>
     /// <param name="logger">The logger.</param>
+    /// <param name="protection">Protection service for commit-time re-checks (external audit P1 #4); DI auto-wires it.</param>
     public EmbeddedCoverArtFixer(
         FfprobeService ffprobe,
         FfmpegExecutor ffmpeg,
@@ -56,7 +60,8 @@ public sealed class EmbeddedCoverArtFixer : IFixer
         VerifiedReplacementService replacement,
         IPluginConfigurationProvider configProvider,
         ILibraryMonitor libraryMonitor,
-        ILogger<EmbeddedCoverArtFixer> logger)
+        ILogger<EmbeddedCoverArtFixer> logger,
+        ProtectionService? protection = null)
     {
         _ffprobe = ffprobe;
         _ffmpeg = ffmpeg;
@@ -64,6 +69,7 @@ public sealed class EmbeddedCoverArtFixer : IFixer
         _replacement = replacement;
         _configProvider = configProvider;
         _libraryMonitor = libraryMonitor;
+        _protection = protection;
         _logger = logger;
     }
 
@@ -371,10 +377,24 @@ public sealed class EmbeddedCoverArtFixer : IFixer
                 verifyOutput: _ => Task.FromResult<string?>(null),
                 checkCurrentPolicy: () =>
                 {
+                    // External audit P1 #4: previously only DryRun was checked. Honour the full
+                    // policy stack so cover-strip aborts when EmbeddedCoverArt is toggled off or
+                    // the audio folder gets a Never-modify rule mid-sweep.
                     var currentConfig = _configProvider.GetSnapshot();
                     if (currentConfig.DryRun)
                     {
                         return PolicyDecision.Refuse(FixReason.TypeDisabled);
+                    }
+
+                    var mode = currentConfig.GetFixMode(IssueType.EmbeddedCoverArt);
+                    if (mode == FixMode.Off || mode == FixMode.DetectOnly)
+                    {
+                        return PolicyDecision.Refuse(FixReason.TypeDisabled);
+                    }
+
+                    if (_protection is not null && _protection.IsFixerBlocked(audioPath, IssueType.EmbeddedCoverArt))
+                    {
+                        return PolicyDecision.Refuse(FixReason.Protected);
                     }
 
                     return PolicyDecision.Allow;

@@ -7,6 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Plugin.MediaDash.Compat;
 using Jellyfin.Plugin.MediaDash.Data;
+using Jellyfin.Plugin.MediaDash.Fixers;
 using MediaBrowser.Controller;
 using MediaBrowser.Controller.Entities;
 using Microsoft.Extensions.Logging;
@@ -22,14 +23,17 @@ public sealed class ArtworkScanner : IScanner
 {
     private readonly IServerApplicationPaths _applicationPaths;
     private readonly ILogger<ArtworkScanner> _logger;
+    private readonly ProtectionService? _protection;
 
     /// <summary>Initializes a new instance of the <see cref="ArtworkScanner"/> class.</summary>
     /// <param name="applicationPaths">Jellyfin server application paths (anchors the metadata-folder guard).</param>
+    /// <param name="protection">Rules excluding protected paths from analysis.</param>
     /// <param name="logger">The logger.</param>
-    public ArtworkScanner(IServerApplicationPaths applicationPaths, ILogger<ArtworkScanner> logger)
+    public ArtworkScanner(IServerApplicationPaths applicationPaths, ILogger<ArtworkScanner> logger, ProtectionService? protection = null)
     {
         _applicationPaths = applicationPaths;
         _logger = logger;
+        _protection = protection;
     }
 
     /// <inheritdoc />
@@ -63,6 +67,11 @@ public sealed class ArtworkScanner : IScanner
                 // A user library folder named "metadata" or "metadata-evil" is NOT a match; the shared
                 // LibraryGuard.IsUnder helper enforces the separator boundary that a raw StartsWith misses.
                 if (!Fixers.LibraryGuard.IsUnder(Path.GetFullPath(image.Path), _applicationPaths.InternalMetadataPath))
+                {
+                    continue;
+                }
+
+                if (_protection?.IsScannerBlocked(image.Path, Type) == true)
                 {
                     continue;
                 }

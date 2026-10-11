@@ -767,8 +767,8 @@
                             <span class="material-icons mdCtxArrow">expand_more</span>
                         </div>
                         <div id="mdFileCtxSubmenu" class="mdCtxSubmenu" style="display:none;">
-                            <div class="mdCtxItem" data-type="Quality" role="button" tabindex="0">Quality (re-encode to shrink)</div>
-                            <div class="mdCtxItem" data-type="FormatCompatibility" role="button" tabindex="0">FormatCompatibility (convert)</div>
+                            <div class="mdCtxItem" data-type="Quality" role="button" tabindex="0">Re-encode to shrink</div>
+                            <div class="mdCtxItem" data-type="FormatCompatibility" role="button" tabindex="0">Convert format</div>
                         </div>
                         <div class="mdCtxItem" data-ctx="protect" role="button" tabindex="0">
                             <span class="material-icons">shield</span>
@@ -776,23 +776,26 @@
                         </div>
                     </div>
 
-                    <!-- Protect-this-path dialog, triggered from the context menu. -->
-                    <div id="mdProtectDialog" class="mdDialog" style="display:none;">
+                    <!-- Protect-this-path dialog, triggered from the context menu. Quick-add variant:
+                         always blocks all scanners and fixers for this path. For per-type rules,
+                         Settings → Protected paths. -->
+                    <div id="mdProtectDialog" class="mdDialog" role="dialog" aria-modal="true" aria-label="Protect this path" style="display:none;">
                         <div class="mdDialogInner">
-                            <h3>Protect this path</h3>
-                            <p id="mdProtectPath" class="fieldDescription"></p>
-                            <label>Note (optional)
-                                <textarea id="mdProtectNote" rows="2"></textarea>
-                            </label>
-                            <label>Block scanners (<code>*</code> = all)
-                                <input id="mdProtectScanners" type="text" value="*" />
-                            </label>
-                            <label>Block fixers (<code>*</code> = all)
-                                <input id="mdProtectFixers" type="text" value="*" />
-                            </label>
+                            <h2 class="mdSetHead" style="margin:0;padding:0;background:none;cursor:default;">
+                                <span class="mdSetIcon"><span class="material-icons">shield</span></span>
+                                <span class="mdSetHeadText">
+                                    <span class="mdSetTitle">Protect this path</span>
+                                    <span class="mdSetSubtitle">MediaDash will not scan or fix this location. Covers every issue type. For granular rules (block a specific scanner only), use Settings → Protected paths.</span>
+                                </span>
+                            </h2>
+                            <div id="mdProtectPath" class="fieldDescription" style="margin:0;word-break:break-all;background:rgba(255,255,255,.04);padding:.5em .7em;border-radius:4px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;"></div>
+                            <div class="inputContainer" style="margin:0;">
+                                <label class="inputLabel inputLabelUnfocused" for="mdProtectNote">Note (optional)</label>
+                                <input id="mdProtectNote" type="text" is="emby-input" placeholder="Why this exists (shown in Settings)" />
+                            </div>
                             <div class="mdDialogActions">
                                 <button is="emby-button" type="button" id="mdProtectCancel" class="raised">Cancel</button>
-                                <button is="emby-button" type="button" id="mdProtectAccept" class="raised button-submit">Protect</button>
+                                <button is="emby-button" type="button" id="mdProtectAccept" class="raised mdActionBtn button-submit"><span class="material-icons">shield</span><span>Protect</span></button>
                             </div>
                         </div>
                     </div>

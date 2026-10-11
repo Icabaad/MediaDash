@@ -104,7 +104,15 @@
             function wizRenderSummary() {
                 var libEls = deps.view.querySelectorAll('#mdWizLibraries .mdWizLib:checked');
                 var libCount = libEls.length;
-                var summary = 'MediaDash will scan <b>' + (libCount === 0 ? 'no' : libCount) + ' librar' + (libCount === 1 ? 'y' : 'ies') + '</b>.';
+                // UI-09: empty EnabledLibraries is the "all libraries" sentinel at the scanner — the
+                // old copy ("scan no libraries") disagreed with execution. Reflect the actual
+                // behaviour so the summary never promises something the save won't deliver. The
+                // step-1 advance guard separately refuses to proceed when zero libraries are
+                // ticked, so this phrasing is only visible on the summary step for a user who
+                // ticked every library and reached the summary via back-navigation after unticking.
+                var summary = libCount === 0
+                    ? 'MediaDash will scan <b>every configured movie / TV library</b>.'
+                    : 'MediaDash will scan <b>' + libCount + ' librar' + (libCount === 1 ? 'y' : 'ies') + '</b>.';
                 var modes = [
                     ['Duplicates', deps.view.querySelector('#mdWizDupMode').value],
                     ['Broken files', deps.view.querySelector('#mdWizPlayMode').value],
@@ -461,6 +469,19 @@
                 function saveThen(step, next) {
                     var msg = deps.view.querySelector('#mdWizMsg');
                     msg.classList.remove('mdWizErr');
+                    // UI-09: refuse to advance past the library step when the user has deselected
+                    // every library. Empty EnabledLibraries is the "all libraries" sentinel at the
+                    // scanner — a user who explicitly unticked everything expected the opposite.
+                    // Make them pick at least one, or re-tick the ones they want to opt out of.
+                    if (step === 1) {
+                        var ticked = deps.view.querySelectorAll('#mdWizLibraries .mdWizLib:checked').length;
+                        var available = deps.view.querySelectorAll('#mdWizLibraries .mdWizLib').length;
+                        if (available > 0 && ticked === 0) {
+                            msg.textContent = 'Pick at least one library — leaving every box unticked would otherwise scan everything.';
+                            msg.classList.add('mdWizErr');
+                            return;
+                        }
+                    }
                     msg.textContent = 'Saving…';
                     deps.api.configuration(deps.PLUGIN_ID).then(function (c) {
                         wizApplyStepToConfig(step, c);

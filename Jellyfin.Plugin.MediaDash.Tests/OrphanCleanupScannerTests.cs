@@ -326,7 +326,9 @@ public sealed class OrphanCleanupScannerTests
         Directory.CreateDirectory(scratch.Sub("Junk"));
         Directory.CreateDirectory(Path.Combine(scratch.Sub("Junk"), "SubA"));
         Directory.CreateDirectory(Path.Combine(scratch.Sub("Junk"), "SubB"));
-        File.WriteAllText(Path.Combine(scratch.Sub("Junk"), "SubA", "notes.txt"), string.Empty);
+        // E2E audit E2E-01: .txt is now a Book extension (previously used here as "obviously
+        // non-media debris"), so pick an extension that truly isn't media for this test.
+        File.WriteAllText(Path.Combine(scratch.Sub("Junk"), "SubA", "notes.log"), string.Empty);
 
         var issues = new List<Issue>();
         OrphanCleanupScanner.DetectEmptyFolders(new[] { scratch.Root }, issues, CancellationToken.None);

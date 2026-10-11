@@ -31,12 +31,15 @@ public sealed class SubtitleFontScanner : IScanner
     private static readonly string[] SidecarExtensions = [".ass", ".ssa"];
 
     private readonly ILogger<SubtitleFontScanner> _logger;
+    private readonly ProtectionService? _protection;
 
     /// <summary>Initializes a new instance of the <see cref="SubtitleFontScanner"/> class.</summary>
+    /// <param name="protection">Rules excluding protected paths from analysis.</param>
     /// <param name="logger">The logger.</param>
-    public SubtitleFontScanner(ILogger<SubtitleFontScanner> logger)
+    public SubtitleFontScanner(ILogger<SubtitleFontScanner> logger, ProtectionService? protection = null)
     {
         _logger = logger;
+        _protection = protection;
     }
 
     /// <inheritdoc />
@@ -63,6 +66,11 @@ public sealed class SubtitleFontScanner : IScanner
             var sidecars = FindSidecars(video.Path);
             foreach (var sidecar in sidecars)
             {
+                if (_protection?.IsScannerBlocked(sidecar, Type) == true)
+                {
+                    continue;
+                }
+
                 var result = MeasureReclaim(sidecar, forceFontActive);
                 if (result is null)
                 {

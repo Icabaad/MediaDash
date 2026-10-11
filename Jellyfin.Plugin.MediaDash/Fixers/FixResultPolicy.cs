@@ -94,6 +94,11 @@ internal static class FixResultPolicy
             {
                 FixReason.SourceMissing => QueueDisposition.CompleteLegacy,
                 FixReason.SourceChanged => QueueDisposition.CompleteLegacy,
+                // A Quality re-encode that missed the savings threshold will produce the same
+                // output on the next run — retrying wastes CPU. Terminal per roadmap
+                // i-110-minimum-savings ("report insufficient savings as a skipped outcome
+                // rather than an endless retry").
+                FixReason.InsufficientSavings => QueueDisposition.CompleteLegacy,
                 _ => QueueDisposition.KeepQueued
             };
         }

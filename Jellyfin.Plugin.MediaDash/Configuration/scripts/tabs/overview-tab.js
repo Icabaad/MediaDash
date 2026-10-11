@@ -252,6 +252,28 @@
 
             var mdDrivesLast = null;
 
+            // UI-18: surgical drive refresh for silent polls. Keeps the mdCard wrapper + mdFade
+            // animation state intact and swaps the inner grid HTML only, so free-space / SMART
+            // samples stay live without visibly flashing the whole card every 3 seconds. First
+            // call builds the wrapper; subsequent calls update #mdDriveGrid in place.
+            function renderDrivesSurgical(drives) {
+                mdDrivesLast = drives;
+                var drivesEl = deps.view.querySelector('#mdDrives');
+                if (!drivesEl) return;
+                if (drives.length === 0) {
+                    drivesEl.innerHTML = '';
+                    return;
+                }
+                var grid = drivesEl.querySelector('.mdDriveGrid');
+                if (!grid) {
+                    drivesEl.innerHTML = '<div class="mdCard mdFade">' +
+                        '<div class="mdSecHead"><span class="material-icons">storage</span>' + deps.esc(deps.STR.driveStorage) + '</div>' +
+                        '<div class="mdDriveGrid">' + drives.map(driveCardHtml).join('') + '</div></div>';
+                    return;
+                }
+                grid.innerHTML = drives.map(driveCardHtml).join('');
+            }
+
             // Client-side 7-day dismissal for low-space warnings, per drive root. Deliberately not
             // wired through the server: this is advisory only, and the condition self-clears the
             // moment the user frees space or moves the library. Dismissal survives browser restarts.
@@ -670,11 +692,13 @@
 
 
             function renderStatus(s, silent) {
-                // Prefer the client's own list length when it's been populated — the Status endpoint's
-                // OpenIssueTotal is computed from a summary query that can drift from what the Issues
-                // endpoint returns (e.g. when a summary row exists but the underlying issue has been
-                // filtered out during serialization). Falling back to server count for first paint.
-                var issueTotal = deps.issuesTab ? deps.issuesTab.count() : (s.OpenIssueTotal || 0);
+                // UI-17: badge reflects open work only. Use the client's open-view count when the
+                // Issues tab has fetched an open-view list (lastIssueList can diverge from the
+                // server's summary total — bulk approve/dismiss races, mid-fix transitions). When
+                // the user is in the Ignored view (lastIssueList is ignored rows), or the factory
+                // hasn't fetched yet, fall back to the server's authoritative OpenIssueTotal.
+                var openClient = deps.issuesTab && !deps.issuesTab.showingIgnored() ? deps.issuesTab.count() : null;
+                var issueTotal = openClient != null ? openClient : (s.OpenIssueTotal || 0);
                 deps.updateTabBadge('#mdIssueBadge', issueTotal);
                 deps.updateTabBadge('#mdHistoryBadge', s.FailedHistoryTotal || 0);
                 // Detect a just-finished fix run — the server sets s.LastFixRun.FinishedAtUtc on completion.
@@ -746,7 +770,7 @@
                 // the masthead "Last scan…" line when there's no prior scan so a first-time run doesn't keep
                 // showing the stale "No scan has run yet. Click Scan now…" placeholder.
                 state.classList.toggle('mdScanBusy', s.IsScanning || s.IsFixing);
-                if ((s.IsScanning || s.IsFixing) && !s.LastScanUtc) {
+                if ((s.IsScanning || s.IsFixing) && !s.LastScanCompletedUtc && !s.LastScanUtc) {
                     var mastheadEl = deps.view.querySelector('#mdLastScan');
                     if (mastheadEl) mastheadEl.textContent = '';
                 }
@@ -766,7 +790,7 @@
                     var scanItemsPart = scannersTotal > 0
                         ? ' · ' + scannersDone + ' / ' + scannersTotal + ' scanners done'
                         : '';
-                    state.textContent = deps.STR.scanRunning + scanItemsPart;
+                    state.textContent = deps.fmt(deps.STR.scanRunning, scanItemsPct) + scanItemsPart;
                     setProgress(true, scanItemsPct);
                     deps.schedulePoll();
                 } else if (s.IsFixing) {
@@ -797,7 +821,7 @@
                     var opPart = (typeof s.CurrentOperationProgress === 'number')
                         ? ' · this file ' + Math.round(s.CurrentOperationProgress * 100) + '%'
                         : '';
-                    state.textContent = deps.STR.fixRunning + itemsPart + opPart;
+                    state.textContent = deps.fmt(deps.STR.fixRunning, itemsPct) + itemsPart + opPart;
                     setProgress(true, itemsPct);
                     deps.schedulePoll();
                 } else if (busy.scan) {
@@ -810,11 +834,15 @@
                     setProgress(false);
                     state.textContent = deps.STR.fixDone;
                     if (deps.view.querySelector('#mdTab-history').style.display !== 'none' && deps.historyTab) deps.historyTab.activate();
-                } else if (s.LastScanUtc) {
+                } else if (s.LastScanCompletedUtc || s.LastScanUtc) {
                     setProgress(false);
-                    state.textContent = deps.fmt(deps.STR.scanIdle, new Date(s.LastScanUtc).toLocaleString());
+                    // UI-15: prefer the scan-completion timestamp (ScanTask persists it on each
+                    // successful finish). Fall back to LastScanUtc for installs that haven't
+                    // completed a scan since the upgrade or when the state key is missing.
+                    var scanAt = s.LastScanCompletedUtc || s.LastScanUtc;
+                    state.textContent = deps.fmt(deps.STR.scanIdle, new Date(scanAt).toLocaleString());
                     var lastScanEl = deps.view.querySelector('#mdLastScan');
-                    if (lastScanEl) lastScanEl.textContent = deps.fmt(deps.STR.scanIdle, new Date(s.LastScanUtc).toLocaleString());
+                    if (lastScanEl) lastScanEl.textContent = deps.fmt(deps.STR.scanIdle, new Date(scanAt).toLocaleString());
                 } else {
                     setProgress(false);
                     state.textContent = deps.STR.scanNever;
@@ -919,13 +947,19 @@
                     redlBanner.style.display = 'none';
                 }
 
-                // Skip re-rendering the static content (hero, per-type cards, savings bars, drives) on silent
+                // Skip re-rendering the static content (hero, per-type cards, savings bars) on silent
                 // polls — it only meaningfully changes when a scan/fix completes (nowBusy transitioning from
                 // true → false) or when the user takes an action (which triggers a non-silent refresh). Skipping
                 // avoids the full-tab flicker while just watching CPU/GPU tick.
                 var nowBusy = s.IsScanning || s.IsFixing;
                 var justFinished = wasBusy && !nowBusy;
                 if (silent && !justFinished) {
+                    // UI-18: drives + SMART are live values — bytes free changes with the user's own
+                    // activity and SMART samples refresh on their own cadence. Static-content skip meant
+                    // the card displayed stale free-space / stale SMART forever until a scan/fix completed.
+                    // Render drives surgically here (keeps the mdFade wrapper intact so re-render doesn't
+                    // re-trigger the fade-in animation).
+                    renderDrivesSurgical(s.Drives || []);
                     return;
                 }
 
@@ -1052,18 +1086,7 @@
                     '</div>';
                 }).join('');
 
-                var drivesEl = deps.view.querySelector('#mdDrives');
-                var drives = s.Drives || [];
-                mdDrivesLast = drives;
-                if (drives.length > 0) {
-                    drivesEl.innerHTML = '<div class="mdCard mdFade">' +
-                        '<div class="mdSecHead"><span class="material-icons">storage</span>' + deps.esc(deps.STR.driveStorage) + '</div>' +
-                        '<div class="mdDriveGrid">' +
-                        drives.map(driveCardHtml).join('') +
-                        '</div></div>';
-                } else {
-                    drivesEl.innerHTML = '';
-                }
+                renderDrivesSurgical(s.Drives || []);
 
                 deps.view.querySelectorAll('.mdGoIssues').forEach(function (el) {
                     el.addEventListener('click', function () {

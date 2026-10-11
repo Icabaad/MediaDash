@@ -7,6 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Plugin.MediaDash.Configuration;
 using Jellyfin.Plugin.MediaDash.Data;
+using Jellyfin.Plugin.MediaDash.Fixers;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using Microsoft.Extensions.Logging;
@@ -40,16 +41,19 @@ public sealed class SuspiciousFileScanner : IScanner
 
     private readonly ILibraryManager _libraryManager;
     private readonly ILogger<SuspiciousFileScanner> _logger;
+    private readonly ProtectionService? _protection;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="SuspiciousFileScanner"/> class.
     /// </summary>
     /// <param name="libraryManager">Instance of the <see cref="ILibraryManager"/> interface.</param>
+    /// <param name="protection">Rules excluding protected files from analysis.</param>
     /// <param name="logger">The logger.</param>
-    public SuspiciousFileScanner(ILibraryManager libraryManager, ILogger<SuspiciousFileScanner> logger)
+    public SuspiciousFileScanner(ILibraryManager libraryManager, ILogger<SuspiciousFileScanner> logger, ProtectionService? protection = null)
     {
         _libraryManager = libraryManager;
         _logger = logger;
+        _protection = protection;
     }
 
     /// <inheritdoc />
@@ -116,7 +120,7 @@ public sealed class SuspiciousFileScanner : IScanner
                 foreach (var path in Directory.EnumerateFiles(root, "*", WalkOptions))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    if (!IsSuspicious(path))
+                    if (_protection?.IsScannerBlocked(path, Type) == true || !IsSuspicious(path))
                     {
                         continue;
                     }

@@ -24,6 +24,7 @@ public sealed class MediaDashDb
     private readonly ProbeCacheStore _probes;
     private readonly DiagnosticStore _diagnostics;
     private readonly RestoreOperationStore _restoreOps;
+    private readonly ProtectionStore _protection;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="MediaDashDb"/> class.
@@ -47,6 +48,7 @@ public sealed class MediaDashDb
         _probes = new ProbeCacheStore(_connectionFactory);
         _diagnostics = new DiagnosticStore(_connectionFactory);
         _restoreOps = new RestoreOperationStore(_connectionFactory);
+        _protection = new ProtectionStore(_connectionFactory);
 
         SqliteConnection connection;
         try
@@ -137,6 +139,11 @@ public sealed class MediaDashDb
     // MediaDashDb's ctor reconciliation. Pre-05-B `TryClaimRestore` / `ReleaseRestoreClaim`
     // deleted in the same sub-substep; `RestoreClaimTests.cs` deleted with them.
     internal RestoreOperationStore RestoreOps => _restoreOps;
+
+    // Roadmap i-110-protected-media: single owner of the `protection_rules` table (schema v8).
+    // Consumed by ProtectionService, which caches the ruleset and evaluates path/library matches
+    // at scan-emit and fix-execute time.
+    internal ProtectionStore Protection => _protection;
 
     private static string EnsureDbPath(IApplicationPaths applicationPaths)
     {
@@ -277,6 +284,20 @@ public sealed class MediaDashDb
     /// <param name="error">Empty string for a clean decode, otherwise the error text.</param>
     public void StoreDecode(string path, long size, long mtimeUtcTicks, string error) => _probes.StoreDecode(path, size, mtimeUtcTicks, error);
 
+    /// <summary>Looks up a cached interleave-check result that is still valid for the file's current size and modification time.</summary>
+    /// <param name="path">Full file path.</param>
+    /// <param name="size">Current file size in bytes.</param>
+    /// <param name="mtimeUtcTicks">Current last-write time in UTC ticks.</param>
+    /// <returns>The cached offset in seconds (0 when the file is fine), or null when not cached.</returns>
+    public double? GetCachedInterleave(string path, long size, long mtimeUtcTicks) => _probes.GetCachedInterleave(path, size, mtimeUtcTicks);
+
+    /// <summary>Stores an interleave-check result, replacing any previous entry for the path.</summary>
+    /// <param name="path">Full file path.</param>
+    /// <param name="size">File size in bytes at check time.</param>
+    /// <param name="mtimeUtcTicks">Last-write time in UTC ticks at check time.</param>
+    /// <param name="offsetSeconds">Measured offset in seconds; 0 when the file is fine.</param>
+    public void StoreInterleave(string path, long size, long mtimeUtcTicks, double offsetSeconds) => _probes.StoreInterleave(path, size, mtimeUtcTicks, offsetSeconds);
+
     /// <summary>
     /// Atomically transitions an issue's status from one of the allowed source statuses to the
     /// target status. The source-status filter runs inside the same UPDATE so a stale caller can't
@@ -412,8 +433,8 @@ public sealed class MediaDashDb
             using var insert = connection.CreateCommand();
             insert.Transaction = transaction;
             insert.CommandText = """
-                INSERT INTO history (issue_id, type, path, action, bytes_freed, recycle_path, fixed_at_utc, dry_run, restored, success)
-                VALUES (@issueId, @type, @path, @action, @bytesFreed, @recyclePath, @fixedAt, @dryRun, 0, @success)
+                INSERT INTO history (issue_id, type, path, action, bytes_freed, recycle_path, fixed_at_utc, dry_run, restored, success, saved_bytes)
+                VALUES (@issueId, @type, @path, @action, @bytesFreed, @recyclePath, @fixedAt, @dryRun, 0, @success, @savedBytes)
                 """;
             var pIssueId = insert.Parameters.Add("@issueId", SqliteType.Integer);
             var pType = insert.Parameters.Add("@type", SqliteType.Integer);
@@ -424,6 +445,7 @@ public sealed class MediaDashDb
             var pFixedAt = insert.Parameters.Add("@fixedAt", SqliteType.Integer);
             var pDryRun = insert.Parameters.Add("@dryRun", SqliteType.Integer);
             var pSuccess = insert.Parameters.Add("@success", SqliteType.Integer);
+            var pSavedBytes = insert.Parameters.Add("@savedBytes", SqliteType.Integer);
             foreach (var row in historyRows)
             {
                 pIssueId.Value = row.IssueId;
@@ -435,6 +457,7 @@ public sealed class MediaDashDb
                 pFixedAt.Value = row.FixedAtUtc.Ticks;
                 pDryRun.Value = row.WasDryRun ? 1 : 0;
                 pSuccess.Value = row.Success ? 1 : 0;
+                pSavedBytes.Value = row.SavedBytes;
                 insert.ExecuteNonQuery();
             }
         }
@@ -551,14 +574,27 @@ public sealed class MediaDashDb
     public MonthAggregate GetMonthAggregate(DateTime monthStartUtc, DateTime monthEndUtc) => _history.GetMonthAggregate(monthStartUtc, monthEndUtc);
 
     /// <summary>
-    /// Wipes all scan state — issues, probe cache, decode cache — so the next scan starts from scratch.
-    /// Fix history (and the recycle bin it points into) is preserved so users can still restore recently-removed files.
+    /// Wipes scan state — Detected issues and probe/decode caches — so the next scan starts from
+    /// scratch. UI-06: preserves Queued and Dismissed issues so the user's prior approvals and
+    /// ignore decisions survive the reset. Fix history and the recycle bin are preserved so recently
+    /// removed files can still be restored.
     /// </summary>
     public void ResetScanState()
     {
         using var connection = Open();
         using var transaction = connection.BeginTransaction();
-        foreach (var table in new[] { "issues", "probe_cache", "decode_cache", "format_probe_cache" })
+        // Only wipe Detected rows — Queued (approved, awaiting fix) and Dismissed (ignored) carry
+        // the user's intent and must survive a reset. The old DELETE wiped everything, silently
+        // undoing their approvals and letting dismissed files re-appear on the next scan.
+        using (var issuesCmd = connection.CreateCommand())
+        {
+            issuesCmd.Transaction = transaction;
+            issuesCmd.CommandText = "DELETE FROM issues WHERE status = @detected";
+            issuesCmd.Parameters.AddWithValue("@detected", (int)IssueStatus.Detected);
+            issuesCmd.ExecuteNonQuery();
+        }
+
+        foreach (var table in new[] { "probe_cache", "decode_cache", "format_probe_cache", "interleave_cache" })
         {
             using var cmd = connection.CreateCommand();
             cmd.Transaction = transaction;
@@ -868,17 +904,102 @@ public sealed class MediaDashDb
     private SqliteConnection Open() => _connectionFactory.Open();
 
     /// <summary>
-    /// Returns the Playability repair-ladder tally for the Overview panel. Empty until the
-    /// history schema tracks per-repair saved_bytes + rung labels (v7 migration).
+    /// Returns the Playability repair-ladder tally for the Overview panel. Rung labels are parsed
+    /// from <c>history.action</c> against the known set emitted by <see cref="Fixers.PlayabilityFixer"/>;
+    /// anything unknown buckets as "other". Bytes-saved sums <c>saved_bytes</c> (v9 schema column) —
+    /// pre-v9 repair rows contribute 0.
     /// </summary>
-    /// <param name="sinceTicks">Ignored today; retained on the signature so the callsite doesn't churn when the real query lands.</param>
-    /// <returns>An empty summary. Front-end hides the panel on <c>CountLifetime == 0</c>.</returns>
-    // ponytail: stub only — history schema doesn't yet carry saved_bytes / rung. Upgrade path:
-    // add schema v7 migration (saved_bytes column) + v8 (action_detail) then replace this with a
-    // real COUNT/SUM query grouped by rung label parsed from history.action.
+    /// <param name="sinceTicks">Lower bound for the 30-day window; rows with <c>fixed_at_utc &gt;= sinceTicks</c> populate the 30d fields, all rows populate lifetime.</param>
+    /// <returns>A populated summary. Front-end hides the panel on <c>CountLifetime == 0</c>.</returns>
     public Api.RepairSummary GetRepairSummary(long sinceTicks)
     {
-        _ = sinceTicks;
-        return new Api.RepairSummary();
+        using var connection = Open();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT action, saved_bytes, fixed_at_utc
+            FROM history
+            WHERE type = @type
+              AND success = 1
+              AND dry_run = 0
+              AND (action LIKE 'repaired %' OR action LIKE 'partially repaired %')
+            """;
+#pragma warning disable CA2100 // (int)enum is a compile-time constant, not user input.
+        cmd.Parameters.Add("@type", SqliteType.Integer).Value = (int)IssueType.Playability;
+#pragma warning restore CA2100
+
+        var summary = new Api.RepairSummary();
+        var rungBuckets = new Dictionary<string, (int Count, long Bytes)>(StringComparer.Ordinal);
+
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            var action = reader.GetString(0);
+            var savedBytes = reader.GetInt64(1);
+            var fixedAtUtc = reader.GetInt64(2);
+            var inWindow = fixedAtUtc >= sinceTicks;
+            var rung = ParseRepairRungLabel(action);
+
+            summary.CountLifetime++;
+            summary.SavedBytesLifetime += savedBytes;
+            if (inWindow)
+            {
+                summary.Count30d++;
+                summary.SavedBytes30d += savedBytes;
+                var existing = rungBuckets.TryGetValue(rung, out var v) ? v : (Count: 0, Bytes: 0L);
+                rungBuckets[rung] = (existing.Count + 1, existing.Bytes + savedBytes);
+            }
+        }
+
+        summary.Rungs30d = rungBuckets
+            .Select(kv => new Api.RepairRungTotal { Rung = kv.Key, Count = kv.Value.Count, SavedBytes = kv.Value.Bytes })
+            .OrderByDescending(r => r.Count)
+            .ThenByDescending(r => r.SavedBytes)
+            .ToList();
+
+        return summary;
+    }
+
+    // Parses the rung key from a Playability repair action string. PlayabilityFixer emits actions
+    // in the shape "repaired <basename> (<rung label>)" (or "partially repaired ..." with the same
+    // parenthesised tail); the rung label is a fixed vocabulary. Anything outside the vocabulary
+    // buckets to "other" so a future rung addition surfaces on the panel without silently dropping.
+    // Pure and testable — no I/O, no DB access.
+    //
+    // Substring-match on ` (<label>` (leading space + opening paren) rather than paren-extract so
+    // the nested-paren case "container changed to .mkv (Jellyfin watch history reset)" still hits
+    // — a naive paren walk would extract the inner "Jellyfin watch history reset" and bucket "other".
+    internal static string ParseRepairRungLabel(string action)
+    {
+        if (string.IsNullOrEmpty(action))
+        {
+            return "other";
+        }
+
+        if (action.Contains(" (quick remux", StringComparison.Ordinal))
+        {
+            return "remux";
+        }
+
+        if (action.Contains(" (dropped", StringComparison.Ordinal))
+        {
+            return "drop";
+        }
+
+        if (action.Contains(" (container changed", StringComparison.Ordinal))
+        {
+            return "coerce";
+        }
+
+        if (action.Contains(" (audio re-encoded", StringComparison.Ordinal))
+        {
+            return "audio-reencode";
+        }
+
+        if (action.Contains(" (video re-encoded", StringComparison.Ordinal))
+        {
+            return "reencode";
+        }
+
+        return "other";
     }
 }

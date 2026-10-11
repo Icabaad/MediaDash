@@ -35,14 +35,15 @@ public sealed class SubtitleLanguageScanner : ProbingScannerBase
     /// <inheritdoc />
     protected override Task<Issue?> EvaluateAsync(BaseItem item, string path, FfprobeData? probe, CancellationToken cancellationToken)
     {
-        var allowed = Config.AllowedSubtitleLanguages;
-        var protectHi = Config.SubtitleHearingImpairedMode;
+        var allowed = LanguageHelper.ResolveLanguages(Config.AllowedSubtitleLanguages, item, probe);
+        if (allowed is null || allowed.Length == 0)
+        {
+            return Task.FromResult<Issue?>(null);
+        }
 
-        var embedded = probe?.Streams?
-            .Where(s => string.Equals(s.CodecType, "subtitle", StringComparison.OrdinalIgnoreCase)
-                && !LanguageHelper.IsAllowed(s.Language, allowed)
-                && !(protectHi && s.IsHearingImpaired))
-            .ToList() ?? [];
+        var protectHi = Config.SubtitleHearingImpairedMode;
+        var removeIndexes = Fixers.TrackFixer.ComputeRemovableIndexes(probe ?? new FfprobeData(), Type, Config, item).ToHashSet();
+        var embedded = probe?.Streams?.Where(s => removeIndexes.Contains(s.Index)).ToList() ?? [];
 
         // External subtitle files are indexed by Jellyfin with language parsed from the filename.
         // Some Jellyfin builds mark embedded PGS/Bluray subtitle streams as IsExternal with Path pointing

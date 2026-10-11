@@ -189,4 +189,42 @@ public sealed class ProbeCacheStore
         cmd.Parameters.AddWithValue("@error", error);
         cmd.ExecuteNonQuery();
     }
+
+    /// <summary>Looks up a cached interleave-check result that is still valid for the file's current size and modification time.</summary>
+    /// <param name="path">Full file path.</param>
+    /// <param name="size">Current file size in bytes.</param>
+    /// <param name="mtimeUtcTicks">Current last-write time in UTC ticks.</param>
+    /// <returns>The measured audio/video offset in seconds (0 when the file is fine), or null when not cached.</returns>
+    public double? GetCachedInterleave(string path, long size, long mtimeUtcTicks)
+    {
+        using var connection = _connectionFactory.Open();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT offset_seconds FROM interleave_cache WHERE path = @path AND size = @size AND mtime_utc = @mtime";
+        cmd.Parameters.AddWithValue("@path", path);
+        cmd.Parameters.AddWithValue("@size", size);
+        cmd.Parameters.AddWithValue("@mtime", mtimeUtcTicks);
+        return cmd.ExecuteScalar() is double offset ? offset : null;
+    }
+
+    /// <summary>Stores an interleave-check result, replacing any previous entry for the path.</summary>
+    /// <param name="path">Full file path.</param>
+    /// <param name="size">File size in bytes at check time.</param>
+    /// <param name="mtimeUtcTicks">Last-write time in UTC ticks at check time.</param>
+    /// <param name="offsetSeconds">The measured audio/video offset in seconds; 0 when the file is fine.</param>
+    public void StoreInterleave(string path, long size, long mtimeUtcTicks, double offsetSeconds)
+    {
+        using var connection = _connectionFactory.Open();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO interleave_cache (path, size, mtime_utc, checked_at_utc, offset_seconds)
+            VALUES (@path, @size, @mtime, @checkedAt, @offset)
+            ON CONFLICT(path) DO UPDATE SET size = @size, mtime_utc = @mtime, checked_at_utc = @checkedAt, offset_seconds = @offset
+            """;
+        cmd.Parameters.AddWithValue("@path", path);
+        cmd.Parameters.AddWithValue("@size", size);
+        cmd.Parameters.AddWithValue("@mtime", mtimeUtcTicks);
+        cmd.Parameters.AddWithValue("@checkedAt", DateTime.UtcNow.Ticks);
+        cmd.Parameters.AddWithValue("@offset", offsetSeconds);
+        cmd.ExecuteNonQuery();
+    }
 }

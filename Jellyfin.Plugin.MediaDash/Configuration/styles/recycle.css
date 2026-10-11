@@ -85,14 +85,27 @@
 #MediaDashConfigPage .mdBinHeadSize,
 #MediaDashConfigPage .mdBinHeadDate { text-align: right; }
 /* Bin row grid matches header columns. */
+/* E2E audit E2E-10: added a full-width footer row (mdBinRowFooter) so a long "Restored as X"
+   message can span the whole row instead of wrapping inside the narrow actions column and
+   overlapping the Delete button. */
 #MediaDashConfigPage .mdBinRow {
     display: grid !important;
     grid-template-columns: 1fr 90px 130px 120px;
+    grid-template-areas:
+        "file size date action"
+        "footer footer footer footer";
     gap: 16px;
     align-items: center;
     padding: 16px 26px !important;
     border-bottom: 1px solid var(--md-border-row) !important;
 }
+#MediaDashConfigPage .mdBinRowFile { grid-area: file; }
+#MediaDashConfigPage .mdBinRowSize { grid-area: size; }
+#MediaDashConfigPage .mdBinRowDate { grid-area: date; }
+#MediaDashConfigPage .mdBinRowAction { grid-area: action; }
+#MediaDashConfigPage .mdBinRowFooter { grid-area: footer; min-height: 0; }
+#MediaDashConfigPage .mdBinRowFooter:empty,
+#MediaDashConfigPage .mdBinRowFooter .mdBinRowMsg:empty { display: none; }
 #MediaDashConfigPage .mdBinRow:last-child { border-bottom: none !important; }
 #MediaDashConfigPage .mdBinRowFile { min-width: 0; overflow: hidden; }
 #MediaDashConfigPage .mdBinRowName {
@@ -201,7 +214,7 @@
     #MediaDashConfigPage .mdBinHeader,
     #MediaDashConfigPage .mdBinRow {
         grid-template-columns: 1fr auto;
-        grid-template-areas: "file action" "size date";
+        grid-template-areas: "file action" "size date" "footer footer";
     }
     #MediaDashConfigPage .mdBinHeadDate,
     #MediaDashConfigPage .mdBinHeadActions { display: none; }

@@ -45,7 +45,12 @@ public sealed class MissingSubtitleScanner : ProbingScannerBase
             return Task.FromResult<Issue?>(null);
         }
 
-        var wanted = Config.AllowedSubtitleLanguages;
+        var wanted = LanguageHelper.ResolveLanguages(Config.AllowedSubtitleLanguages, item, probe);
+        if (wanted is null || wanted.Length == 0)
+        {
+            return Task.FromResult<Issue?>(null);
+        }
+
         var requireHi = Config.SubtitleHearingImpairedMode;
 
         // Embedded subtitle streams — trust the ffprobe result, same source as SubtitleLanguageScanner.
@@ -88,14 +93,6 @@ public sealed class MissingSubtitleScanner : ProbingScannerBase
             return false;
         }
 
-        foreach (var entry in wanted)
-        {
-            if (string.Equals(LanguageHelper.Normalize(entry), normalized, StringComparison.Ordinal))
-            {
-                return true;
-            }
-        }
-
-        return false;
+        return LanguageHelper.IsAllowed(normalized, wanted);
     }
 }

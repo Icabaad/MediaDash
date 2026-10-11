@@ -12,7 +12,7 @@ internal static class HistoryRowReader
     // Positional projection consumed by TryRead. Keep the order and count identical across every
     // callsite; if a column moves, both the caller's SELECT and this reader break together.
     public const string ProjectionColumns =
-        "id, issue_id, type, path, action, bytes_freed, recycle_path, fixed_at_utc, dry_run, restored, success, acknowledged";
+        "id, issue_id, type, path, action, bytes_freed, recycle_path, fixed_at_utc, dry_run, restored, success, acknowledged, saved_bytes";
 
     // Hydrates one row from a reader positioned on a row projected via <see cref="ProjectionColumns"/>.
     // Returns false when the type column is out-of-range; the entry is left at its default so the
@@ -39,7 +39,8 @@ internal static class HistoryRowReader
             WasDryRun = reader.GetInt32(8) != 0,
             Restored = reader.GetInt32(9) != 0,
             Success = reader.GetInt32(10) != 0,
-            Acknowledged = reader.GetInt32(11) != 0
+            Acknowledged = reader.GetInt32(11) != 0,
+            SavedBytes = reader.GetInt64(12)
         };
         return true;
     }

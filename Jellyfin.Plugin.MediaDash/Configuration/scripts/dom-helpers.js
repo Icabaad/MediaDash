@@ -282,6 +282,7 @@
             ['lit', 'Lithuanian'],
             ['msa', 'Malay'],
             ['nor', 'Norwegian'],
+            ['orig', 'Original language'],
             ['fas', 'Persian (Farsi)'],
             ['pol', 'Polish'],
             ['por', 'Portuguese'],

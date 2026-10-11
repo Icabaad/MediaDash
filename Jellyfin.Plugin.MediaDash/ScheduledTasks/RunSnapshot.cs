@@ -10,10 +10,12 @@ namespace Jellyfin.Plugin.MediaDash.ScheduledTasks;
 /// <param name="Processed">Progress numerator. Scan: scanners done. Fix: items processed. 0 when idle.</param>
 /// <param name="Total">Progress denominator. Scan: scanners total. Fix: items total. 0 when idle.</param>
 /// <param name="PauseReason">Human-readable reason the slot is paused, or null when running normally. Sticky after run end so the dashboard can explain why a run stopped early.</param>
+/// <param name="CurrentOperationProgress">Fraction (0..1) of the current file's own work (e.g. ffmpeg encode %), or null when the fixer doesn't report per-file progress. Complements <see cref="Processed"/>/<see cref="Total"/> (which are file counts).</param>
 public sealed record RunSnapshot(
     bool IsRunning,
     string? CurrentPath,
     string? CurrentLabel,
     int Processed,
     int Total,
-    string? PauseReason);
+    string? PauseReason,
+    double? CurrentOperationProgress);

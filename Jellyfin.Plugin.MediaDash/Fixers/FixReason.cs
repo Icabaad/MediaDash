@@ -124,4 +124,9 @@ internal enum FixReason
 
     /// <summary>Format-compat: matrix row has no target extension for this file (DRM advisory).</summary>
     SourceExtensionNotConvertible,
+
+    /// <summary>Format-compat: a file already exists at the converter's destination path and
+    /// overwriting it would silently replace user content (external review #1 — folder-merge used
+    /// to pass <c>overwrite: true</c> to <see cref="System.IO.File.Move(string,string,bool)"/>).</summary>
+    OutputConflict,
 }

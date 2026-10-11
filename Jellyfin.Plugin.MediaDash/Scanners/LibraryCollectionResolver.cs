@@ -35,9 +35,11 @@ public sealed class LibraryCollectionResolver : ILibraryCollectionResolver
     }
 
     /// <inheritdoc />
-    public CollectionType? Resolve(BaseItem item)
+    public CollectionType? Resolve(BaseItem item) => ResolveByPath(item.Path);
+
+    /// <inheritdoc />
+    public CollectionType? ResolveByPath(string path)
     {
-        var path = item.Path;
         if (string.IsNullOrEmpty(path))
         {
             return null;

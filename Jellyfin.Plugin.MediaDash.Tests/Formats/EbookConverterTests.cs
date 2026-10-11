@@ -33,7 +33,9 @@ public class EbookConverterTests : FormatFixtureBase
     public async Task ReportsUnavailableWhenToolchainMissing()
     {
         using var tmp = new TempDir();
-        var toolchain = new CalibreToolchain(new NoOpToolchainDownloader(), NullLogger<CalibreToolchain>.Instance, tmp.Path);
+        // External audit P2 #8: inject a path resolver that ignores the host's installed Calibre
+        // so the "unavailable" assertion holds regardless of developer-machine state.
+        var toolchain = new CalibreToolchain(new NoOpToolchainDownloader(), NullLogger<CalibreToolchain>.Instance, tmp.Path, pathResolver: _ => null);
         var config = new StubConfig();
         var converter = new EbookConverter(toolchain, config, NullLogger<EbookConverter>.Instance);
 

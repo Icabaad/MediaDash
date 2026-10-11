@@ -51,7 +51,29 @@ public sealed class FixExecutorTests : IDisposable
     private FixExecutor NewExecutor(params IFixer[] fixers)
     {
         var provider = new PluginConfigurationProvider(() => _config);
-        return new FixExecutor(_db.Issues, fixers, provider, TimeProvider.System, NullLogger<FixExecutor>.Instance);
+        var protection = new Jellyfin.Plugin.MediaDash.Fixers.ProtectionService(_db.Protection, null);
+        return new FixExecutor(_db.Issues, fixers, provider, TimeProvider.System, protection, NullLogger<FixExecutor>.Instance);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ProtectionAddedAfterApproval_SkipsFixerUntilRemoved()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "protected-approved.mkv");
+        var id = SeedQueued(IssueType.Playability, path);
+        var plan = SinglePlan(Load(id));
+        var called = false;
+        var fixer = new StubFixer(IssueType.Playability, _ =>
+        {
+            called = true;
+            return Task.FromResult(new FixResult { Success = true, Message = "ok" });
+        });
+        var ruleId = _db.Protection.Add(new ProtectionRule { Kind = "folder", Target = path, ScannersMask = "*", FixersMask = "*" });
+        Assert.Null(await NewExecutor(fixer).ExecuteAsync(plan, true, NullProgress, CancellationToken.None));
+        Assert.False(called);
+        Assert.Equal(IssueStatus.Queued, Load(id).Status);
+        _db.Protection.Remove(ruleId);
+        Assert.NotNull(await NewExecutor(fixer).ExecuteAsync(plan, true, NullProgress, CancellationToken.None));
+        Assert.True(called);
     }
 
     private long SeedQueued(IssueType type, string path)

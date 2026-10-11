@@ -8,6 +8,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Xml;
 using Jellyfin.Plugin.MediaDash.Data;
+using Jellyfin.Plugin.MediaDash.Fixers;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using Microsoft.Extensions.Logging;
@@ -33,14 +34,17 @@ public sealed class NfoScanner : IScanner
 
     private readonly ILibraryManager _libraryManager;
     private readonly ILogger<NfoScanner> _logger;
+    private readonly ProtectionService? _protection;
 
     /// <summary>Initializes a new instance of the <see cref="NfoScanner"/> class.</summary>
     /// <param name="libraryManager">Used to enumerate configured library locations.</param>
+    /// <param name="protection">Rules excluding protected files from analysis.</param>
     /// <param name="logger">The logger.</param>
-    public NfoScanner(ILibraryManager libraryManager, ILogger<NfoScanner> logger)
+    public NfoScanner(ILibraryManager libraryManager, ILogger<NfoScanner> logger, ProtectionService? protection = null)
     {
         _libraryManager = libraryManager;
         _logger = logger;
+        _protection = protection;
     }
 
     /// <inheritdoc />
@@ -92,6 +96,11 @@ public sealed class NfoScanner : IScanner
             foreach (var nfo in nfoFiles)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                if (_protection?.IsScannerBlocked(nfo, Type) == true)
+                {
+                    continue;
+                }
+
                 var reason = EvaluateFile(nfo);
                 if (reason is null)
                 {

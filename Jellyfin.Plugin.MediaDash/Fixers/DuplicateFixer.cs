@@ -22,7 +22,9 @@ public sealed class DuplicateFixer : IFixer
     private readonly LibraryGuard _guard;
     private readonly RecycleBin _recycleBin;
     private readonly ILibraryMonitor _libraryMonitor;
+    private readonly ILibraryManager _libraryManager;
     private readonly ILogger<DuplicateFixer> _logger;
+    private readonly ProtectionService? _protection;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="DuplicateFixer"/> class.
@@ -30,13 +32,18 @@ public sealed class DuplicateFixer : IFixer
     /// <param name="guard">The library path guard.</param>
     /// <param name="recycleBin">The recycle bin.</param>
     /// <param name="libraryMonitor">Instance of the <see cref="ILibraryMonitor"/> interface.</param>
+    /// <param name="libraryManager">Jellyfin library manager. Used to actively purge the losing
+    /// copy's item row after recycle, so a rescan can't re-flag it as unplayable ghost.</param>
     /// <param name="logger">The logger.</param>
-    public DuplicateFixer(LibraryGuard guard, RecycleBin recycleBin, ILibraryMonitor libraryMonitor, ILogger<DuplicateFixer> logger)
+    /// <param name="protection">Checks protection before disposing each sidecar.</param>
+    public DuplicateFixer(LibraryGuard guard, RecycleBin recycleBin, ILibraryMonitor libraryMonitor, ILibraryManager libraryManager, ILogger<DuplicateFixer> logger, ProtectionService? protection = null)
     {
         _guard = guard;
         _recycleBin = recycleBin;
         _libraryMonitor = libraryMonitor;
+        _libraryManager = libraryManager;
         _logger = logger;
+        _protection = protection;
     }
 
     /// <inheritdoc />
@@ -160,6 +167,29 @@ public sealed class DuplicateFixer : IFixer
         SweepDedicatedFolderSidecars(issue.Path, keeperPath, disposal, additionalRecycled);
 
         _libraryMonitor.ReportFileSystemChanged(issue.Path);
+        // Actively reap the Jellyfin item row for the losing copy — ReportFileSystemChanged's
+        // async debounce is lost on Jellyfin restart, and the ghost item would then be re-flagged
+        // as "unplayable, file gone" by MediaDash's next scan. Best-effort; failure is logged.
+        if (issue.ItemId != Guid.Empty)
+        {
+            try
+            {
+                var item = _libraryManager.GetItemById(issue.ItemId);
+                if (item is not null)
+                {
+                    _libraryManager.DeleteItem(item, new MediaBrowser.Controller.Library.DeleteOptions
+                    {
+                        DeleteFileLocation = false,
+                        DeleteFromExternalProvider = false
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to actively purge Jellyfin item {ItemId} for {Path} after duplicate recycle", issue.ItemId, issue.Path);
+            }
+        }
+
         _logger.LogInformation("Duplicate fix: {Action} (confidence {Confidence}, details {Details})", actionText, issue.Confidence, issue.DetailsJson);
         return Task.FromResult(new FixResult
         {
@@ -322,6 +352,11 @@ public sealed class DuplicateFixer : IFixer
 
         foreach (var f in remainingFiles)
         {
+            if (_protection?.IsFixerBlocked(f, IssueType.Duplicate) == true)
+            {
+                continue;
+            }
+
             try
             {
                 if (disposal == DisposalMethod.RecycleBin)
@@ -351,6 +386,11 @@ public sealed class DuplicateFixer : IFixer
 
         try
         {
+            if (Directory.EnumerateFileSystemEntries(folder).Any())
+            {
+                return;
+            }
+
             Directory.Delete(folder, recursive: false);
         }
         catch (IOException ex)

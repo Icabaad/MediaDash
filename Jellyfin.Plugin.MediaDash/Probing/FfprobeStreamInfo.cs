@@ -88,6 +88,14 @@ public sealed class FfprobeStreamInfo
     public bool IsHearingImpaired => Disposition is not null && Disposition.TryGetValue("hearing_impaired", out var v) && v != 0;
 
     /// <summary>
+    /// Gets a value indicating whether the stream is explicitly flagged as the item's original-language
+    /// track (Matroska <c>FlagOriginal</c>). Only set when the muxing tool wrote the flag; many
+    /// rip pipelines don't bother — treat <c>false</c> as "no signal", not "not original".
+    /// </summary>
+    [JsonIgnore]
+    public bool IsOriginal => Disposition is not null && Disposition.TryGetValue("original", out var v) && v != 0;
+
+    /// <summary>
     /// Gets a value indicating whether the stream is an attached picture (embedded cover art, thumbnail).
     /// yt-dlp <c>--embed-thumbnail</c> muxes an MJPEG stream with this disposition into the MKV alongside
     /// the real video — and that thumbnail can end up as stream 0. Consumers of "the video stream"

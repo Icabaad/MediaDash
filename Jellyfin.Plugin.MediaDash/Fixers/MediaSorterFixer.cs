@@ -106,7 +106,38 @@ public sealed class MediaSorterFixer : IFixer
 
         if (File.Exists(targetPath))
         {
-            return Task.FromResult(FixResult.Refused(FixReason.DestinationCollision, "A file with the same name already exists at '" + targetPath + "' — nothing was moved. Rename or remove the existing file, or move this one manually."));
+            // Compare sizes so the message tells the user at a glance whether the two copies
+            // look identical or clearly differ — the most common resolution question when you
+            // hit a same-name collision is "which one do I keep?".
+            long srcSize = 0, dstSize = 0;
+            try
+            {
+                srcSize = new FileInfo(issue.Path).Length;
+            }
+            catch (IOException)
+            {
+            }
+
+            try
+            {
+                dstSize = new FileInfo(targetPath).Length;
+            }
+            catch (IOException)
+            {
+            }
+
+            var sameSize = srcSize > 0 && srcSize == dstSize;
+            var sizeLine = srcSize > 0 && dstSize > 0
+                ? (sameSize
+                    ? " Both copies are " + FormatMb(srcSize) + " — likely identical (a Duplicate scan would confirm)."
+                    : " Existing file is " + FormatMb(dstSize) + "; the misplaced copy is " + FormatMb(srcSize) + " — different content.")
+                : string.Empty;
+            var message =
+                "Move refused — a file named '" + Path.GetFileName(targetPath) + "' already exists at '" + targetPath + "', and MediaDash won't overwrite it." +
+                sizeLine +
+                " To resolve, either delete or rename the existing file (then re-scan), or Dismiss this issue if you want to keep both copies where they are." +
+                " Source stays untouched at '" + issue.Path + "'.";
+            return Task.FromResult(FixResult.Refused(FixReason.DestinationCollision, message));
         }
 
         // Cross-volume moves in .NET are copy+delete, which requires target free-space equal to the file's size.
@@ -326,6 +357,9 @@ public sealed class MediaSorterFixer : IFixer
         var code = ex.HResult & 0xFFFF;
         return code == 0x70 || code == 28;
     }
+
+    private static string FormatMb(long bytes) =>
+        (bytes / (1024.0 * 1024.0)).ToString("0.##", CultureInfo.InvariantCulture) + " MB";
 
     // Best-effort cleanup of the .mediadash.tmp staging file when a cross-volume move throws mid-way.
     // SweepOrphanSidecars would catch anything we miss on a subsequent fix run, but doing it inline

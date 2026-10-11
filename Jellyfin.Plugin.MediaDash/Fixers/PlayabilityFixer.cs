@@ -30,6 +30,11 @@ public sealed class PlayabilityFixer : IFixer
     private readonly VerifiedReplacementService _replacement;
     private readonly IPluginConfigurationProvider _configProvider;
     private readonly ILibraryMonitor _libraryMonitor;
+    private readonly ILibraryManager _libraryManager;
+    // External audit P1 #4: commit-time protection check so a Never-modify rule added during
+    // a 30-minute repair aborts the swap. Nullable because older test fixtures construct the
+    // fixer without protection wired; production DI always supplies it.
+    private readonly ProtectionService? _protection;
     private readonly ILogger<PlayabilityFixer> _logger;
 
     /// <summary>
@@ -49,7 +54,13 @@ public sealed class PlayabilityFixer : IFixer
     /// recheck on repair-ladder commits so a dry-run flip mid-ffmpeg aborts before touching the
     /// source.</param>
     /// <param name="libraryMonitor">Instance of the <see cref="ILibraryMonitor"/> interface.</param>
+    /// <param name="libraryManager">Jellyfin library manager. Used to actively purge the Jellyfin
+    /// item row when the fixer removes a file — <see cref="ILibraryMonitor.ReportFileSystemChanged"/>
+    /// is async/debounced and its pending batch is lost on any Jellyfin restart, which leaves
+    /// ghost items behind and causes MediaDash's next scan to flag the (now file-less) items as
+    /// unplayable.</param>
     /// <param name="logger">The logger.</param>
+    /// <param name="protection">Protection service for commit-time re-checks (external audit P1 #4); DI auto-wires it.</param>
     public PlayabilityFixer(
         FfprobeService ffprobe,
         FfmpegExecutor ffmpeg,
@@ -59,7 +70,9 @@ public sealed class PlayabilityFixer : IFixer
         VerifiedReplacementService replacement,
         IPluginConfigurationProvider configProvider,
         ILibraryMonitor libraryMonitor,
-        ILogger<PlayabilityFixer> logger)
+        ILibraryManager libraryManager,
+        ILogger<PlayabilityFixer> logger,
+        ProtectionService? protection = null)
     {
         _ffprobe = ffprobe;
         _ffmpeg = ffmpeg;
@@ -69,6 +82,8 @@ public sealed class PlayabilityFixer : IFixer
         _replacement = replacement;
         _configProvider = configProvider;
         _libraryMonitor = libraryMonitor;
+        _libraryManager = libraryManager;
+        _protection = protection;
         _logger = logger;
     }
 
@@ -81,7 +96,20 @@ public sealed class PlayabilityFixer : IFixer
         var config = Plugin.Instance!.Configuration;
         if (!File.Exists(issue.Path))
         {
-            return FixResult.Fail(FixReason.SourceMissing, "The file no longer exists; re-scan to refresh the list.");
+            // The file was already removed (usually by an earlier MediaDash fix). Purge the ghost
+            // Jellyfin library item so a rescan can't re-flag the same dead path — otherwise the
+            // scanner walks Jellyfin's library items, finds no file on disk, and emits a fresh
+            // Playability row that looks to the user like "everything came back". Reporting Applied
+            // (bytes 0) so History reflects the real cleanup work performed.
+            TryReapJellyfinItem(issue);
+            _libraryMonitor.ReportFileSystemChanged(issue.Path);
+            return new FixResult
+            {
+                Success = true,
+                Outcome = FixOutcome.Applied,
+                Message = "Removed dead library entry (file was already gone).",
+                BytesFreed = 0
+            };
         }
 
         if (!_guard.IsInsideLibrary(issue.Path))
@@ -117,7 +145,11 @@ public sealed class PlayabilityFixer : IFixer
         {
             case RevalidationVerdict.Indeterminate:
                 Api.Diagnostics.Record("PlayabilityFixer.RevalidateIndeterminate", "Refused fix for " + issue.Path + ": " + (revalidation.Diagnostic ?? "revalidation returned indeterminate."));
-                return FixResult.Fail(FixReason.ProbeUnavailable, "Can't safely check this file right now — ffprobe didn't respond (missing, hung, or errored). No fix was applied. Try again once ffprobe is working (Dashboard → Playback → FFmpeg settings).");
+                // E2E audit E2E-06: previously every Indeterminate verdict rendered the generic
+                // "ffprobe didn't respond" copy, which falsely blamed the FFmpeg install for files
+                // that are simply not valid media containers. The RevalidationResult diagnostic now
+                // carries a plain-language reason for each sub-case; surface it directly.
+                return FixResult.Fail(FixReason.ProbeUnavailable, revalidation.Diagnostic ?? "Can't safely check this file right now. No fix was applied.");
             case RevalidationVerdict.Healthy:
                 return FixResult.NoChange(FixReason.AlreadyHealthy, "The file plays fine now — nothing was removed. Re-scan to clear this issue.");
         }
@@ -127,6 +159,30 @@ public sealed class PlayabilityFixer : IFixer
         if (string.Equals(fixReason, "container-extension-mismatch", StringComparison.Ordinal))
         {
             return await RenameForMismatchAsync(issue, playabilityDetails?.RenameToExtension).ConfigureAwait(false);
+        }
+
+        // E2E audit E2E-08: broken books/comics (PDF, EPUB, CBZ, MOBI, CBR, CB7) are detected by
+        // the Playability scanner because they're also indexed as media items, but the ffmpeg-
+        // based repair ladder doesn't apply to document containers — every rung fails with the
+        // same generic ffprobe refusal that misleads the user into thinking FFmpeg is broken.
+        // Refuse cleanly with a document-aware message so the user knows the finding is real,
+        // the file is preserved, and they can delete manually from Files or Dismiss to stop
+        // reporting it. BookProbeService / ComicProbeService are the right eventual home for
+        // dedicated book-corruption handling (follow-up).
+        var ext = Path.GetExtension(issue.Path).ToLowerInvariant();
+        if (Scanners.MediaFormats.Books.Contains(ext) || Scanners.MediaFormats.Comics.Contains(ext))
+        {
+            return FixResult.Fail(
+                FixReason.ConverterUnavailable,
+                "This looks like a damaged ebook / comic. MediaDash's media-repair pipeline is for audio and video; book/comic repair isn't implemented yet. The file is unchanged — delete it from Files, or Dismiss this issue to stop reporting it.");
+        }
+
+        // Audio stored far from its video: the file still plays from the start, so it must never
+        // reach the delete path below. Rewrite with -max_interleave_delta 0 or leave it alone —
+        // never dispose of a file that only fails after a seek.
+        if (string.Equals(fixReason, InterleaveAnalyzer.IssueReason, StringComparison.Ordinal))
+        {
+            return await FixInterleaveAsync(issue, revalidation.Probe, cancellationToken).ConfigureAwait(false);
         }
 
         // Repair ladder — try to salvage before deleting. Skips out to today's delete path on
@@ -168,6 +224,11 @@ public sealed class PlayabilityFixer : IFixer
         }
 
         _libraryMonitor.ReportFileSystemChanged(issue.Path);
+        // Actively purge the Jellyfin item row so a rescan can't re-flag the ghost as "file gone".
+        // ReportFileSystemChanged above queues an async debounced update that gets lost across a
+        // Jellyfin restart; a synchronous DeleteItem call reaps the row now. Best-effort — the fix
+        // already succeeded on disk, so a failure to reap the item is a soft error we log and swallow.
+        TryReapJellyfinItem(issue);
         _logger.LogInformation("Playability fix: {Action}", actionText);
         return new FixResult
         {
@@ -177,6 +238,131 @@ public sealed class PlayabilityFixer : IFixer
             BytesFreed = size,
             RecyclePath = recyclePath
         };
+    }
+
+    private void TryReapJellyfinItem(Issue issue)
+    {
+        if (issue.ItemId == Guid.Empty)
+        {
+            return;
+        }
+
+        try
+        {
+            var item = _libraryManager.GetItemById(issue.ItemId);
+            if (item is null)
+            {
+                return;
+            }
+
+            // DeleteFileLocation = false: the fix already moved/recycled the file, so this call
+            // only asks Jellyfin to drop the DB row. Sidecar / subtitle / trickplay cleanup on
+            // disk was already handled by the fixer itself (or by the recycle-bin move).
+            _libraryManager.DeleteItem(item, new MediaBrowser.Controller.Library.DeleteOptions
+            {
+                DeleteFileLocation = false,
+                DeleteFromExternalProvider = false
+            });
+        }
+        catch (Exception ex)
+        {
+            // Never fail the fix over a library-manager reap failure — Jellyfin's next library
+            // refresh will still catch up. Log so a persistent failure pattern is visible.
+            _logger.LogWarning(ex, "Failed to actively purge Jellyfin item {ItemId} for {Path} after fix", issue.ItemId, issue.Path);
+        }
+    }
+
+    /// <summary>
+    /// Rewrites a mis-interleaved file with <c>-max_interleave_delta 0</c> so audio sits next to
+    /// its video. Pure muxer-level rebuild — no re-encode, so the output is bit-identical where it
+    /// matters. On any failure (ffmpeg error, structural verify, decode verify, interleave re-check
+    /// non-Clean) the temp output is dropped and the original is left exactly as it was. The usual
+    /// disposal path is bypassed: a file that only fails on seek must never be recycled.
+    /// </summary>
+    private async Task<FixResult> FixInterleaveAsync(Issue issue, FfprobeData? revalidationProbe, CancellationToken cancellationToken)
+    {
+        var config = Plugin.Instance!.Configuration;
+        var fileName = Path.GetFileName(issue.Path);
+        if (config.DryRun)
+        {
+            return FixResult.DryRun("would rewrite " + fileName + " with sound and picture stored side by side", 0);
+        }
+
+        var probe = revalidationProbe ?? await _ffprobe.ProbeAsync(issue.Path, cancellationToken).ConfigureAwait(false);
+        var ext = Path.GetExtension(issue.Path).TrimStart('.');
+        if (string.IsNullOrEmpty(ext) || probe is null)
+        {
+            return FixResult.Fail("The file could not be read; nothing was changed.");
+        }
+
+        if (!HasFreeSpace(issue.Path, 2))
+        {
+            return FixResult.Fail("Not enough free disk space to rewrite the file (needs about twice its size); nothing was changed.");
+        }
+
+        long expectedSourceLength = 0;
+        long expectedSourceMtimeTicks = 0;
+        try
+        {
+            var sourceInfo = new FileInfo(issue.Path);
+            if (sourceInfo.Exists)
+            {
+                expectedSourceLength = sourceInfo.Length;
+                expectedSourceMtimeTicks = sourceInfo.LastWriteTimeUtc.Ticks;
+            }
+        }
+        catch (IOException)
+        {
+            // VRS refuses at commit time when identity is zero — safer than ignoring the check.
+        }
+
+        var tempPath = TranscodeFixer.SidecarPath(issue.Path, "repair.tmp5", ext);
+        // -max_interleave_delta 0 holds packets in memory until every stream catches up instead of
+        // giving up after 10 seconds and writing them in source order again. Memory grows with the
+        // size of the misplaced stretch — a worst-case Blu-ray remux with 30 minutes of unpaired
+        // audio can sit on hundreds of MB. ponytail: live with it, revisit if we hit an OOM report.
+        var args = BuildInterleaveRepairArgs(issue.Path, tempPath, ext);
+
+        var error = await _ffmpeg.RunAsync(args, RepairRungTimeout, cancellationToken).ConfigureAwait(false);
+        var verifyError = error ?? await VerifyRepairedAsync(probe, issue.Path, tempPath, cancellationToken).ConfigureAwait(false);
+        if (verifyError is null)
+        {
+            var outputProbe = await _ffprobe.ProbeAsync(tempPath, cancellationToken).ConfigureAwait(false);
+            if (outputProbe is null)
+            {
+                verifyError = "The rewritten file could not be re-probed to confirm the layout.";
+            }
+            else
+            {
+                var recheck = await _ffprobe.InterleaveCheckAsync(tempPath, outputProbe, cancellationToken, useCache: false).ConfigureAwait(false);
+                // Only Clean is proof of a successful repair. Indeterminate is NOT clean — accepting
+                // it would promote an unverified replacement over the user's original. Report that
+                // explicitly so the user sees which side the uncertainty came from.
+                verifyError = recheck.Status switch
+                {
+                    InterleaveStatus.Clean => null,
+                    InterleaveStatus.Broken => "The rewritten file still has sound and picture stored apart.",
+                    _ => "Could not verify the rewritten file — the layout check didn't complete. The original is unchanged."
+                };
+            }
+        }
+
+        if (verifyError is not null)
+        {
+            TryDelete(tempPath);
+            return FixResult.Fail("The file could not be rewritten; it was left untouched.", TranscodeFixer.Truncate(verifyError));
+        }
+
+        return await TrySwapRepairedAsync(
+                issue,
+                tempPath,
+                "sound and picture stored side by side",
+                extensionChanged: false,
+                probe,
+                expectedSourceLength,
+                expectedSourceMtimeTicks,
+                cancellationToken).ConfigureAwait(false)
+            ?? FixResult.Fail("The file could not be rewritten; it was left untouched.");
     }
 
     /// <summary>
@@ -193,48 +379,109 @@ public sealed class PlayabilityFixer : IFixer
     {
         var config = Plugin.Instance!.Configuration;
 
-        // All four disabled = feature turned off. Skip pre-flight and just fall through.
+        // All disabled = feature turned off. Skip pre-flight and just fall through.
         if (!config.RepairAttemptRemux && !config.RepairAttemptDropStreams
-            && !config.RepairAttemptContainerCoerce && !config.RepairAttemptReencode)
+            && !config.RepairAttemptContainerCoerce && !config.RepairAttemptAudioReencode
+            && !config.RepairAttemptReencode)
         {
             return null;
         }
 
         // Pre-flight: enough free space on target volume for repair.
-        // 3× source when re-encode is on (temp + safety), 2× otherwise (temp swap only).
+        // 3× source when full re-encode is on (temp + safety), 2× otherwise (temp swap only).
+        // Rung 4a's temp is roughly source-sized (video copied), so 2× covers it.
         if (!HasFreeSpace(issue.Path, config.RepairAttemptReencode ? 3 : 2))
         {
             _logger.LogInformation("Playability repair skipped for {Path}: insufficient free disk.", issue.Path);
             return null;
         }
 
+        // Per-stream decode is expensive; memoise so rung 2 and rung 4a share one probe pass.
+        var brokenLazy = new Lazy<Task<IReadOnlyList<int>>>(
+            () => IdentifyBrokenStreamsAsync(issue, originalProbe, cancellationToken));
+
+        // External audit P1 #5: capture source identity BEFORE any rung produces output. Previously
+        // TrySwapRepairedAsync stat'd the source after the repair had finished — a mid-repair
+        // import that replaced the source became the NEW expected identity, so the stale repaired
+        // output then replaced the newly-imported file. TrackFixer and FormatCompatibilityFixer
+        // already capture identity before conversion; align Playability with that pattern.
+        long expectedSourceLength = 0;
+        long expectedSourceMtimeTicks = 0;
+        try
+        {
+            var preRepairInfo = new FileInfo(issue.Path);
+            if (preRepairInfo.Exists)
+            {
+                expectedSourceLength = preRepairInfo.Length;
+                expectedSourceMtimeTicks = preRepairInfo.LastWriteTimeUtc.Ticks;
+            }
+        }
+        catch (IOException)
+        {
+            // Fall through — zero identity means VRS will refuse at commit time if the source
+            // disappeared, which is the safer failure mode than ignoring the check.
+        }
+
         FixResult? swap;
         string? outPath;
         if (config.RepairAttemptRemux && (outPath = await TryRung1Async(issue, originalProbe, cancellationToken).ConfigureAwait(false)) is not null
-            && (swap = await TrySwapRepairedAsync(issue, outPath, "quick remux", extensionChanged: false, originalProbe, cancellationToken).ConfigureAwait(false)) is not null)
+            && (swap = await TrySwapRepairedAsync(issue, outPath, "quick remux", extensionChanged: false, originalProbe, expectedSourceLength, expectedSourceMtimeTicks, cancellationToken).ConfigureAwait(false)) is not null)
         {
             return swap;
         }
 
-        if (config.RepairAttemptDropStreams && (outPath = await TryRung2Async(issue, originalProbe, cancellationToken).ConfigureAwait(false)) is not null
-            && (swap = await TrySwapRepairedAsync(issue, outPath, "dropped broken streams", extensionChanged: false, originalProbe, cancellationToken).ConfigureAwait(false)) is not null)
+        if (config.RepairAttemptDropStreams && (outPath = await TryRung2Async(issue, originalProbe, brokenLazy, cancellationToken).ConfigureAwait(false)) is not null
+            && (swap = await TrySwapRepairedAsync(issue, outPath, "dropped broken streams", extensionChanged: false, originalProbe, expectedSourceLength, expectedSourceMtimeTicks, cancellationToken).ConfigureAwait(false)) is not null)
         {
             return swap;
         }
 
         if (config.RepairAttemptContainerCoerce && (outPath = await TryRung3Async(issue, originalProbe, cancellationToken).ConfigureAwait(false)) is not null
-            && (swap = await TrySwapRepairedAsync(issue, outPath, "container changed to .mkv (Jellyfin watch history reset)", extensionChanged: true, originalProbe, cancellationToken).ConfigureAwait(false)) is not null)
+            && (swap = await TrySwapRepairedAsync(issue, outPath, "container changed to .mkv (Jellyfin watch history reset)", extensionChanged: true, originalProbe, expectedSourceLength, expectedSourceMtimeTicks, cancellationToken).ConfigureAwait(false)) is not null)
+        {
+            return swap;
+        }
+
+        // Rung 4a: audio-only re-encode. Fires only when the file has a single audio track and
+        // that track is the sole broken stream (rung 2 refused because dropping would leave 0
+        // audio). Video is copied, so this completes in minutes even on 4K sources. Same
+        // container, so extensionChanged: false (watch history preserved).
+        if (config.RepairAttemptAudioReencode && (outPath = await TryRung4aAsync(issue, originalProbe, brokenLazy, cancellationToken).ConfigureAwait(false)) is not null
+            && (swap = await TrySwapRepairedAsync(issue, outPath, "audio re-encoded", extensionChanged: false, originalProbe, expectedSourceLength, expectedSourceMtimeTicks, cancellationToken).ConfigureAwait(false)) is not null)
         {
             return swap;
         }
 
         if (config.RepairAttemptReencode && (outPath = await TryRung4Async(issue, originalProbe, progress, cancellationToken).ConfigureAwait(false)) is not null
-            && (swap = await TrySwapRepairedAsync(issue, outPath, "video re-encoded", extensionChanged: true, originalProbe, cancellationToken).ConfigureAwait(false)) is not null)
+            && (swap = await TrySwapRepairedAsync(issue, outPath, "video re-encoded", extensionChanged: true, originalProbe, expectedSourceLength, expectedSourceMtimeTicks, cancellationToken).ConfigureAwait(false)) is not null)
         {
             return swap;
         }
 
         return null;
+    }
+
+    // Lazy-shared decode across rung 2 and rung 4a. Runs DecodeStreamAsync per stream; returns
+    // the indexes that failed. Empty list means every stream decoded cleanly.
+    private async Task<IReadOnlyList<int>> IdentifyBrokenStreamsAsync(
+        Issue issue, FfprobeData originalProbe, CancellationToken cancellationToken)
+    {
+        if (originalProbe.Streams is null || originalProbe.Streams.Count == 0)
+        {
+            return Array.Empty<int>();
+        }
+
+        var brokenIndexes = new List<int>();
+        foreach (var stream in originalProbe.Streams)
+        {
+            var decodeError = await _ffprobe.DecodeStreamAsync(issue.Path, stream.Index, cancellationToken).ConfigureAwait(false);
+            if (decodeError is not null)
+            {
+                brokenIndexes.Add(stream.Index);
+            }
+        }
+
+        return brokenIndexes;
     }
 
     // Rung 1: error-tolerant remux, same container. Recovers bad index, wrong duration,
@@ -309,23 +556,14 @@ public sealed class PlayabilityFixer : IFixer
 
     // Rung 2: per-stream decode check via ffprobe, drop the streams that error.
     // Safety hard-stop: refuse if the drop would leave 0 audio or 0 video streams.
-    private async Task<string?> TryRung2Async(Issue issue, FfprobeData originalProbe, CancellationToken cancellationToken)
+    private async Task<string?> TryRung2Async(Issue issue, FfprobeData originalProbe, Lazy<Task<IReadOnlyList<int>>> brokenLazy, CancellationToken cancellationToken)
     {
         if (originalProbe.Streams is null || originalProbe.Streams.Count == 0)
         {
             return null;
         }
 
-        var brokenIndexes = new List<int>();
-        foreach (var stream in originalProbe.Streams)
-        {
-            var decodeError = await _ffprobe.DecodeStreamAsync(issue.Path, stream.Index, cancellationToken).ConfigureAwait(false);
-            if (decodeError is not null)
-            {
-                brokenIndexes.Add(stream.Index);
-            }
-        }
-
+        var brokenIndexes = await brokenLazy.Value.ConfigureAwait(false);
         if (brokenIndexes.Count == 0)
         {
             return null;
@@ -426,6 +664,92 @@ public sealed class PlayabilityFixer : IFixer
         return tempPath;
     }
 
+    // Rung 4a: audio-only re-encode. Cheap middle rung between rung 3 (container coerce) and
+    // rung 4 (full video re-encode). Fires only in the narrow-but-common case that rung 2
+    // couldn't handle: a single-audio-track file whose only audio stream is broken. Video is
+    // stream-copied so this takes minutes even on 4K sources.
+    // Roadmap: i-bl-12-rung4a-audio-reencode.
+    private async Task<string?> TryRung4aAsync(Issue issue, FfprobeData originalProbe, Lazy<Task<IReadOnlyList<int>>> brokenLazy, CancellationToken cancellationToken)
+    {
+        if (originalProbe.Streams is null || originalProbe.Streams.Count == 0)
+        {
+            return null;
+        }
+
+        var audioStreams = originalProbe.Streams.Where(s => string.Equals(s.CodecType, "audio", StringComparison.OrdinalIgnoreCase)).ToList();
+        var videoStreams = originalProbe.Streams.Where(s => string.Equals(s.CodecType, "video", StringComparison.OrdinalIgnoreCase)).ToList();
+
+        // Precondition: exactly one audio track. Multi-track sources with one broken audio
+        // already succeed via rung 2 (drop the bad one, keep the survivors). Zero audio =
+        // nothing for this rung to do.
+        if (audioStreams.Count != 1)
+        {
+            return null;
+        }
+
+        var brokenIndexes = await brokenLazy.Value.ConfigureAwait(false);
+        if (brokenIndexes.Count == 0)
+        {
+            return null;
+        }
+
+        var brokenSet = brokenIndexes.ToHashSet();
+
+        // The sole audio must be broken, and every video stream must decode cleanly.
+        // If video is also broken, only rung 4's full re-encode can salvage it.
+        if (!brokenSet.Contains(audioStreams[0].Index))
+        {
+            return null;
+        }
+
+        if (videoStreams.Any(v => brokenSet.Contains(v.Index)))
+        {
+            return null;
+        }
+
+        var ext = Path.GetExtension(issue.Path).TrimStart('.');
+        if (string.IsNullOrEmpty(ext))
+        {
+            return null;
+        }
+
+        var tempPath = TranscodeFixer.SidecarPath(issue.Path, "repair.tmp4a", ext);
+        var args = new List<string>
+        {
+            "-err_detect", "ignore_err",
+            "-fflags", "+genpts+igndts+discardcorrupt",
+            "-i", issue.Path,
+            "-map", "0",
+            "-c:v", "copy",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-c:s", "copy",
+            "-c:d", "copy",
+            "-c:t", "copy",
+            "-avoid_negative_ts", "make_zero",
+            "-f", TranscodeFixer.ContainerToFfmpegFormat(ext),
+            tempPath
+        };
+
+        var error = await _ffmpeg.RunAsync(args, RepairRungTimeout, cancellationToken).ConfigureAwait(false);
+        if (error is not null)
+        {
+            _logger.LogDebug("Rung 4a audio re-encode failed for {Path}: {Error}", issue.Path, TranscodeFixer.Truncate(error));
+            TryDelete(tempPath);
+            return null;
+        }
+
+        var verifyError = await VerifyRepairedAsync(originalProbe, issue.Path, tempPath, cancellationToken).ConfigureAwait(false);
+        if (verifyError is not null)
+        {
+            _logger.LogDebug("Rung 4a verify failed for {Path}: {Error}", issue.Path, verifyError);
+            TryDelete(tempPath);
+            return null;
+        }
+
+        return tempPath;
+    }
+
     // Rung 4: last-resort full re-encode into MKV. Slow (hours per file for 4K sources) and
     // only runs on the background scheduled scan. Uses conservative h264 + AAC targets so the
     // output plays on the widest range of clients; user isn't asked which codec because if
@@ -433,6 +757,19 @@ public sealed class PlayabilityFixer : IFixer
     // ponytail: h264/aac hardcoded; add a config knob only if a user files a preference (i-bl-05).
     private async Task<string?> TryRung4Async(Issue issue, FfprobeData originalProbe, IProgress<double>? progress, CancellationToken cancellationToken)
     {
+        // MEDIA-02 / issue #76: audio-only sources (FLAC / MP3 / M4A with embedded cover art) have
+        // no "real" video to re-encode — rung 4's libx264 pass was being handed the JPEG cover and
+        // aborting with "width not divisible by 2" on odd image dimensions. A failed rung is not
+        // proof the source is broken, so skipping rung 4 for these preserves the fall-through to a
+        // safe refusal instead of unjustified disposal. True audio repair isn't on the ladder today.
+        if (IsAudioOnlySource(originalProbe))
+        {
+            _logger.LogInformation(
+                "Rung 4 skipped for audio-only source {Path} — libx264 re-encode doesn't apply to attached cover art.",
+                issue.Path);
+            return null;
+        }
+
         var tempPath = TranscodeFixer.SidecarPath(issue.Path, "repair.tmp4", "mkv");
         var args = new List<string>
         {
@@ -443,6 +780,22 @@ public sealed class PlayabilityFixer : IFixer
             "-map", "0:a?",
             "-map", "0:s?",
         };
+
+        // MEDIA-02: exclude attached pictures from the video mapping on mixed-content sources
+        // (e.g. a video file with an album-art thumbnail attached). Mapping 0:v:0? picks the first
+        // video stream, which can be the attached picture when it's first in container order. The
+        // libx264 pass then fails on the picture's odd dimensions or pixel format.
+        if (originalProbe.Streams is not null)
+        {
+            foreach (var stream in originalProbe.Streams)
+            {
+                if (string.Equals(stream.CodecType, "video", StringComparison.OrdinalIgnoreCase) && stream.IsAttachedPicture)
+                {
+                    args.Add("-map");
+                    args.Add("-0:" + stream.Index.ToString(CultureInfo.InvariantCulture));
+                }
+            }
+        }
 
         // Bug-pattern audit round 3 (2026-09-19): MKV target + tx3g / mov_text source sub
         // aborts under `-c:s copy` with "Subtitle codec tx3g not supported in Matroska". These
@@ -515,8 +868,16 @@ public sealed class PlayabilityFixer : IFixer
             _ = double.TryParse(outputProbe.Format.Duration, NumberStyles.Float, CultureInfo.InvariantCulture, out duration);
         }
 
-        var decodeError = await _ffprobe.DecodeCheckAsync(outputPath, duration, cancellationToken).ConfigureAwait(false);
-        return decodeError;
+        // MEDIA-02: propagate audio-only probe shape so the verification doesn't false-positive on
+        // repair outputs that preserved cover art (same reason the scanner's decode check needs it).
+        var decodeError = await _ffprobe.DecodeCheckAsync(outputPath, duration, cancellationToken, IsAudioOnlySource(originalProbe)).ConfigureAwait(false);
+        if (decodeError is not null || outputProbe is null)
+        {
+            return decodeError ?? "The rebuilt file could not be analyzed.";
+        }
+
+        var brokenAudio = await _ffprobe.FindBrokenAudioStreamAsync(outputPath, outputProbe, cancellationToken).ConfigureAwait(false);
+        return brokenAudio?.Error;
     }
 
     // Kept for backwards-compatible test access; wraps the shared FreeSpaceGuard used by every
@@ -531,6 +892,8 @@ public sealed class PlayabilityFixer : IFixer
         string rungLabel,
         bool extensionChanged,
         FfprobeData originalProbe,
+        long expectedSourceLength,
+        long expectedSourceMtimeTicks,
         CancellationToken cancellationToken)
     {
         var finalPath = extensionChanged
@@ -570,9 +933,10 @@ public sealed class PlayabilityFixer : IFixer
         // directly and then `File.Move(temp, final, overwrite:false)` — a failure in the
         // final move left the temp sitting outside sweep patterns as a repair.tmpN sidecar
         // that had NO recovery-marker rename, so a subsequent orphan sweep could delete it.
-        var srcInfo = new FileInfo(issue.Path);
-        var expectedSourceLength = srcInfo.Exists ? srcInfo.Length : 0;
-        var expectedSourceMtimeTicks = srcInfo.Exists ? srcInfo.LastWriteTimeUtc.Ticks : 0;
+        // External audit P1 #5: identity captured in TryRepairAsync BEFORE any rung produced
+        // output, and now threaded through here. A mid-repair import that replaced the source
+        // during a 30-minute encode no longer silently becomes the new "expected source"; VRS
+        // refuses the swap, the repair is discarded, and the newly-imported source stays.
         var request = new ReplacementRequest(
             SourcePath: issue.Path,
             OutputPath: repairedTempPath,
@@ -587,10 +951,24 @@ public sealed class PlayabilityFixer : IFixer
             verifyOutput: _ => Task.FromResult<string?>(null),
             checkCurrentPolicy: () =>
             {
+                // External audit P1 #4: previously this only checked DryRun, so protection
+                // added mid-repair or a Playability fixer switched to Off during the long
+                // encode still committed. Honour the full policy stack at commit time.
                 var currentConfig = _configProvider.GetSnapshot();
                 if (currentConfig.DryRun)
                 {
                     return PolicyDecision.Refuse(FixReason.TypeDisabled);
+                }
+
+                var mode = currentConfig.GetFixMode(IssueType.Playability);
+                if (mode == FixMode.Off || mode == FixMode.DetectOnly)
+                {
+                    return PolicyDecision.Refuse(FixReason.TypeDisabled);
+                }
+
+                if (_protection is not null && _protection.IsFixerBlocked(issue.Path, IssueType.Playability))
+                {
+                    return PolicyDecision.Refuse(FixReason.Protected);
                 }
 
                 return PolicyDecision.Allow;
@@ -640,7 +1018,7 @@ public sealed class PlayabilityFixer : IFixer
             ? $"repaired {Path.GetFileName(issue.Path)} ({rungLabel})"
             : string.Format(
                 CultureInfo.InvariantCulture,
-                "partially repaired {0} ({1}) — {2:F1}s of unrecoverable tail damage was trimmed (declared {3:F1}s, playable {4:F1}s)",
+                "partially repaired {0} ({1}) — playable duration is {2:F1}s shorter than originally declared (declared {3:F1}s, playable {4:F1}s)",
                 Path.GetFileName(issue.Path),
                 rungLabel,
                 loss.Value.Lost,
@@ -653,6 +1031,7 @@ public sealed class PlayabilityFixer : IFixer
             Outcome = FixOutcome.Applied,
             Message = message,
             BytesFreed = 0,
+            SavedBytes = expectedSourceLength,
             RecyclePath = replacementResult.RecyclePath
         };
     }
@@ -716,6 +1095,9 @@ public sealed class PlayabilityFixer : IFixer
         return (originalDuration, repairedDuration, lost);
     }
 
+    internal static List<string> BuildInterleaveRepairArgs(string sourcePath, string outputPath, string ext)
+        => ["-i", sourcePath, "-map", "0", "-c", "copy", "-max_interleave_delta", "0", "-f", TranscodeFixer.ContainerToFfmpegFormat(ext), outputPath];
+
     private static void TryDelete(string path)
     {
         try
@@ -744,42 +1126,47 @@ public sealed class PlayabilityFixer : IFixer
         // stream" for every issue, which recycled healthy audio-kind files flagged with reason "no-audio".
         var reason = TryGetReason(issue.DetailsJson);
 
+        // 0-byte guard runs BEFORE ffprobe so an empty file is always Broken regardless of whether
+        // this build's ffprobe returns null vs an error-shaped stub. Field-report 2026-09-25:
+        // ffprobe on Windows returns non-null with Error set + no FormatName for 0-byte files,
+        // which hit the "Indeterminate" branch below and blocked the disposal path — user had a
+        // stuck 0-byte file with no way to remove it. Only the definite 0-byte case is claimed
+        // here; anything larger falls through to the normal probe + Indeterminate protections.
+        try
+        {
+            if (File.Exists(issue.Path) && new FileInfo(issue.Path).Length == 0)
+            {
+                return RevalidationResult.Broken(new FfprobeData());
+            }
+        }
+        catch (IOException)
+        {
+            // Fall through — if we can't stat the file, the file might not exist; the normal
+            // probe branch below will reach Indeterminate for the null case.
+        }
+
         var probe = await _ffprobe.ProbeAsync(issue.Path, cancellationToken).ConfigureAwait(false);
         if (probe is null)
         {
-            // Empty file: ffprobe genuinely has nothing to parse, so it (correctly) returns nothing —
-            // but that's a content problem, not the infrastructure failure the null-probe branch was
-            // written for. Field-report 2026-09-19: a 0-byte download was being reported as
-            // "ffprobe didn't respond" and shunted to the FFmpeg-settings troubleshooter, when the
-            // right action is disposal (the same infrastructure had just probed sibling fixtures
-            // fine). Only the definite 0-byte case is claimed here; anything larger stays
-            // Indeterminate so a genuinely broken ffprobe install can't wipe a healthy library.
-            try
-            {
-                if (File.Exists(issue.Path) && new FileInfo(issue.Path).Length == 0)
-                {
-                    return RevalidationResult.Broken(new FfprobeData());
-                }
-            }
-            catch (IOException)
-            {
-                // Fall through to Indeterminate — if we can't even stat the file, the probe-null
-                // signal is genuinely ambiguous and the conservative branch stands.
-            }
-
             // MD-010: ffprobe couldn't produce data (missing binary, process-start failure, timeout,
             // parse failure, unauthorized access, etc.). Every one of those is an infrastructure
             // problem — the file itself might be fine. Refuse rather than assume the worst.
-            return RevalidationResult.Indeterminate("ffprobe returned no data (missing, timed out, or hit a runtime error).");
+            // E2E audit E2E-06: diagnostic text now flows through to the user; keep it accurate.
+            return RevalidationResult.Indeterminate(
+                "Can't safely check this file right now — ffprobe didn't respond (missing, hung, or errored). No fix was applied. Try again once ffprobe is working (Dashboard → Playback → FFmpeg settings).");
         }
 
         // A probe that reports an internal error and doesn't identify a container at all is
         // ambiguous — ffprobe hit trouble before it could tell us anything about the file. Bias
         // toward Indeterminate; the alternative is silently recycling a file whose "brokenness"
-        // is really "ffprobe couldn't parse this build's output."
+        // is really "ffprobe couldn't parse this build's output." E2E audit E2E-06: previously
+        // every variant of this branch surfaced "ffprobe didn't respond" to the user, which
+        // falsely blamed the FFmpeg install for files that are simply not valid media. Make
+        // the user-facing diagnostic reflect the actual condition.
         if (probe.Error is not null && string.IsNullOrEmpty(probe.Format?.FormatName))
         {
-            return RevalidationResult.Indeterminate("ffprobe reported an error and no container information.");
+            return RevalidationResult.Indeterminate(
+                "This file isn't a valid media container — ffprobe read it but couldn't identify a format. The file is unchanged; delete it from Files or Dismiss this issue to stop reporting it.");
         }
 
         if (probe.Streams is null || probe.Streams.Count == 0)
@@ -789,12 +1176,33 @@ public sealed class PlayabilityFixer : IFixer
             return RevalidationResult.Broken(probe);
         }
 
+        // Interleave check requires its own async packet walk, kept separate from ReasonStillHolds
+        // which is a sync fast-path. Fresh measurement (useCache: false) so a stale cache entry
+        // can't let a known-broken file through as healthy. Indeterminate maps to Broken on
+        // purpose: if we can't confirm the file is still mis-laid, the safe assumption is that it
+        // still is — the issue stays live and the user can retry.
+        if (string.Equals(reason, InterleaveAnalyzer.IssueReason, StringComparison.Ordinal))
+        {
+            var result = await _ffprobe.InterleaveCheckAsync(issue.Path, probe, cancellationToken, useCache: false).ConfigureAwait(false);
+            return result.Status == InterleaveStatus.Clean
+                ? RevalidationResult.Healthy(probe)
+                : RevalidationResult.Broken(probe);
+        }
+
         var stillBroken = ReasonStillHolds(reason, probe, issue);
         if (stillBroken is null)
         {
+            // MEDIA-02 / issue #76: pass isAudioOnly derived from the probe so the decode check
+            // skips attached cover-art pictures. Without this, revalidation inherits the same
+            // false-positive the scanner originally produced and keeps the issue Broken even
+            // after the classifier has been corrected.
+            var isAudioOnly = IsAudioOnlySource(probe);
             // decode-error requires an async DecodeCheck; branch out to keep this method sync-flat.
-            var decodeError = await _ffprobe.DecodeCheckAsync(issue.Path, DurationOrZero(probe), cancellationToken).ConfigureAwait(false);
-            return decodeError is not null
+            var decodeError = await _ffprobe.DecodeCheckAsync(issue.Path, DurationOrZero(probe), cancellationToken, isAudioOnly).ConfigureAwait(false);
+            var brokenAudio = decodeError is null
+                ? await _ffprobe.FindBrokenAudioStreamAsync(issue.Path, probe, cancellationToken).ConfigureAwait(false)
+                : null;
+            return decodeError is not null || brokenAudio is not null
                 ? RevalidationResult.Broken(probe)
                 : RevalidationResult.Healthy(probe);
         }
@@ -806,6 +1214,26 @@ public sealed class PlayabilityFixer : IFixer
 
     private static double DurationOrZero(FfprobeData probe)
         => TryGetDuration(probe, out var d) ? d : 0;
+
+    // MEDIA-02 / issue #76: true when the file has no "real" video stream — attached_pic streams
+    // (JPEG cover art embedded in a FLAC / MP3 / M4A) count as video for codec_type purposes but
+    // aren't playable content. Passing isAudioOnly=true to DecodeCheckAsync for these makes it
+    // route through -vn so ffmpeg's default best-stream picker doesn't grab the cover art and
+    // report its 0-second decode as truncation.
+    private static bool IsAudioOnlySource(FfprobeData probe)
+    {
+        if (probe.Streams is null || probe.Streams.Count == 0)
+        {
+            return false;
+        }
+
+        var hasRealVideo = probe.Streams.Any(s =>
+            string.Equals(s.CodecType, "video", StringComparison.OrdinalIgnoreCase)
+            && !s.IsAttachedPicture);
+        var hasAudio = probe.Streams.Any(s =>
+            string.Equals(s.CodecType, "audio", StringComparison.OrdinalIgnoreCase));
+        return hasAudio && !hasRealVideo;
+    }
 
     // Returns null when the caller needs to do an async follow-up (decode-error branch).
     private static bool? ReasonStillHolds(string? reason, FfprobeData probe, Issue issue)

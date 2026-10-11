@@ -13,4 +13,15 @@ public interface ILibraryCollectionResolver
     /// <param name="item">The library item to inspect.</param>
     /// <returns>The library's CollectionType, or null.</returns>
     CollectionType? Resolve(BaseItem item);
+
+    /// <summary>
+    /// Path-only overload for files Jellyfin hasn't indexed (no BaseItem). Used by
+    /// FormatCompatibilityFixer so unindexed files pick up the <em>current</em> library type at
+    /// fix time rather than the scan-time snapshot in DetailsJson — a user who reclassifies a
+    /// Books library to mixed before approving a fix would otherwise bypass the mixed-library
+    /// gate (external review #4).
+    /// </summary>
+    /// <param name="path">Absolute file path.</param>
+    /// <returns>The library's CollectionType, or null when path is outside every library or the owning library is mixed.</returns>
+    CollectionType? ResolveByPath(string path);
 }

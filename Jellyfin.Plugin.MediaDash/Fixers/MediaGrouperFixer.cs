@@ -109,7 +109,12 @@ public sealed class MediaGrouperFixer : IFixer
 
         if (isFolder ? Directory.Exists(target) : File.Exists(target))
         {
-            return Task.FromResult(FixResult.Refused(FixReason.DestinationCollision, "An item with the same name already exists at '" + target + "' — rename or remove it, or move this one manually."));
+            var kind = isFolder ? "folder" : "file";
+            var message =
+                "Group refused — a " + kind + " named '" + Path.GetFileName(target) + "' already exists at '" + target + "', and MediaDash won't merge into or overwrite it." +
+                " To resolve, either delete or rename the existing " + kind + " (then re-scan), or Dismiss this issue if you want to keep both in place." +
+                " Source stays untouched at '" + source + "'.";
+            return Task.FromResult(FixResult.Refused(FixReason.DestinationCollision, message));
         }
 
         var actionText = string.Format(CultureInfo.InvariantCulture, "grouped {0} → {1}", source, target);

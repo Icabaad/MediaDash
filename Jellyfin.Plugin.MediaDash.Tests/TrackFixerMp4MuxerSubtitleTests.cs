@@ -118,18 +118,36 @@ public class TrackFixerMp4MuxerSubtitleTests
     }
 
     [Fact]
-    public void MkvOutputKeepsEverySubtitleCodec()
+    public void MkvOutputKeepsKnownCompatibleSubtitleCodecs()
     {
+        // Matroska is permissive — image subs (DVD/PGS), text subs (SRT/ASS/SSA) and legacy xsub
+        // all remux cleanly under -c copy. Only subs with unknown codecs or MP4-native timed-text
+        // (tx3g, mov_text) need to be dropped (covered by MkvOutputDrops... tests below).
         var probe = Probe(
             Sub(0, "dvdsub"),
             Sub(1, "hdmv_pgs_subtitle"),
             Sub(2, "subrip"),
             Sub(3, "ass"),
             Sub(4, "xsub"),
-            Sub(5, codec: null!),
-            Aud(6, "flac"));
+            Aud(5, "flac"));
 
         Assert.Empty(TrackFixer.ComputeMuxerIncompatibleSubtitleIndexes(probe, "mkv"));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(null)]
+    public void MkvOutputDropsUnknownCodecSubtitle(string? codec)
+    {
+        // MEDIA-01 / issue #75: Matroska CodecID S_TEXT/WEBVTT is not in FFmpeg's recognized
+        // table (only D_WEBVTT/* is). ffprobe therefore reports codec_name="". If we keep that
+        // stream under -c copy, the Matroska muxer aborts the whole remux:
+        //   Subtitle codec none (0) is not supported.
+        // Classifier must flag unknown-codec subtitles as incompatible for MKV targets so the
+        // fold-in drops them (same rule the MP4 whitelist enforces by construction).
+        var probe = Probe(Vid(0, "h264"), Sub(1, codec!), Aud(2, "aac"));
+
+        Assert.Equal(new[] { 1 }, TrackFixer.ComputeMuxerIncompatibleSubtitleIndexes(probe, "mkv"));
     }
 
     // Bug-pattern audit round 3 (2026-09-19): MKV target used to fall through as "no

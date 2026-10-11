@@ -33,7 +33,7 @@ public sealed class StatusQueryService
     private readonly RunState _runState;
 
     /// <summary>Initializes a new instance of the <see cref="StatusQueryService"/> class.</summary>
-    /// <param name="db">Plugin DB — kept for the RepairSummary stub which touches no table yet.</param>
+    /// <param name="db">Plugin DB — source of the Playability RepairSummary aggregation (history table).</param>
     /// <param name="issues">Issue-table store (05-C.2), source of open-issue summary + auto-queueable count.</param>
     /// <param name="history">History-table store (05-C.3), source of lifetime aggregates + failed-count badge.</param>
     /// <param name="recycleBin">Recycle bin — GetEffectiveRoot + GetContents.</param>
@@ -84,6 +84,10 @@ public sealed class StatusQueryService
         var recycleDrive = Fixers.RecycleBin.FindDriveForPath(_recycleBin.GetEffectiveRoot());
         var recycleRoot = recycleDrive is null ? null : Path.TrimEndingDirectorySeparator(recycleDrive.RootDirectory.FullName);
 
+        var pluginDataPath = MediaDashDb.DataDirectory;
+        var pluginDataDrive = pluginDataPath is null ? null : Fixers.RecycleBin.FindDriveForPath(pluginDataPath);
+        var pluginDataRoot = pluginDataDrive is null ? null : Path.TrimEndingDirectorySeparator(pluginDataDrive.RootDirectory.FullName);
+
         foreach (var drive in DriveInfo.GetDrives())
         {
             try
@@ -99,6 +103,7 @@ public sealed class StatusQueryService
                 var trimmedName = Path.TrimEndingDirectorySeparator(drive.Name);
                 var isLibraryDrive = libraryRoots.Contains(trimmedName);
                 var isRecycleDrive = recycleRoot is not null && string.Equals(trimmedName, recycleRoot, StringComparison.OrdinalIgnoreCase);
+                var isPluginDataDrive = pluginDataRoot is not null && string.Equals(trimmedName, pluginDataRoot, StringComparison.OrdinalIgnoreCase);
                 if (isLibraryDrive)
                 {
                     freeDisk += drive.AvailableFreeSpace;
@@ -111,7 +116,9 @@ public sealed class StatusQueryService
                     FreeBytes = drive.AvailableFreeSpace,
                     TotalBytes = drive.TotalSize,
                     IsLibraryDrive = isLibraryDrive,
-                    IsRecycleBinDrive = isRecycleDrive
+                    IsRecycleBinDrive = isRecycleDrive,
+                    IsPluginDataDrive = isPluginDataDrive,
+                    LowSpaceWarning = ComputeLowSpaceWarning(drive, isLibraryDrive || isRecycleDrive || isPluginDataDrive)
                 };
                 if (isLibraryDrive || isRecycleDrive)
                 {
@@ -144,10 +151,39 @@ public sealed class StatusQueryService
                     FreeBytes = recycleDrive.AvailableFreeSpace,
                     TotalBytes = recycleDrive.TotalSize,
                     IsLibraryDrive = false,
-                    IsRecycleBinDrive = true
+                    IsRecycleBinDrive = true,
+                    IsPluginDataDrive = pluginDataRoot is not null && string.Equals(Path.TrimEndingDirectorySeparator(recycleDrive.RootDirectory.FullName), pluginDataRoot, StringComparison.OrdinalIgnoreCase),
+                    LowSpaceWarning = ComputeLowSpaceWarning(recycleDrive, alwaysCheck: true)
                 };
                 CopySmartFields(recycleUsage, Probing.SmartHealthProbe.Get(recycleDrive.Name));
                 drives.Add(recycleUsage);
+            }
+            catch (IOException)
+            {
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
+        }
+
+        // Same force-add for the plugin-data drive — DB + caches live there and a full volume can
+        // stall SQLite writes long before it starves Jellyfin.
+        if (pluginDataDrive is not null && !drives.Any(d =>
+            string.Equals(Path.TrimEndingDirectorySeparator(d.Root), pluginDataRoot, StringComparison.OrdinalIgnoreCase)))
+        {
+            try
+            {
+                var pluginUsage = new DriveUsage
+                {
+                    Root = pluginDataDrive.Name,
+                    FreeBytes = pluginDataDrive.AvailableFreeSpace,
+                    TotalBytes = pluginDataDrive.TotalSize,
+                    IsLibraryDrive = false,
+                    IsRecycleBinDrive = false,
+                    IsPluginDataDrive = true,
+                    LowSpaceWarning = ComputeLowSpaceWarning(pluginDataDrive, alwaysCheck: true)
+                };
+                drives.Add(pluginUsage);
             }
             catch (IOException)
             {
@@ -162,6 +198,7 @@ public sealed class StatusQueryService
         var autoQueueableCount = _issues.GetIssues(status: IssueStatus.Detected)
             .Count(i => config.GetFixMode(i.Type) == Configuration.FixMode.Automatic);
         var binContents = SafeGetBinContents();
+        var fixSnapshot = _runState.ReadSnapshot(RunRole.Fix);
 
         return new StatusResponse
         {
@@ -174,6 +211,7 @@ public sealed class StatusQueryService
             FreeDiskBytes = freeDisk,
             TotalDiskBytes = totalDisk,
             LastScanUtc = summary.Count > 0 ? summary.Max(s => s.NewestDetectedUtc) : null,
+            LastScanCompletedUtc = ParseStateUtc(_db.GetState("LastScanCompletedUtc")),
             TotalPotentialSavings = summary.Sum(s => s.PotentialSavings),
             LifetimeBytesReclaimed = _history.GetLifetimeBytesFreed(),
             LifetimeCounts = _history.GetLifetimeSummary().Select(s => new TypeCount
@@ -209,7 +247,8 @@ public sealed class StatusQueryService
             RecycleBinFileCount = binContents.FileCount,
             RecycleBinRetentionDays = config.RecycleBinRetentionDays,
             LastFixRun = Plugin.LastFixRun,
-            FixPauseReason = _runState.ReadSnapshot(RunRole.Fix).PauseReason,
+            FixPauseReason = fixSnapshot.PauseReason,
+            CurrentOperationProgress = fixSnapshot.CurrentOperationProgress,
             RedownloadWarnings = Plugin.RedownloadWarnings,
             Repair = _db.GetRepairSummary(DateTime.UtcNow.AddDays(-30).Ticks)
         };
@@ -231,6 +270,20 @@ public sealed class StatusQueryService
         }
     }
 
+    // Parse the ISO-8601 timestamp written by ScanTask into the plugin_state table. Returns null
+    // for missing / malformed values so the UI (UI-15) can gracefully fall back to LastScanUtc.
+    private static DateTime? ParseStateUtc(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        return DateTime.TryParse(value, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var parsed)
+            ? parsed
+            : null;
+    }
+
     // Flatten a Probing.SmartHealthResult onto a DriveUsage. Keeping the DTO flat (as opposed to nesting a
     // "smart" object) means older clients ignore new fields cleanly and the Overview JS reads one row.
     private static void CopySmartFields(DriveUsage usage, Probing.SmartHealthResult health)
@@ -244,6 +297,63 @@ public sealed class StatusQueryService
         usage.SmartPowerOnHours = health.PowerOnHours;
         usage.SmartReadErrorsUncorrected = health.ReadErrorsUncorrected;
         usage.SmartWriteErrorsUncorrected = health.WriteErrorsUncorrected;
+    }
+
+    /// <summary>
+    /// Computes the plain-language low-space warning for a drive, or null when the drive isn't
+    /// worth warning about (below threshold, not a monitored drive, or feature disabled).
+    /// Reads the current plugin config for the threshold percent + master enable flag.
+    /// </summary>
+    /// <param name="drive">The drive to evaluate.</param>
+    /// <param name="alwaysCheck">When false, non-monitored drives return null immediately. The main enumeration passes true for library/recycle/plugin-data drives and false for the rest.</param>
+    /// <returns>The warning message, or null.</returns>
+    internal static string? ComputeLowSpaceWarning(DriveInfo drive, bool alwaysCheck)
+    {
+        if (!alwaysCheck)
+        {
+            return null;
+        }
+
+        var config = Plugin.Instance?.Configuration;
+        if (config is null || !config.LibraryDriveLowSpaceWarningEnabled)
+        {
+            return null;
+        }
+
+        return ComputeLowSpaceWarning(drive.AvailableFreeSpace, drive.TotalSize, drive.DriveFormat, config.LibraryDriveWarnThresholdPercent);
+    }
+
+    /// <summary>
+    /// Pure computation split out so tests can drive it without a real <see cref="DriveInfo"/>.
+    /// </summary>
+    /// <param name="freeBytes">Bytes free on the drive.</param>
+    /// <param name="totalBytes">Total bytes on the drive.</param>
+    /// <param name="driveFormat">Filesystem format string (e.g. "NTFS", "ext4", "zfs", "btrfs"). Case-insensitive.</param>
+    /// <param name="thresholdPercent">Configured warning threshold (percent used, 0..100). 0 disables.</param>
+    /// <returns>Human warning message, or null when below threshold.</returns>
+    internal static string? ComputeLowSpaceWarning(long freeBytes, long totalBytes, string driveFormat, int thresholdPercent)
+    {
+        if (thresholdPercent <= 0 || totalBytes <= 0)
+        {
+            return null;
+        }
+
+        // Copy-on-write filesystems fragment sooner as free extents shrink; tighten by 5 %.
+        var effectiveThreshold = thresholdPercent;
+        var fmt = driveFormat?.ToLowerInvariant() ?? string.Empty;
+        if (fmt.Contains("zfs", StringComparison.Ordinal) || fmt.Contains("btrfs", StringComparison.Ordinal))
+        {
+            effectiveThreshold = Math.Max(1, thresholdPercent - 5);
+        }
+
+        var percentUsed = (int)((totalBytes - freeBytes) * 100L / totalBytes);
+        if (percentUsed < effectiveThreshold)
+        {
+            return null;
+        }
+
+        var freeGb = freeBytes / (1024.0 * 1024.0 * 1024.0);
+        return "Drive is " + percentUsed + "% full (" + freeGb.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture) + " GB free) — free some space before fixes start failing.";
     }
 
     private bool ComputeRecycleBinCrossVolume(List<DriveUsage> drives)

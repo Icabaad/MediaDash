@@ -18,17 +18,41 @@ public sealed class CalibreToolchain
     private readonly IToolchainDownloader _downloader;
     private readonly ILogger<CalibreToolchain> _logger;
     private readonly string _dataDir;
+    // External audit P2 #8: tests used to resolve the host-installed Calibre via FindOnPath
+    // (environment PATH), which turned "no executable available" tests into false passes on
+    // developer machines with Calibre installed. Internal seam so tests inject a resolver that
+    // returns null; production ctor keeps the FindOnPath behaviour.
+    private readonly Func<string, string?> _pathResolver;
     private string? _resolvedPath;
+
+    // External review #9: track the override folder that produced the cached resolution so a
+    // mid-session override change invalidates the cache. Without this a user who repointed
+    // CalibreOverridePath to a different installation kept getting the old executable until
+    // the server restarted.
+    private string? _cachedOverride;
 
     /// <summary>Initializes a new instance of the <see cref="CalibreToolchain"/> class.</summary>
     /// <param name="downloader">Toolchain downloader; <see cref="NoOpToolchainDownloader"/> in Phase 1.</param>
     /// <param name="logger">The logger.</param>
     /// <param name="pluginDataDirectory">Plugin data folder — where downloaded portables extract to.</param>
     public CalibreToolchain(IToolchainDownloader downloader, ILogger<CalibreToolchain> logger, string pluginDataDirectory)
+        : this(downloader, logger, pluginDataDirectory, pathResolver: FindOnPath)
+    {
+    }
+
+    // ponytail: internal seam so tests can bypass the host PATH scan — pass a resolver that
+    // returns null to simulate a machine with no Calibre installed, or a lambda that returns a
+    // specific temp exe path to simulate a specific PATH entry. See external audit P2 #8.
+    internal CalibreToolchain(
+        IToolchainDownloader downloader,
+        ILogger<CalibreToolchain> logger,
+        string pluginDataDirectory,
+        Func<string, string?> pathResolver)
     {
         _downloader = downloader;
         _logger = logger;
         _dataDir = pluginDataDirectory;
+        _pathResolver = pathResolver;
     }
 
     /// <summary>Gets the path to <c>ebook-convert</c> when resolved; null when unavailable.</summary>
@@ -50,6 +74,15 @@ public sealed class CalibreToolchain
         IProgress<double>? progress,
         CancellationToken cancellationToken)
     {
+        // External review #9: if the user changed the override folder since the last successful
+        // resolve, invalidate the cache. Case-insensitive compare — Windows paths; harmless on
+        // Linux because any genuine change produces a different string either way.
+        var normalisedOverride = string.IsNullOrWhiteSpace(overridePath) ? null : overridePath;
+        if (_resolvedPath is not null && !string.Equals(_cachedOverride, normalisedOverride, StringComparison.OrdinalIgnoreCase))
+        {
+            _resolvedPath = null;
+        }
+
         if (_resolvedPath is not null && File.Exists(_resolvedPath))
         {
             return ConverterAvailability.Ready;
@@ -62,15 +95,17 @@ public sealed class CalibreToolchain
             if (File.Exists(overrideExe))
             {
                 _resolvedPath = overrideExe;
+                _cachedOverride = normalisedOverride;
                 return ConverterAvailability.Ready;
             }
         }
 
-        // 2. System PATH.
-        var pathExe = FindOnPath(ExecutableName());
+        // 2. System PATH (injected resolver for tests; production uses FindOnPath).
+        var pathExe = _pathResolver(ExecutableName());
         if (pathExe is not null)
         {
             _resolvedPath = pathExe;
+            _cachedOverride = normalisedOverride;
             return ConverterAvailability.Ready;
         }
 
@@ -80,6 +115,7 @@ public sealed class CalibreToolchain
         if (extractedExe is not null)
         {
             _resolvedPath = extractedExe;
+            _cachedOverride = normalisedOverride;
             return ConverterAvailability.Ready;
         }
 
@@ -137,7 +173,14 @@ public sealed class CalibreToolchain
 
         Directory.CreateDirectory(extractRoot);
 
-        // ponytail: cmd /C is the simplest way to attach a console so the installer runs headlessly
+        // External review #8: cmd.exe's /C flag has a quirky parse rule when the command line has
+        // multiple quoted arguments — it strips the outermost pair unless the WHOLE command is
+        // additionally wrapped in quotes. ProcessStartInfo.ArgumentList auto-quotes each arg
+        // individually, which produces `/C "C:\Program Files\installer.exe" "C:\dest"`; cmd then
+        // interprets that as "run `C:\Program` with the rest as args" and the installer never
+        // launches. The documented workaround is to wrap the entire command in an extra outer
+        // pair: `/C ""C:\Program Files\installer.exe" "C:\dest""`. ArgumentList can't produce
+        // that shape — we have to set Arguments directly and escape internal quotes manually.
         var psi = new ProcessStartInfo
         {
             FileName = "cmd.exe",
@@ -145,26 +188,58 @@ public sealed class CalibreToolchain
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             CreateNoWindow = true,
+            Arguments = "/C \"\"" + archivePath + "\" \"" + extractRoot + "\"\""
         };
-        // Wrap both paths in quotes; cmd /C "exe" "dest"
-        psi.ArgumentList.Add("/C");
-        psi.ArgumentList.Add(archivePath);
-        psi.ArgumentList.Add(extractRoot);
 
-        using (var proc = Process.Start(psi))
+        // External audit P2 #7: drain stdout/stderr, bound extraction time, and kill the
+        // process tree on cancellation or timeout. Pre-audit this method set RedirectStandardOutput
+        // + RedirectStandardError but never read either, so a sufficiently verbose installer
+        // could fill its 4 KB pipe buffer and deadlock. WaitForExitAsync with just the user's CT
+        // let a hung child outlive the cancellation (Dispose doesn't kill child processes), so
+        // the next EnsureAsync could race against the still-running installer.
+        var proc = Process.Start(psi);
+        if (proc is null)
         {
-            if (proc is null)
+            _logger.LogWarning("Failed to launch Calibre installer for extraction.");
+            return ConverterAvailability.Unavailable;
+        }
+
+        try
+        {
+            // Drain both streams so the child never blocks writing to a full pipe.
+            proc.BeginOutputReadLine();
+            proc.BeginErrorReadLine();
+
+            // 15 minutes covers the slowest observed portable extract (200 MB installer onto a
+            // spinning disk) with headroom; anything beyond that is a stuck installer and must be
+            // killed so the user isn't blocked indefinitely.
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeoutCts.CancelAfter(TimeSpan.FromMinutes(15));
+            try
             {
-                _logger.LogWarning("Failed to launch Calibre installer for extraction.");
+                await proc.WaitForExitAsync(timeoutCts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                KillTree(proc);
+                _logger.LogWarning("Calibre installer timed out after 15 minutes; process tree killed.");
                 return ConverterAvailability.Unavailable;
             }
+            catch (OperationCanceledException)
+            {
+                KillTree(proc);
+                throw;
+            }
 
-            await proc.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
             if (proc.ExitCode != 0)
             {
                 _logger.LogWarning("Calibre installer exited {Exit}", proc.ExitCode);
                 return ConverterAvailability.Unavailable;
             }
+        }
+        finally
+        {
+            proc.Dispose();
         }
 
         // Layout: <extractRoot>/Calibre Portable/Calibre/ebook-convert.exe
@@ -172,6 +247,7 @@ public sealed class CalibreToolchain
         if (resolvedExe is not null)
         {
             _resolvedPath = resolvedExe;
+            _cachedOverride = normalisedOverride;
 
             // Clean up the 200 MB installer now that extraction is done.
             try
@@ -211,6 +287,28 @@ public sealed class CalibreToolchain
 
     private static string ExecutableName()
         => RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "ebook-convert.exe" : "ebook-convert";
+
+    // Kill the whole process tree so the installer's spawned grandchildren don't outlive the
+    // top-level cmd.exe. .NET 5+ Process.Kill(entireProcessTree: true) is the documented way to
+    // make this reliable across Windows job objects and POSIX process groups.
+    private static void KillTree(Process proc)
+    {
+        try
+        {
+            if (!proc.HasExited)
+            {
+                proc.Kill(entireProcessTree: true);
+            }
+        }
+        catch (InvalidOperationException)
+        {
+            // Process already exited between the HasExited check and the kill.
+        }
+        catch (NotSupportedException)
+        {
+            // Running against a Process we don't own (shouldn't happen for Process.Start'd procs).
+        }
+    }
 
     private static string? FindOnPath(string exeName)
     {

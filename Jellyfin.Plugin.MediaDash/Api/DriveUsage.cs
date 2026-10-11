@@ -22,6 +22,17 @@ public sealed class DriveUsage
     /// bin can fill it up unnoticed otherwise.</summary>
     public bool IsRecycleBinDrive { get; set; }
 
+    /// <summary>Gets or sets a value indicating whether the plugin-data directory (SQLite DB + caches)
+    /// currently sits on this drive. Force-surfaced on Overview so users on small system drives see
+    /// the DB volume filling up before it starves Jellyfin.</summary>
+    public bool IsPluginDataDrive { get; set; }
+
+    /// <summary>Gets or sets a plain-language low-space warning for this drive
+    /// (e.g. "Drive is 92 % full — free some space before fixes stall"), or null when the drive is
+    /// below its configured threshold or the user dismissed the banner client-side. Advisory only;
+    /// never blocks fixes.</summary>
+    public string? LowSpaceWarning { get; set; }
+
     /// <summary>Gets or sets the SMART health bucket for this drive: <c>"healthy"</c>, <c>"warning"</c>,
     /// <c>"failing"</c>, or <c>"unknown"</c>. Populated only for library and recycle-bin drives.</summary>
     public string SmartHealth { get; set; } = "unknown";

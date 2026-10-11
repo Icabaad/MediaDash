@@ -15,6 +15,7 @@ using Jellyfin.Plugin.MediaDash.Probing;
 using Jellyfin.Plugin.MediaDash.Scanners;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Configuration;
+using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Configuration;
 using Microsoft.Extensions.Logging;
@@ -39,11 +40,11 @@ public sealed class TranscodeFixer : IFixer
     // encoder family. Whitelist match doesn't guarantee THIS specific GPU has the decoder;
     // ffmpeg's init will fail and the existing full-SW retry (see FixAsync line ~163-183)
     // catches the miss with a full-software second pass.
-    // ponytail: extend to mpeg2/vc1/mpeg4 only if legacy-content users request it — those
-    // codecs are rare in "oversized" library files (they're already small).
+    // ponytail: mpeg4 (DivX/XviD) stays off — decode wins are tiny on small SD files and
+    // ffmpeg's mpeg4 HW decoder is spotty across families. Add if a user reports it.
     private static readonly HashSet<string> HwDecodeCodecs = new(StringComparer.OrdinalIgnoreCase)
     {
-        "h264", "hevc", "vp9", "av1"
+        "h264", "hevc", "vp9", "av1", "mpeg2video", "vc1"
     };
 
     private readonly FfprobeService _ffprobe;
@@ -56,6 +57,7 @@ public sealed class TranscodeFixer : IFixer
     private readonly ILibraryManager _libraryManager;
     private readonly IServerConfigurationManager _serverConfig;
     private readonly IssueStore _issues;
+    private readonly ProtectionService _protection;
     private readonly ILogger<TranscodeFixer> _logger;
 
     /// <summary>
@@ -73,6 +75,7 @@ public sealed class TranscodeFixer : IFixer
     /// <param name="libraryManager">Instance of the <see cref="ILibraryManager"/> interface, used to resolve the item behind an issue for post-encode renaming.</param>
     /// <param name="serverConfig">Instance of the <see cref="IServerConfigurationManager"/> interface, used to read the server's hardware acceleration type.</param>
     /// <param name="issues">Issue-table store (05-C.2), used to spot same-path queued siblings and re-point sibling issues after a container change or canonical rename.</param>
+    /// <param name="protection">Never-modify protection service (roadmap i-110-protected-media). Re-consulted at commit time so protection added during a long encode still aborts the replacement.</param>
     /// <param name="logger">The logger.</param>
     public TranscodeFixer(
         FfprobeService ffprobe,
@@ -85,6 +88,7 @@ public sealed class TranscodeFixer : IFixer
         ILibraryManager libraryManager,
         IServerConfigurationManager serverConfig,
         IssueStore issues,
+        ProtectionService protection,
         ILogger<TranscodeFixer> logger)
     {
         _ffprobe = ffprobe;
@@ -97,6 +101,7 @@ public sealed class TranscodeFixer : IFixer
         _libraryManager = libraryManager;
         _serverConfig = serverConfig;
         _issues = issues;
+        _protection = protection;
         _logger = logger;
     }
 
@@ -209,6 +214,9 @@ public sealed class TranscodeFixer : IFixer
             .ToHashSet();
         var hasApprovedAudioCompanion = samePathQueued.Contains(IssueType.AudioLanguage);
         var hasApprovedSubtitleCompanion = samePathQueued.Contains(IssueType.SubtitleLanguage);
+        var item = issue.ItemId == Guid.Empty ? null : _libraryManager.GetItemById(issue.ItemId);
+        var retainedTracks = GetRetainedTracks(probe, config, targetContainer, item, hasApprovedAudioCompanion, hasApprovedSubtitleCompanion);
+        var removedTracks = probe.Streams!.Where(s => (s.CodecType is "audio" or "subtitle") && !retainedTracks.Contains(s)).Select(s => s.Index).ToArray();
 
         try
         {
@@ -217,7 +225,7 @@ public sealed class TranscodeFixer : IFixer
             string? error;
             if (hwEncoder is not null)
             {
-                var hwArgs = BuildArgs(issue.Path, tempPath, probe, video, config, needsDownscale, targetContainer, hwEncoder, vaapiDevice, hasApprovedAudioCompanion, hasApprovedSubtitleCompanion);
+                var hwArgs = BuildArgs(issue.Path, tempPath, probe, video, config, needsDownscale, targetContainer, hwEncoder, vaapiDevice, hasApprovedAudioCompanion, hasApprovedSubtitleCompanion, item);
                 error = await _ffmpeg.RunAsync(hwArgs, TranscodeTimeout, cancellationToken, progress, durationSeconds).ConfigureAwait(false);
                 if (error is not null)
                 {
@@ -227,13 +235,13 @@ public sealed class TranscodeFixer : IFixer
                         File.Delete(tempPath);
                     }
 
-                    var swArgs = BuildArgs(issue.Path, tempPath, probe, video, config, needsDownscale, targetContainer, null, null, hasApprovedAudioCompanion, hasApprovedSubtitleCompanion);
+                    var swArgs = BuildArgs(issue.Path, tempPath, probe, video, config, needsDownscale, targetContainer, null, null, hasApprovedAudioCompanion, hasApprovedSubtitleCompanion, item);
                     error = await _ffmpeg.RunAsync(swArgs, TranscodeTimeout, cancellationToken, progress, durationSeconds).ConfigureAwait(false);
                 }
             }
             else
             {
-                var args = BuildArgs(issue.Path, tempPath, probe, video, config, needsDownscale, targetContainer, null, null, hasApprovedAudioCompanion, hasApprovedSubtitleCompanion);
+                var args = BuildArgs(issue.Path, tempPath, probe, video, config, needsDownscale, targetContainer, null, null, hasApprovedAudioCompanion, hasApprovedSubtitleCompanion, item);
                 error = await _ffmpeg.RunAsync(args, TranscodeTimeout, cancellationToken, progress, durationSeconds).ConfigureAwait(false);
             }
 
@@ -248,22 +256,43 @@ public sealed class TranscodeFixer : IFixer
                 return FixResult.Fail(FixReason.VerificationFailed, "The re-encoded file failed verification; the original is untouched. Details: " + verifyError);
             }
 
+            var outputProbe = await _ffprobe.ProbeAsync(tempPath, cancellationToken).ConfigureAwait(false);
+            if (!TrackFixer.RetainedTracksMatch(probe, outputProbe, removedTracks, allowAudioCodecChange: true))
+            {
+                return FixResult.Fail(FixReason.VerificationFailed, "The re-encoded file did not preserve the expected audio and subtitle tracks; the original is untouched.");
+            }
+
             var newSize = new FileInfo(tempPath).Length;
             // Size gate applies only to Quality fixes — the whole point of Quality is disk reclaim,
             // so a re-encode that ends up bigger defeats the purpose. HeavyTranscode / FailedTranscode
             // are about direct-play compatibility: even a slightly larger HEVC output is a win because
             // future plays skip live transcoding. Cap the tolerance at 30% to guard against pathological
             // re-encodes (misconfigured bitrate, wrong preset) but otherwise accept the swap.
-            if (issue.Type == IssueType.Quality && newSize >= originalSize)
+            if (issue.Type == IssueType.Quality)
             {
-                // ponytail: FixReason.Unknown preserves current KeepQueued behavior. A dedicated
-                // NoImprovement reason (Failed/NoImprovement -> KeepQueued OR CompleteLegacy) can
-                // land later once the roadmap decides whether a repeatable no-win re-encode should
-                // stop retrying.
-                return FixResult.Fail(FixReason.Unknown, "The re-encoded file would be larger than the original, so the original was kept.");
-            }
+                var savings = originalSize - newSize;
+                var savingsPct = originalSize > 0 ? (savings * 100.0 / originalSize) : 0.0;
+                var minPct = Math.Clamp(config.QualityMinSavingsPercent, 0, 95);
+                var minBytes = Math.Max(0L, config.QualityMinSavingsBytes);
 
-            if (issue.Type != IssueType.Quality && newSize > originalSize * 1.3)
+                // Existing larger-output rejection (savings <= 0) plus the roadmap i-110-minimum-savings
+                // threshold check. Both use InsufficientSavings so the queue treats them as terminal:
+                // an identical re-encode on the next run would produce the same output.
+                if (savings <= 0)
+                {
+                    return FixResult.Fail(FixReason.InsufficientSavings, "The re-encoded file would not be smaller than the original, so the original was kept.");
+                }
+
+                if ((minPct > 0 && savingsPct < minPct) || (minBytes > 0 && savings < minBytes))
+                {
+                    var savedMb = savings / (1024.0 * 1024.0);
+                    var msg = "The re-encode saved only " + savedMb.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)
+                        + " MB (" + savingsPct.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)
+                        + "%) — under the configured minimum. Original kept. Adjust Settings → Files wasting space → Minimum savings if you want smaller wins accepted.";
+                    return FixResult.Fail(FixReason.InsufficientSavings, msg);
+                }
+            }
+            else if (newSize > originalSize * 1.3)
             {
                 var overheadPct = (int)((newSize - originalSize) * 100.0 / originalSize);
                 return FixResult.Fail(FixReason.Unknown, "The re-encoded file is " + overheadPct + "% larger than the original — something's off with the encode settings, so the original was kept. Try a lower bitrate ceiling or a different codec in Settings → Files wasting space.");
@@ -289,13 +318,22 @@ public sealed class TranscodeFixer : IFixer
                 verifyOutput: _ => Task.FromResult<string?>(null),
                 checkCurrentPolicy: () =>
                 {
-                    // 02-B ceiling closed: re-read config at commit time. If the user has
-                    // flipped Dry-run ON during the (potentially hours-long) encode, we must
-                    // NOT commit under the stale snapshot from the top of FixAsync.
                     var currentConfig = _configProvider.GetSnapshot();
-                    if (currentConfig.DryRun)
+                    var policy = EvaluateCommitPolicy(currentConfig, _protection, issue.Path, issue.Type);
+                    if (!policy.Allowed)
                     {
-                        return PolicyDecision.Refuse(FixReason.TypeDisabled);
+                        return policy;
+                    }
+
+                    var currentItem = issue.ItemId == Guid.Empty ? null : _libraryManager.GetItemById(issue.ItemId);
+                    var currentQueued = _issues.GetIssues(status: IssueStatus.Queued)
+                        .Where(i => string.Equals(i.Path, issue.Path, StringComparison.OrdinalIgnoreCase)).Select(i => i.Type).ToHashSet();
+                    var currentTracks = GetRetainedTracks(probe, currentConfig, targetContainer, currentItem, currentQueued.Contains(IssueType.AudioLanguage), currentQueued.Contains(IssueType.SubtitleLanguage));
+                    if (currentTracks.Any(s => removedTracks.Contains(s.Index))
+                        || (removedTracks.Any(i => probe.Streams!.Any(s => s.Index == i && s.CodecType == "audio")) && _protection.IsFixerBlocked(issue.Path, IssueType.AudioLanguage))
+                        || (removedTracks.Any(i => probe.Streams!.Any(s => s.Index == i && s.CodecType == "subtitle")) && _protection.IsFixerBlocked(issue.Path, IssueType.SubtitleLanguage)))
+                    {
+                        return PolicyDecision.Refuse(FixReason.ConsentChanged);
                     }
 
                     return PolicyDecision.Allow;
@@ -537,6 +575,32 @@ public sealed class TranscodeFixer : IFixer
         throw new ArgumentException("Unknown hardware encoder family: " + hardwareEncoder, nameof(hardwareEncoder));
     }
 
+    internal static List<FfprobeStreamInfo> GetRetainedTracks(
+        FfprobeData probe,
+        PluginConfiguration config,
+        string targetContainer,
+        BaseItem? item,
+        bool hasApprovedAudioCompanion,
+        bool hasApprovedSubtitleCompanion)
+    {
+        var removed = new HashSet<int>();
+        if (IsTypeAuthorized(config, IssueType.AudioLanguage)
+            && (config.AudioFixMode == FixMode.Automatic || hasApprovedAudioCompanion))
+        {
+            removed.UnionWith(TrackFixer.ComputeRemovableIndexes(probe, IssueType.AudioLanguage, config, item));
+        }
+
+        if (IsTypeAuthorized(config, IssueType.SubtitleLanguage)
+            && (config.SubtitleFixMode == FixMode.Automatic || hasApprovedSubtitleCompanion))
+        {
+            removed.UnionWith(TrackFixer.ComputeRemovableIndexes(probe, IssueType.SubtitleLanguage, config, item));
+        }
+
+        removed.UnionWith(TrackFixer.ComputeMuxerIncompatibleSubtitleIndexes(probe, targetContainer));
+        return probe.Streams!.Where(s => !removed.Contains(s.Index)
+            && (s.CodecType == "audio" || (s.CodecType == "subtitle" && targetContainer == "mkv"))).ToList();
+    }
+
     internal static List<string> BuildArgs(
         string inputPath,
         string tempPath,
@@ -548,7 +612,8 @@ public sealed class TranscodeFixer : IFixer
         string? hardwareEncoder,
         string? vaapiDevice,
         bool hasApprovedAudioCompanion = true,
-        bool hasApprovedSubtitleCompanion = true)
+        bool hasApprovedSubtitleCompanion = true,
+        BaseItem? item = null)
     {
         var encoder = hardwareEncoder ?? config.PreferredCodec.ToLowerInvariant() switch
         {
@@ -596,52 +661,15 @@ public sealed class TranscodeFixer : IFixer
 
         args.AddRange(["-i", inputPath, "-map", "0:" + video.Index.ToString(CultureInfo.InvariantCulture)]);
 
-        var audioStreams = probe.Streams!.Where(s => string.Equals(s.CodecType, "audio", StringComparison.OrdinalIgnoreCase)).ToList();
-        // Bug-pattern audit round 4 P-01 (2026-09-19): the pre-fix filter applied the language
-        // allow-list unconditionally, which meant a Quality re-encode also performed an
-        // AudioLanguage cleanup the user had explicitly turned Off / disabled / never approved.
-        // Approving a compat re-encode of one file silently mutated its unrelated language state.
-        // Gate the filter on per-type authorization: cleanup type not Off AND not on the per-
-        // fixer disable list. Same pattern as FixTask's queue-selection guard. Unauthorized =
-        // keep every audio track (subject only to muxer-compat handled elsewhere).
-        // 02-B: consent gate composes config-level `IsTypeAuthorized` with per-path companion
-        // approval — a `ManualApprove` mode + non-empty language allow-list is NOT sufficient
-        // consent; a same-path AudioLanguage issue must actually be queued for the incidental
-        // cleanup to run. `Automatic` mode is bulk-authorised and the flag is ignored.
-        var audioCleanupAllowed = IsTypeAuthorized(config, IssueType.AudioLanguage)
-            && (config.GetFixMode(IssueType.AudioLanguage) == FixMode.Automatic || hasApprovedAudioCompanion);
-        var keptAudio = audioCleanupAllowed && config.AllowedAudioLanguages.Length > 0
-            ? audioStreams.Where(s => LanguageHelper.IsAllowed(s.Language, config.AllowedAudioLanguages)).ToList()
-            : audioStreams;
-        if (keptAudio.Count == 0)
-        {
-            keptAudio = audioStreams;
-        }
-
-        foreach (var stream in keptAudio)
+        var retainedTracks = GetRetainedTracks(probe, config, targetContainer, item, hasApprovedAudioCompanion, hasApprovedSubtitleCompanion);
+        foreach (var stream in retainedTracks)
         {
             args.Add("-map");
             args.Add("0:" + stream.Index.ToString(CultureInfo.InvariantCulture));
         }
 
-        // Subtitles: copied for MKV; MP4 subtitle support is too patchy for a blind copy, so they are left out there.
         if (targetContainer == "mkv")
         {
-            var subs = probe.Streams!.Where(s => string.Equals(s.CodecType, "subtitle", StringComparison.OrdinalIgnoreCase)).ToList();
-            // Same P-01 gate as audio above — a Quality re-encode of an MKV must not perform an
-            // unauthorized SubtitleLanguage cleanup.
-            // 02-B: same composed consent gate as audio above.
-            var subtitleCleanupAllowed = IsTypeAuthorized(config, IssueType.SubtitleLanguage)
-                && (config.GetFixMode(IssueType.SubtitleLanguage) == FixMode.Automatic || hasApprovedSubtitleCompanion);
-            var keptSubs = subtitleCleanupAllowed && config.AllowedSubtitleLanguages.Length > 0
-                ? subs.Where(s => LanguageHelper.IsAllowed(s.Language, config.AllowedSubtitleLanguages)).ToList()
-                : subs;
-            foreach (var stream in keptSubs)
-            {
-                args.Add("-map");
-                args.Add("0:" + stream.Index.ToString(CultureInfo.InvariantCulture));
-            }
-
             args.AddRange(["-c:s", "copy"]);
         }
 
@@ -791,6 +819,32 @@ public sealed class TranscodeFixer : IFixer
     }
 
     /// <summary>
+    /// F-206 dry-run recheck + roadmap i-110-protected-media commit-time protection recheck,
+    /// packaged for testability. The lambda in <c>FixAsync</c> delegates here so the branch stays
+    /// unit-testable without invoking a full encode. Called at commit time by
+    /// <c>VerifiedReplacementService</c>; a Refuse aborts the swap and preserves the source.
+    /// </summary>
+    /// <param name="currentConfig">Fresh config snapshot taken at commit time (not the one captured at FixAsync start).</param>
+    /// <param name="protection">Never-modify service; consulted with the exact path + type the fixer is about to modify.</param>
+    /// <param name="path">The source file being replaced.</param>
+    /// <param name="type">The issue type driving the fix (Quality / HeavyTranscode / FailedTranscode).</param>
+    /// <returns>Allow when current settings and protection permit the fix; otherwise refuse.</returns>
+    internal static PolicyDecision EvaluateCommitPolicy(PluginConfiguration currentConfig, ProtectionService protection, string path, IssueType type)
+    {
+        if (currentConfig.DryRun || !IsTypeAuthorized(currentConfig, type))
+        {
+            return PolicyDecision.Refuse(FixReason.TypeDisabled);
+        }
+
+        if (protection.IsFixerBlocked(path, type))
+        {
+            return PolicyDecision.Refuse(FixReason.Protected);
+        }
+
+        return PolicyDecision.Allow;
+    }
+
+    /// <summary>
     /// P-01 gate helper: an incidental language-track cleanup during a Quality/HeavyTranscode/
     /// FailedTranscode re-encode requires the SAME per-type authorization as a standalone
     /// AudioLanguage or SubtitleLanguage fix. That means the type's <see cref="FixMode"/> must
@@ -804,7 +858,7 @@ public sealed class TranscodeFixer : IFixer
     /// <returns>True when the type is authorized to run and the caller may apply its filter.</returns>
     internal static bool IsTypeAuthorized(PluginConfiguration config, IssueType type)
     {
-        if (config.GetFixMode(type) == FixMode.Off)
+        if (config.GetFixMode(type) is FixMode.Off or FixMode.DetectOnly)
         {
             return false;
         }

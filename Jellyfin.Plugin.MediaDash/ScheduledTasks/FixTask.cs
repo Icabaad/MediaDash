@@ -388,6 +388,18 @@ public sealed class FixTask : IScheduledTask
         // idle/window gates and reaches this point regardless.
         if (queue.Count == 0)
         {
+            // "0 fixed" with no explanation is the exact bug pattern this branch used to produce
+            // when every queued item is scoped out by disabled libraries. Write a summary carrying
+            // the skip count so the Overview 'Last fix run' tile explains it instead of staying blank.
+            if (scopedOut > 0)
+            {
+                Plugin.LastFixRun = new Api.FixRunSummary
+                {
+                    FinishedAtUtc = DateTime.UtcNow,
+                    SkippedLibraryDisabled = scopedOut
+                };
+            }
+
             _logger.LogDebug("Skipping fix run: no queued issues to fix.");
             progress.Report(100);
             return;
@@ -439,6 +451,7 @@ public sealed class FixTask : IScheduledTask
         var attempted = 0;
         var succeeded = 0;
         var failed = 0;
+        var skipped = 0;
         var reasonCounts = new Dictionary<string, int>(StringComparer.Ordinal);
         // Subtitle-provider quotas (OpenSubtitles free tier: 5 downloads / 24 h) exhaust in a run
         // and hit the same wall on every remaining MissingSubtitles file. Track first detection,
@@ -559,7 +572,15 @@ public sealed class FixTask : IScheduledTask
             progress.Report(i * slot);
             // Synchronous IProgress: Progress<T> queues callbacks and can reorder reports, leading
             // to a jittery bar.
-            var itemProgress = new SynchronousProgress(fraction => progress.Report((i + Math.Clamp(fraction, 0, 1)) * slot));
+            var itemProgress = new SynchronousProgress(fraction =>
+            {
+                var clamped = Math.Clamp(fraction, 0, 1);
+                progress.Report((i + clamped) * slot);
+                // Also surface the per-file % to the dashboard so users see "encoding this file 45%"
+                // alongside the queue-wide "N of M". Only fixers with real per-file signal
+                // (TranscodeFixer → ffmpeg -progress) report a fraction; the rest never call this.
+                _runState.SetCurrentOperationProgress(RunRole.Fix, clamped);
+            });
 
             // Provider quota short-circuit: MissingSubtitleFixer emits Deferred/ProviderQuota when
             // OpenSubtitles' free-tier download limit is hit. Every remaining MissingSubtitles
@@ -599,8 +620,23 @@ public sealed class FixTask : IScheduledTask
             }
             else if (!execution.Result.Success)
             {
-                RecordFailure(execution.Result.Message);
-                _logger.LogWarning("Fix failed for {Path}: {Message}", primary.Path, execution.Result.Message);
+                // Distinguish real failures (Failed / Unspecified) from safe non-actions
+                // (Refused / NoChange / Deferred). Users read "N failed" as "N bugs";
+                // "hard precondition refused" or "already fine" isn't a bug — that goes
+                // into Skipped. Only Failed contributes TopFailureReason too, so a run
+                // full of destination collisions doesn't crowd out real error messages.
+                var outcome = execution.Result.Outcome;
+                if (outcome == Fixers.FixOutcome.Refused
+                    || outcome == Fixers.FixOutcome.NoChange
+                    || outcome == Fixers.FixOutcome.Deferred)
+                {
+                    skipped++;
+                }
+                else
+                {
+                    RecordFailure(execution.Result.Message); // increments `failed` + records reason bucket
+                    _logger.LogWarning("Fix failed for {Path}: {Message}", primary.Path, execution.Result.Message);
+                }
 
                 if (primary.Type == IssueType.MissingSubtitles && execution.Result.Reason == FixReason.ProviderQuota)
                 {
@@ -660,8 +696,10 @@ public sealed class FixTask : IScheduledTask
             Attempted = attempted,
             Succeeded = succeeded,
             Failed = failed,
+            Skipped = skipped,
             TopFailureReason = topReason?.Key,
-            TopFailureCount = topReason?.Value ?? 0
+            TopFailureCount = topReason?.Value ?? 0,
+            SkippedLibraryDisabled = scopedOut
         };
 
         // Opt-in analytics: month-to-date totals get pushed after every run so a mid-month opt-in

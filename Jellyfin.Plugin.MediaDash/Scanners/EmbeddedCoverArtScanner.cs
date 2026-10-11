@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Plugin.MediaDash.Data;
+using Jellyfin.Plugin.MediaDash.Fixers;
 using Jellyfin.Plugin.MediaDash.Probing;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
@@ -39,16 +40,19 @@ public sealed class EmbeddedCoverArtScanner : IScanner
     private readonly ILibraryManager _libraryManager;
     private readonly FfprobeService _ffprobe;
     private readonly ILogger<EmbeddedCoverArtScanner> _logger;
+    private readonly ProtectionService? _protection;
 
     /// <summary>Initializes a new instance of the <see cref="EmbeddedCoverArtScanner"/> class.</summary>
     /// <param name="libraryManager">Library manager — used to walk configured library roots.</param>
     /// <param name="ffprobe">The probe service — cheap because probe results are cached in the plugin DB.</param>
+    /// <param name="protection">Rules excluding protected files from analysis.</param>
     /// <param name="logger">The logger.</param>
-    public EmbeddedCoverArtScanner(ILibraryManager libraryManager, FfprobeService ffprobe, ILogger<EmbeddedCoverArtScanner> logger)
+    public EmbeddedCoverArtScanner(ILibraryManager libraryManager, FfprobeService ffprobe, ILogger<EmbeddedCoverArtScanner> logger, ProtectionService? protection = null)
     {
         _libraryManager = libraryManager;
         _ffprobe = ffprobe;
         _logger = logger;
+        _protection = protection;
     }
 
     /// <inheritdoc />
@@ -110,6 +114,11 @@ public sealed class EmbeddedCoverArtScanner : IScanner
             var folder = candidates[i];
             progress.Report(i * 100.0 / candidates.Count);
 
+            if (_protection?.IsScannerBlocked(folder, Type) == true || _protection?.IsAnyDescendantProtected(folder, Type, scanners: true) == true)
+            {
+                continue;
+            }
+
             var audioFiles = SafeListAudioFiles(folder);
             if (audioFiles.Count == 0)
             {
@@ -168,6 +177,11 @@ public sealed class EmbeddedCoverArtScanner : IScanner
     // Descend into subdirectories regardless (albums can be nested under artist folders).
     private void CollectCandidates(string dir, List<string> candidates, CancellationToken cancellationToken)
     {
+        if (_protection?.IsScannerBlocked(dir, Type) == true)
+        {
+            return;
+        }
+
         cancellationToken.ThrowIfCancellationRequested();
 
         IEnumerable<string> files;

@@ -272,6 +272,20 @@ public class MediaDashController : ControllerBase
 
         // Guard: path must be inside a configured library root. Same policy every mutating file op
         // uses — see FileBrowserController. Keeps us from recording issues against arbitrary disk paths.
+        try
+        {
+            if (!Path.IsPathFullyQualified(request.Path))
+            {
+                return BadRequest("An absolute file path is required.");
+            }
+
+            request.Path = Path.GetFullPath(request.Path);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return BadRequest("That file path is invalid.");
+        }
+
         if (!_libraryGuard.IsInsideLibrary(request.Path))
         {
             return StatusCode(StatusCodes.Status403Forbidden, "That path is outside your library folders.");
@@ -283,17 +297,27 @@ public class MediaDashController : ControllerBase
             return NotFound("Jellyfin doesn't have that file indexed — run a Jellyfin library scan first.");
         }
 
+        if (item.IsFolder)
+        {
+            return BadRequest("Select a file, rather than a folder.");
+        }
+
         var (issue, problem) = BuildManualIssue(request, item.Id);
         if (issue is null)
         {
             return BadRequest(problem);
         }
 
+        if (_protection.IsScannerBlocked(issue.Path, issue.Type) || _protection.IsFixerBlocked(issue.Path, issue.Type))
+        {
+            return Conflict("This file is protected. Remove its protection in Settings before adding it to Issues.");
+        }
+
         // Pass scannedPaths so ReplaceDetectedIssues scopes its DELETE to this single path.
         _issues.ReplaceDetectedIssues(issue.Type, new[] { issue }, scannedPaths: new[] { issue.Path });
 
         // Round-trip to read back the id (the single-item insert either wrote exactly one row or was
-        // suppressed by an existing Queued/Dismissed row — both are "accepted" from the user's view).
+        // suppressed by an existing Queued/Dismissed row).
         var existing = _issues.GetIssues(type: issue.Type, status: null);
         long id = 0;
         foreach (var row in existing)
@@ -303,6 +327,11 @@ public class MediaDashController : ControllerBase
                 id = row.Id;
                 break;
             }
+        }
+
+        if (id == 0)
+        {
+            return Conflict("This issue was dismissed. Restore it from the dismissed Issues list before adding it again.");
         }
 
         return StatusCode(StatusCodes.Status201Created, new { Id = id });
@@ -372,6 +401,11 @@ public class MediaDashController : ControllerBase
         switch (request.Type)
         {
             case ManualIssueType.Quality:
+                if (!MediaFormats.Video.Contains(Path.GetExtension(request.Path)) || MediaFormats.NonProbable.Contains(Path.GetExtension(request.Path)))
+                {
+                    return (null, "Re-encoding to shrink is available for video files only.");
+                }
+
                 return (new Data.Issue
                 {
                     Type = Data.IssueType.Quality,

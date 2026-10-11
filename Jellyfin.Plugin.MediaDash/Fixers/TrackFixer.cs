@@ -10,7 +10,9 @@ using Jellyfin.Plugin.MediaDash.Configuration;
 using Jellyfin.Plugin.MediaDash.Data;
 using Jellyfin.Plugin.MediaDash.Probing;
 using Jellyfin.Plugin.MediaDash.Scanners;
+using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Model.Entities;
 using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.MediaDash.Fixers;
@@ -134,6 +136,11 @@ public sealed class TrackFixer : IFixer
     private readonly VerifiedReplacementService _replacement;
     private readonly IPluginConfigurationProvider _configProvider;
     private readonly ILibraryMonitor _libraryMonitor;
+    private readonly ILibraryManager? _libraryManager;
+    // External audit P1 #4: commit-time protection check so a Never-modify rule added during
+    // a multi-hour remux aborts the swap. Nullable — the test ctors below don't inject it, and
+    // production DI auto-wires it via the primary ctor.
+    private readonly ProtectionService? _protection;
     private readonly ILogger<TrackFixer> _logger;
 
     /// <summary>
@@ -151,6 +158,8 @@ public sealed class TrackFixer : IFixer
     /// recheck so a dry-run flip mid-remux aborts the commit before touching the source.</param>
     /// <param name="libraryMonitor">Instance of the <see cref="ILibraryMonitor"/> interface.</param>
     /// <param name="logger">The logger.</param>
+    /// <param name="protection">Protection service for commit-time re-checks (external audit P1 #4); DI auto-wires it.</param>
+    /// <param name="libraryManager">Resolves current metadata and external subtitle languages.</param>
     public TrackFixer(
         FfprobeService ffprobe,
         FfmpegExecutor ffmpeg,
@@ -160,7 +169,9 @@ public sealed class TrackFixer : IFixer
         VerifiedReplacementService replacement,
         IPluginConfigurationProvider configProvider,
         ILibraryMonitor libraryMonitor,
-        ILogger<TrackFixer> logger)
+        ILogger<TrackFixer> logger,
+        ProtectionService? protection = null,
+        ILibraryManager? libraryManager = null)
     {
         _ffprobe = ffprobe;
         _ffmpeg = ffmpeg;
@@ -170,6 +181,8 @@ public sealed class TrackFixer : IFixer
         _replacement = replacement;
         _configProvider = configProvider;
         _libraryMonitor = libraryMonitor;
+        _libraryManager = libraryManager;
+        _protection = protection;
         _logger = logger;
     }
 
@@ -196,8 +209,9 @@ public sealed class TrackFixer : IFixer
             return FixResult.Fail(FixReason.ProbeUnavailable, "The file could not be analyzed; it may be broken.");
         }
 
-        var removeIndexes = ComputeRemovableIndexes(probe, issue.Type, config);
-        var externalFiles = issue.Type == IssueType.SubtitleLanguage ? GetExternalFiles(issue.DetailsJson) : [];
+        var item = issue.ItemId == Guid.Empty ? null : _libraryManager?.GetItemById(issue.ItemId);
+        var removeIndexes = ComputeRemovableIndexes(probe, issue.Type, config, item);
+        var externalFiles = issue.Type == IssueType.SubtitleLanguage ? GetCurrentExternalFiles(issue, item, probe, config) : [];
 
         if (removeIndexes.Count == 0 && externalFiles.Count == 0)
         {
@@ -225,9 +239,10 @@ public sealed class TrackFixer : IFixer
     /// <param name="audioIssue">The AudioLanguage issue.</param>
     /// <param name="subtitleIssue">The SubtitleLanguage issue on the same path.</param>
     /// <param name="progress">Progress reporter.</param>
+    /// <param name="isStillApproved">Rechecks both queued approvals before replacing the source.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>A single result covering both fixes.</returns>
-    public async Task<FixResult> FixCombinedAsync(Issue audioIssue, Issue subtitleIssue, IProgress<double>? progress, CancellationToken cancellationToken)
+    public async Task<FixResult> FixCombinedAsync(Issue audioIssue, Issue subtitleIssue, IProgress<double>? progress, Func<bool> isStillApproved, CancellationToken cancellationToken)
     {
         if (audioIssue.Type != IssueType.AudioLanguage || subtitleIssue.Type != IssueType.SubtitleLanguage)
         {
@@ -239,7 +254,13 @@ public sealed class TrackFixer : IFixer
             return FixResult.Refused(FixReason.InvalidCombinedRequest, "Combined pass requires both issues to point at the same file.");
         }
 
-        var config = Plugin.Instance!.Configuration;
+        var config = _configProvider.GetSnapshot();
+        var policy = EvaluateCombinedPolicy(audioIssue, subtitleIssue, config, isStillApproved);
+        if (!policy.Allowed)
+        {
+            return FixResult.Refused(policy.Reason, "Combined track cleanup is no longer authorized; the original is untouched.");
+        }
+
         if (!File.Exists(audioIssue.Path))
         {
             return FixResult.Fail(FixReason.SourceMissing, "The file no longer exists; re-scan to refresh the list.");
@@ -258,10 +279,11 @@ public sealed class TrackFixer : IFixer
 
         // Union of both categories' removeIndexes. Duplicates shouldn't happen (audio and subtitle
         // streams live in disjoint index ranges) but DE-dupe as belt-and-braces.
-        var audioRemoves = ComputeRemovableIndexes(probe, IssueType.AudioLanguage, config);
-        var subtitleRemoves = ComputeRemovableIndexes(probe, IssueType.SubtitleLanguage, config);
+        var item = audioIssue.ItemId == Guid.Empty ? null : _libraryManager?.GetItemById(audioIssue.ItemId);
+        var audioRemoves = ComputeRemovableIndexes(probe, IssueType.AudioLanguage, config, item);
+        var subtitleRemoves = ComputeRemovableIndexes(probe, IssueType.SubtitleLanguage, config, item);
         var removeIndexes = audioRemoves.Concat(subtitleRemoves).Distinct().ToList();
-        var externalFiles = GetExternalFiles(subtitleIssue.DetailsJson);
+        var externalFiles = GetCurrentExternalFiles(subtitleIssue, item, probe, config);
 
         if (removeIndexes.Count == 0 && externalFiles.Count == 0)
         {
@@ -286,7 +308,24 @@ public sealed class TrackFixer : IFixer
             subtitleRemoves.Count == 1 ? string.Empty : "s",
             externalFiles.Count > 0 ? " + " + externalFiles.Count + " external subtitle sidecar" + (externalFiles.Count == 1 ? string.Empty : "s") : string.Empty,
             disposal == DisposalMethod.RecycleBin ? " (originals recycled)" : " (originals deleted)");
-        return await RunTrackRemuxAsync(audioIssue, probe, removeIndexes, externalFiles, disposal, actionText, originalSize, config, progress, cancellationToken).ConfigureAwait(false);
+        return await RunTrackRemuxAsync(audioIssue, probe, removeIndexes, externalFiles, disposal, actionText, originalSize, config, progress, cancellationToken, subtitleIssue, isStillApproved).ConfigureAwait(false);
+    }
+
+    internal PolicyDecision EvaluateCombinedPolicy(Issue audio, Issue subtitle, PluginConfiguration config, Func<bool> isStillApproved)
+    {
+        if (!isStillApproved())
+        {
+            return PolicyDecision.Refuse(FixReason.ConsentChanged);
+        }
+
+        if (config.DryRun || !TranscodeFixer.IsTypeAuthorized(config, audio.Type) || !TranscodeFixer.IsTypeAuthorized(config, subtitle.Type))
+        {
+            return PolicyDecision.Refuse(FixReason.TypeDisabled);
+        }
+
+        return _protection?.IsFixerBlocked(audio.Path, audio.Type) == true || _protection?.IsFixerBlocked(subtitle.Path, subtitle.Type) == true
+            ? PolicyDecision.Refuse(FixReason.Protected)
+            : PolicyDecision.Allow;
     }
 
     private async Task<FixResult> RunTrackRemuxAsync(
@@ -299,7 +338,9 @@ public sealed class TrackFixer : IFixer
         long originalSize,
         PluginConfiguration config,
         IProgress<double>? progress,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Issue? combinedSubtitle = null,
+        Func<bool>? isStillApproved = null)
     {
         if (config.DryRun)
         {
@@ -308,6 +349,7 @@ public sealed class TrackFixer : IFixer
 
         string? recyclePath = null;
         long freed = 0;
+        var languageRemoves = removeIndexes.ToArray();
 
         var ext = Path.GetExtension(issue.Path).TrimStart('.');
 
@@ -417,6 +459,12 @@ public sealed class TrackFixer : IFixer
                     return FixResult.Fail(FixReason.VerificationFailed, "The rebuilt file failed verification; the original is untouched. Details: " + verifyError);
                 }
 
+                var outputProbe = await _ffprobe.ProbeAsync(tempPath, cancellationToken).ConfigureAwait(false);
+                if (!RetainedTracksMatch(probe, outputProbe, removeIndexes))
+                {
+                    return FixResult.Fail(FixReason.VerificationFailed, "The rebuilt file did not preserve the expected audio and subtitle tracks; the original is untouched.");
+                }
+
                 // 03-C: hand the verified remux to VerifiedReplacementService. Same-path swap
                 // (destination == source) — TrackFixer only ever rebuilds in place. External
                 // sidecar loop below is a separate effect (own `AdditionalRecycled` bookkeeping).
@@ -434,10 +482,40 @@ public sealed class TrackFixer : IFixer
                     verifyOutput: _ => Task.FromResult<string?>(null),
                     checkCurrentPolicy: () =>
                     {
+                        // External audit P1 #4: previously this only checked DryRun. Honour the
+                        // full policy stack — a protection rule or fixer-off switch flipped during
+                        // a multi-hour remux must now abort the swap.
                         var currentConfig = _configProvider.GetSnapshot();
+                        if (combinedSubtitle is not null)
+                        {
+                            var combinedPolicy = EvaluateCombinedPolicy(issue, combinedSubtitle, currentConfig, isStillApproved!);
+                            if (!combinedPolicy.Allowed)
+                            {
+                                return combinedPolicy;
+                            }
+                        }
+
                         if (currentConfig.DryRun)
                         {
                             return PolicyDecision.Refuse(FixReason.TypeDisabled);
+                        }
+
+                        if (!TranscodeFixer.IsTypeAuthorized(currentConfig, issue.Type))
+                        {
+                            return PolicyDecision.Refuse(FixReason.TypeDisabled);
+                        }
+
+                        if (_protection is not null && _protection.IsFixerBlocked(issue.Path, issue.Type))
+                        {
+                            return PolicyDecision.Refuse(FixReason.Protected);
+                        }
+
+                        var currentItem = issue.ItemId == Guid.Empty ? null : _libraryManager?.GetItemById(issue.ItemId);
+                        var stillRemovable = ComputeRemovableIndexes(probe, IssueType.AudioLanguage, currentConfig, currentItem)
+                            .Concat(ComputeRemovableIndexes(probe, IssueType.SubtitleLanguage, currentConfig, currentItem)).ToHashSet();
+                        if (languageRemoves.Any(i => !stillRemovable.Contains(i)))
+                        {
+                            return PolicyDecision.Refuse(FixReason.ConsentChanged);
                         }
 
                         return PolicyDecision.Allow;
@@ -491,6 +569,17 @@ public sealed class TrackFixer : IFixer
         var additionalRecycled = new List<RecycledSidecar>();
         foreach (var externalFile in externalFiles)
         {
+            var currentConfig = _configProvider.GetSnapshot();
+            var currentItem = issue.ItemId == Guid.Empty ? null : _libraryManager?.GetItemById(issue.ItemId);
+            if (currentConfig.DryRun || !TranscodeFixer.IsTypeAuthorized(currentConfig, IssueType.SubtitleLanguage)
+                || (combinedSubtitle is not null && !EvaluateCombinedPolicy(issue, combinedSubtitle, currentConfig, isStillApproved!).Allowed)
+                || !GetCurrentExternalFiles(issue, currentItem, probe, currentConfig, externalFiles).Contains(externalFile)
+                || (_protection is not null && (_protection.IsFixerBlocked(issue.Path, IssueType.SubtitleLanguage)
+                    || _protection.IsFixerBlocked(externalFile, IssueType.SubtitleLanguage))))
+            {
+                continue;
+            }
+
             // Defence-in-depth: refuse to touch the video path itself. If a stale DetailsJson (written by
             // an older scanner build) lists the video as an external sidecar, we'd otherwise recycle the
             // freshly-remuxed video and credit its size to freed.
@@ -548,24 +637,61 @@ public sealed class TrackFixer : IFixer
         };
     }
 
-    internal static List<int> ComputeRemovableIndexes(FfprobeData probe, IssueType type, PluginConfiguration config)
+    internal static bool RetainedTracksMatch(FfprobeData source, FfprobeData? output, IReadOnlyCollection<int> removed, bool allowAudioCodecChange = false)
     {
+        if (output?.Streams is null || output.Error is not null)
+        {
+            return false;
+        }
+
+        var expected = source.Streams!.Where(s => !removed.Contains(s.Index));
+        IEnumerable<(string?, string?, string, bool, bool)> Tracks(IEnumerable<FfprobeStreamInfo> streams)
+            => streams.Where(s => s.CodecType is "audio" or "subtitle")
+                .Select(s => (s.CodecType, allowAudioCodecChange && s.CodecType == "audio" ? null : s.CodecName, LanguageHelper.Normalize(s.Language), s.IsOriginal, s.IsHearingImpaired));
+        return Tracks(expected).SequenceEqual(Tracks(output.Streams));
+    }
+
+    private static List<string> GetCurrentExternalFiles(Issue issue, BaseItem? item, FfprobeData probe, PluginConfiguration config, IReadOnlyList<string>? plannedFiles = null)
+    {
+        var allowed = LanguageHelper.ResolveLanguages(config.AllowedSubtitleLanguages, item, probe);
+        if (item is null || !string.Equals(item.Path, issue.Path, StringComparison.OrdinalIgnoreCase) || allowed is null || allowed.Length == 0)
+        {
+            return [];
+        }
+
+        var candidates = (plannedFiles ?? GetExternalFiles(issue.DetailsJson)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return item.GetMediaStreams()
+            .Where(s => s.Type == MediaStreamType.Subtitle && s.IsExternal && !string.IsNullOrEmpty(s.Path)
+                && candidates.Contains(s.Path) && !IsSelfReferentialSubtitle(s.Path, issue.Path)
+                && !LanguageHelper.IsAllowed(s.Language, allowed) && !(config.SubtitleHearingImpairedMode && s.IsHearingImpaired))
+            .Select(s => s.Path!).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    internal static List<int> ComputeRemovableIndexes(FfprobeData probe, IssueType type, PluginConfiguration config, BaseItem? item = null)
+    {
+        var allowed = LanguageHelper.ResolveLanguages(type == IssueType.AudioLanguage ? config.AllowedAudioLanguages : config.AllowedSubtitleLanguages, item, probe);
+        if (allowed is null || allowed.Length == 0 || probe.Streams is null)
+        {
+            return [];
+        }
+
         if (type == IssueType.AudioLanguage)
         {
             var audio = probe.Streams!.Where(s => string.Equals(s.CodecType, "audio", StringComparison.OrdinalIgnoreCase)).ToList();
-            var keep = audio.Where(t => LanguageHelper.IsAllowed(t.Language, config.AllowedAudioLanguages)).ToList();
+            var keep = audio.Where(t => LanguageHelper.IsAllowed(t.Language, allowed)).ToList();
             if (audio.Count <= 1 || keep.Count == 0)
             {
                 // Safety invariant: never remove the last audio track or all allowed tracks.
                 return [];
             }
 
-            return audio.Where(t => !LanguageHelper.IsAllowed(t.Language, config.AllowedAudioLanguages)).Select(t => t.Index).ToList();
+            return audio.Where(t => !LanguageHelper.IsAllowed(t.Language, allowed)).Select(t => t.Index).ToList();
         }
 
         return probe.Streams!
             .Where(s => string.Equals(s.CodecType, "subtitle", StringComparison.OrdinalIgnoreCase)
-                && !LanguageHelper.IsAllowed(s.Language, config.AllowedSubtitleLanguages))
+                && !LanguageHelper.IsAllowed(s.Language, allowed)
+                && !(config.SubtitleHearingImpairedMode && s.IsHearingImpaired))
             .Select(s => s.Index)
             .ToList();
     }
@@ -637,9 +763,17 @@ public sealed class TrackFixer : IFixer
 
         if (MkvFamilyExtensions.Contains(normalized))
         {
+            // MEDIA-01 / #75: a subtitle stream whose codec_name ffprobe can't classify (e.g.
+            // Matroska CodecID S_TEXT/WEBVTT, which FFmpeg's Matroska demuxer doesn't tag — only
+            // D_WEBVTT/* is recognised) renders as `codec_name = ""`. Previously that empty value
+            // slipped past the small blacklist and the Matroska muxer aborted the whole remux with
+            // "Subtitle codec none (0) is not supported." Treat null/empty codec names as unknown
+            // and therefore unsafe to copy — same "safer to drop an unclassifiable stream" rule
+            // the MP4 whitelist already enforces by construction.
             return probe.Streams
                 .Where(s => string.Equals(s.CodecType, "subtitle", StringComparison.OrdinalIgnoreCase)
-                    && MkvIncompatibleSubtitleCodecs.Contains(s.CodecName ?? string.Empty))
+                    && (string.IsNullOrWhiteSpace(s.CodecName)
+                        || MkvIncompatibleSubtitleCodecs.Contains(s.CodecName!)))
                 .ToList();
         }
 

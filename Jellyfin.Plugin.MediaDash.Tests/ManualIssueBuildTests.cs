@@ -10,6 +10,19 @@ public sealed class ManualIssueBuildTests
 {
     private static readonly Guid ItemId = Guid.Parse("11111111-2222-3333-4444-555555555555");
 
+    [Theory]
+    [InlineData("/lib/book.mobi")]
+    [InlineData("/lib/song.mp3")]
+    [InlineData("/lib/movie.strm")]
+    [InlineData("/lib/disc.iso")]
+    public void Build_Quality_RejectsFilesThatCannotBeReencoded(string path)
+    {
+        var (issue, problem) = MediaDashController.BuildManualIssue(
+            new ManualIssueRequest { Path = path, Type = ManualIssueType.Quality }, ItemId);
+        Assert.Null(issue);
+        Assert.NotNull(problem);
+    }
+
     [Fact]
     public void Build_Quality_SetsPathTypeAndEmptyDetails()
     {

@@ -1,5 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+using Jellyfin.Plugin.MediaDash.Probing;
+using MediaBrowser.Controller.Entities;
 
 namespace Jellyfin.Plugin.MediaDash.Scanners;
 
@@ -8,6 +12,14 @@ namespace Jellyfin.Plugin.MediaDash.Scanners;
 /// </summary>
 public static class LanguageHelper
 {
+    /// <summary>
+    /// Sentinel entry used in <see cref="Configuration.PluginConfiguration.AllowedAudioLanguages"/> and
+    /// <see cref="Configuration.PluginConfiguration.AllowedSubtitleLanguages"/> that means "preserve the
+    /// item's original language". Resolved from inherited metadata and flagged original audio.
+    /// This is a picker value, not a provider language code.
+    /// </summary>
+    public const string OriginalSentinel = "orig";
+
     private static readonly Dictionary<string, string> BibliographicToTerminological = new(StringComparer.OrdinalIgnoreCase)
     {
         ["alb"] = "sqi",
@@ -83,6 +95,42 @@ public static class LanguageHelper
         new(StringComparer.OrdinalIgnoreCase) { "fas", "pes", "prs" }
     ];
 
+    /// <summary>Expands Original to real languages. Null means identity is unknown: skip removal and searches.</summary>
+    /// <param name="selected">Selected language codes.</param>
+    /// <param name="item">The current library item.</param>
+    /// <param name="probe">The current file probe.</param>
+    /// <returns>Resolved language codes, or null when original identity is unavailable.</returns>
+    public static string[]? ResolveLanguages(IReadOnlyList<string> selected, BaseItem? item, FfprobeData? probe)
+    {
+        var languages = selected.Where(s => !WantsOriginal([s])).Select(Normalize).Distinct().ToList();
+        if (!WantsOriginal(selected))
+        {
+            return languages.ToArray();
+        }
+
+        string? metadata = null;
+        if (item is not null)
+        {
+            // Jellyfin 10.11 lacks this API; reflection keeps newer inherited metadata optional.
+            try
+            {
+                metadata = item.GetType().GetMethod("GetInheritedOriginalLanguage", Type.EmptyTypes)?.Invoke(item, null) as string
+                    ?? item.GetType().GetProperty("OriginalLanguage")?.GetValue(item) as string;
+            }
+            catch (TargetInvocationException)
+            {
+                // Unavailable parent metadata is no evidence that the original can be removed.
+            }
+        }
+
+        var originals = (probe?.Streams ?? [])
+            .Where(s => string.Equals(s.CodecType, "audio", StringComparison.OrdinalIgnoreCase) && s.IsOriginal)
+            .Select(s => Normalize(s.Language)).Append(Normalize(metadata))
+            .Where(s => s.Length == 3 && s.All(c => c is >= 'a' and <= 'z') && s is not "und" and not "mul" and not "zxx")
+            .Distinct().ToArray();
+        return originals.Length == 0 ? null : languages.Concat(originals).Distinct().ToArray();
+    }
+
     /// <summary>
     /// Normalizes a language tag to a lowercase ISO 639-2/T code. Null, empty and unknown map to "und".
     /// </summary>
@@ -148,6 +196,24 @@ public static class LanguageHelper
             }
 
             if (SameEquivalenceGroup(allowedNorm, normalized))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Returns true when the allowed list opts in to preserving the item's original-language track.
+    /// </summary>
+    /// <param name="allowed">The allowed list from configuration.</param>
+    /// <returns>True when the sentinel is present.</returns>
+    public static bool WantsOriginal(IReadOnlyList<string> allowed)
+    {
+        foreach (var entry in allowed)
+        {
+            if (string.Equals(entry?.Trim(), OriginalSentinel, StringComparison.OrdinalIgnoreCase))
             {
                 return true;
             }

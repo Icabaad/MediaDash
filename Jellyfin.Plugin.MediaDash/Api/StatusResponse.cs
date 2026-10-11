@@ -50,9 +50,19 @@ public sealed class StatusResponse
     public long TotalDiskBytes { get; set; }
 
     /// <summary>
-    /// Gets or sets when issues were last detected (UTC).
+    /// Gets or sets when issues were last detected (UTC). Derived from the newest open-issue
+    /// detection timestamp — can be null on a clean library, and lags scan completion when the
+    /// scan found no issues or every finding was dismissed.
     /// </summary>
     public DateTime? LastScanUtc { get; set; }
+
+    /// <summary>
+    /// Gets or sets when the most recent scan completed successfully (UTC). Persisted at the
+    /// tail of ScanTask.ExecuteScanBodyAsync and read via the plugin_state key
+    /// "LastScanCompletedUtc". Separate from <see cref="LastScanUtc"/> so a successful scan
+    /// against a clean library still reports a recent scan (UI-15).
+    /// </summary>
+    public DateTime? LastScanCompletedUtc { get; set; }
 
     /// <summary>
     /// Gets or sets the total bytes reclaimable across all open issues.
@@ -150,6 +160,9 @@ public sealed class StatusResponse
 
     /// <summary>Gets or sets a human-readable reason the current fix run is paused, or null when the run is not paused.</summary>
     public string? FixPauseReason { get; set; }
+
+    /// <summary>Gets or sets the fraction (0..1) of the current file's own work — e.g. 0.45 while ffmpeg is 45% through a transcode. Null when the current fixer doesn't report per-file progress.</summary>
+    public double? CurrentOperationProgress { get; set; }
 
     /// <summary>Gets or sets the current list of detected redownload / restore cases (see <see cref="RedownloadDetector"/>).</summary>
     public IReadOnlyList<RedownloadWarning> RedownloadWarnings { get; set; } = Array.Empty<RedownloadWarning>();

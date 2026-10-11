@@ -7,6 +7,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Plugin.MediaDash.Data;
+using Jellyfin.Plugin.MediaDash.Fixers;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
@@ -42,18 +43,21 @@ public sealed class TrickplayOptimizeScanner : IScanner
     private readonly ILibraryManager _libraryManager;
     private readonly Data.HistoryStore _history;
     private readonly ILogger<TrickplayOptimizeScanner> _logger;
+    private readonly ProtectionService? _protection;
 
     /// <summary>Initializes a new instance of the <see cref="TrickplayOptimizeScanner"/> class.</summary>
     /// <param name="appPaths">Jellyfin's application paths (used to locate the trickplay data dir).</param>
     /// <param name="libraryManager">Used to resolve trickplay-folder GUIDs back to item names for the Issue label.</param>
     /// <param name="history">History-table store (05-C.3), queried for the last-successful-fix timestamp per trickplay folder — used as a rescan cutoff so sprites the fixer legitimately couldn't shrink don't re-flag every session.</param>
+    /// <param name="protection">Rules excluding protected paths from analysis.</param>
     /// <param name="logger">The logger.</param>
-    public TrickplayOptimizeScanner(IApplicationPaths appPaths, ILibraryManager libraryManager, Data.HistoryStore history, ILogger<TrickplayOptimizeScanner> logger)
+    public TrickplayOptimizeScanner(IApplicationPaths appPaths, ILibraryManager libraryManager, Data.HistoryStore history, ILogger<TrickplayOptimizeScanner> logger, ProtectionService? protection = null)
     {
         _appPaths = appPaths;
         _libraryManager = libraryManager;
         _history = history;
         _logger = logger;
+        _protection = protection;
     }
 
     /// <inheritdoc />
@@ -126,6 +130,11 @@ public sealed class TrickplayOptimizeScanner : IScanner
 
         void TryAddIssue(string dir, Guid itemId, string displayName)
         {
+            if (_protection?.IsScannerBlocked(dir, Type) == true || _protection?.IsAnyDescendantProtected(dir, Type, scanners: true) == true)
+            {
+                return;
+            }
+
             var cutoff = _history.GetLastSuccessfulFixUtc(IssueType.LargeTrickplay, dir);
             var (jpgCount, jpgBytes) = MeasureConvertibleJpgs(dir, cutoff);
             if (jpgCount == 0 || jpgBytes < minBytes)

@@ -60,6 +60,7 @@ public class FileBrowserController : ControllerBase
     private readonly ILibraryManager _libraryManager;
     private readonly IApplicationPaths _appPaths;
     private readonly Data.HistoryStore _history;
+    private readonly ProtectionService _protection;
     private readonly ILogger<FileBrowserController> _logger;
 
     /// <summary>
@@ -71,8 +72,9 @@ public class FileBrowserController : ControllerBase
     /// <param name="libraryManager">Instance of the <see cref="ILibraryManager"/> interface.</param>
     /// <param name="appPaths">Instance of the <see cref="IApplicationPaths"/> interface; used to locate the Jellyfin log directory for the read-only shortcut.</param>
     /// <param name="history">History-table store (05-C.3); used to record a history row per manual delete so the Recycle bin tab labels the entry correctly.</param>
+    /// <param name="protection">Never-modify protection service (roadmap i-110-protected-media); refuses Delete for paths under a rule that masks ManualDelete.</param>
     /// <param name="logger">Logger.</param>
-    public FileBrowserController(LibraryGuard guard, RecycleBin recycleBin, ILibraryMonitor libraryMonitor, ILibraryManager libraryManager, IApplicationPaths appPaths, Data.HistoryStore history, ILogger<FileBrowserController> logger)
+    public FileBrowserController(LibraryGuard guard, RecycleBin recycleBin, ILibraryMonitor libraryMonitor, ILibraryManager libraryManager, IApplicationPaths appPaths, Data.HistoryStore history, ProtectionService protection, ILogger<FileBrowserController> logger)
     {
         _guard = guard;
         _recycleBin = recycleBin;
@@ -80,6 +82,7 @@ public class FileBrowserController : ControllerBase
         _libraryManager = libraryManager;
         _appPaths = appPaths;
         _history = history;
+        _protection = protection;
         _logger = logger;
     }
 
@@ -670,6 +673,25 @@ public class FileBrowserController : ControllerBase
             return forbid;
         }
 
+        // Roadmap i-110-protected-media: refuse manual deletes for paths under a Never-modify rule
+        // that masks ManualDelete. Library containment alone is not enough — a protected folder
+        // sits inside a library. Directory deletes are refused too: any file inside the tree would
+        // be blocked by a scanner rule, and MoveToBin recycles the whole tree in one operation.
+        if (_protection.IsFixerBlocked(full, Data.IssueType.ManualDelete))
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new { Error = "Path is protected by a 'Never modify' rule; remove the rule to allow deletion." });
+        }
+
+        // External audit P1 #2: when the target IS a directory, the parent-only check misses rules
+        // whose protected root sits BELOW the target. Deleting /lib/show would otherwise recycle
+        // /lib/show/season3 even if a rule explicitly protects it. Walk the ruleset once more
+        // asking "does any rule's root sit under this path."
+        if (System.IO.Directory.Exists(full)
+            && _protection.IsAnyDescendantProtected(full, Data.IssueType.ManualDelete))
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new { Error = "This folder contains a protected sub-folder or library; remove the rule or delete the protected portion first." });
+        }
+
         string binPath;
         long size = 0;
         try
@@ -1065,6 +1087,17 @@ public class FileBrowserController : ControllerBase
 
     internal static void CrossDeviceMove(string source, string target, bool sourceIsDir)
     {
+        // External audit P1 #1: directory copy intentionally skips reparse points (CopyDirectory's
+        // enumOpts) to defend against symlink cycles. The move path then deletes the source
+        // regardless, so every link in the tree is silently lost. Refuse the operation when the
+        // source tree contains any reparse point — the caller gets a clear 400/409 instead of a
+        // silent data mutation. Legitimate "move everything" workflows should resolve or remove
+        // the links first.
+        if (sourceIsDir && HasReparsePointBelow(source))
+        {
+            throw new IOException("Cross-device move refused: the source folder contains symlinks or junctions, which the move cannot preserve. Resolve or remove the links and retry.");
+        }
+
         // Copy under a marker suffix first — if we die mid-copy, the partial payload is obvious and never
         // sits under the final name. Only after the copy verifies do we rename → delete-source.
         // Review P1-2: the staging suffix carries a per-operation GUID so two concurrent moves (or
@@ -1079,6 +1112,23 @@ public class FileBrowserController : ControllerBase
             if (sourceIsDir)
             {
                 CopyDirectory(source, staging, preserveTimestamps: true);
+                // External audit P1 #1: inventory compare before promoting + deleting source so
+                // a race (file created mid-walk, permissions bump, mount hiccup) doesn't let an
+                // uncopied entry get deleted when the source goes away. File count and total
+                // byte count are a cheap but strict check for structural parity across the pair.
+                var sourceInventory = GatherInventory(source);
+                var stagedInventory = GatherInventory(staging);
+                if (sourceInventory.Files != stagedInventory.Files
+                    || sourceInventory.Bytes != stagedInventory.Bytes)
+                {
+                    throw new IOException(string.Format(
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        "Cross-device move refused: directory copy did not preserve the source inventory ({0} files / {1} bytes → {2} files / {3} bytes). Source is untouched.",
+                        sourceInventory.Files,
+                        sourceInventory.Bytes,
+                        stagedInventory.Files,
+                        stagedInventory.Bytes));
+                }
             }
             else
             {
@@ -1137,5 +1187,77 @@ public class FileBrowserController : ControllerBase
 
             throw;
         }
+    }
+
+    // External audit P1 #1: walk the source tree looking for any reparse point. We treat any
+    // link (symlink, NTFS junction, mount point) as a refusal reason — CopyDirectory's
+    // AttributesToSkip = ReparsePoint would silently omit them from the staged copy, and the
+    // subsequent recursive source delete would then destroy the link's target or the link row
+    // itself without any record of what was there.
+    private static bool HasReparsePointBelow(string root)
+    {
+        try
+        {
+            var rootInfo = new DirectoryInfo(root);
+            if ((rootInfo.Attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                return true;
+            }
+
+            // Only enumerate once; the loop short-circuits on first hit.
+            var opts = new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = 0, IgnoreInaccessible = false };
+            foreach (var dir in Directory.EnumerateDirectories(root, "*", opts))
+            {
+                var attrs = new DirectoryInfo(dir).Attributes;
+                if ((attrs & FileAttributes.ReparsePoint) != 0)
+                {
+                    return true;
+                }
+            }
+
+            foreach (var file in Directory.EnumerateFiles(root, "*", opts))
+            {
+                var attrs = new FileInfo(file).Attributes;
+                if ((attrs & FileAttributes.ReparsePoint) != 0)
+                {
+                    return true;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // On inability to walk, bias conservatively — refuse the move. Better a false refusal
+            // than a copy-and-delete against an un-inspectable tree.
+            return true;
+        }
+
+        return false;
+    }
+
+    // Cheap inventory for cross-device move verification: total file count + total size. We
+    // deliberately skip reparse points on both sides so the comparison is apples-to-apples with
+    // what CopyDirectory actually produces. HasReparsePointBelow has already refused the move
+    // if any link exists; this check catches races (file appeared between walk and copy) and
+    // partial-filesystem failures (one subdir unreadable on destination side).
+    private static (long Files, long Bytes) GatherInventory(string root)
+    {
+        var opts = new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint, IgnoreInaccessible = false };
+        long count = 0;
+        long bytes = 0;
+        foreach (var file in Directory.EnumerateFiles(root, "*", opts))
+        {
+            count++;
+            try
+            {
+                bytes += new FileInfo(file).Length;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Treat unreadable file as a mismatch — pretend its size is -1 so parity cannot hold.
+                bytes += -1;
+            }
+        }
+
+        return (count, bytes);
     }
 }

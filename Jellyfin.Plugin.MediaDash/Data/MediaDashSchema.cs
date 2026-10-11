@@ -26,7 +26,20 @@ internal static class MediaDashSchema
     //     (2026-09-22, plan §05-B). Replaces the `history.restored = 1` claim pattern that could
     //     not distinguish "restore in progress" from "restore completed" and had no owner token
     //     for release. history.restored still carries the completion signal for legacy readers.
-    public const int Version = 7;
+    // v8: protection_rules table for persistent "Never modify" folder/library protection
+    //     (roadmap i-110-protected-media). Enforced by ProtectionService at scan-emit and
+    //     fix-execute time. Empty on upgrade.
+    // v9: history.saved_bytes column persists FixResult.SavedBytes for Playability repair rows
+    //     (previously the property existed on FixResult + HistoryEntry but was never written).
+    //     Feeds Api.RepairSummary aggregations for the Overview "Broken files repaired" panel.
+    //     Historical repair rows keep 0 — new repairs from this build onwards carry the
+    //     pre-repair file size, which the UI footer discloses as "bytes counted from N onwards".
+    // v10: MEDIA-02 / issue #76 — DecodeCheckAsync's default stream selection picked attached
+    //     cover-art pictures on audio files (FLAC + JPEG embedded cover) and reported them as
+    //     "truncated at 0s". Cached verdicts from pre-fix runs survive the upgrade on unchanged
+    //     files (cache key is path+size+mtime); purge decode_cache once so corrected detection
+    //     doesn't re-use the stale false-positive strings.
+    public const int Version = 10;
 
     // Sentinel stored in restored_paths.type when the restore came from a manifest-only bin entry
     // (RecycleBin/Items/Restore). We don't know which IssueType triggered the original recycle in
@@ -87,6 +100,14 @@ internal static class MediaDashSchema
                 reason TEXT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS interleave_cache (
+                path TEXT PRIMARY KEY,
+                size INTEGER NOT NULL,
+                mtime_utc INTEGER NOT NULL,
+                checked_at_utc INTEGER NOT NULL,
+                offset_seconds REAL NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS file_hashes (
                 path TEXT NOT NULL,
                 size INTEGER NOT NULL,
@@ -107,7 +128,8 @@ internal static class MediaDashSchema
                 dry_run INTEGER NOT NULL DEFAULT 0,
                 restored INTEGER NOT NULL DEFAULT 0,
                 success INTEGER NOT NULL DEFAULT 1,
-                acknowledged INTEGER NOT NULL DEFAULT 0
+                acknowledged INTEGER NOT NULL DEFAULT 0,
+                saved_bytes INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS diagnostics (
@@ -144,6 +166,16 @@ internal static class MediaDashSchema
                 detail TEXT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_restore_operations_state ON restore_operations(state);
+
+            CREATE TABLE IF NOT EXISTS protection_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL,
+                target TEXT NOT NULL,
+                scanners_mask TEXT NOT NULL DEFAULT '',
+                fixers_mask TEXT NOT NULL DEFAULT '',
+                note TEXT NOT NULL DEFAULT '',
+                created_at_utc INTEGER NOT NULL
+            );
             """;
         cmd.ExecuteNonQuery();
     }
@@ -268,6 +300,58 @@ internal static class MediaDashSchema
                 CREATE INDEX IF NOT EXISTS idx_restore_operations_state ON restore_operations(state);
                 """;
             create.ExecuteNonQuery();
+        }
+
+        if (current < 8)
+        {
+            // protection_rules powers the "Never modify" folder/library gate. Fresh install already
+            // got the table via CreateTables above; pre-v8 installs get it here. Empty on upgrade.
+            using var create = connection.CreateCommand();
+            create.CommandText = """
+                CREATE TABLE IF NOT EXISTS protection_rules (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind TEXT NOT NULL,
+                    target TEXT NOT NULL,
+                    scanners_mask TEXT NOT NULL DEFAULT '',
+                    fixers_mask TEXT NOT NULL DEFAULT '',
+                    note TEXT NOT NULL DEFAULT '',
+                    created_at_utc INTEGER NOT NULL
+                );
+                """;
+            create.ExecuteNonQuery();
+        }
+
+        if (current < 9)
+        {
+            // saved_bytes persists FixResult.SavedBytes on history rows so the Playability
+            // repair Overview panel can sum "bytes rescued from deletion" per rung.
+            // FixResult + HistoryEntry already carried the SavedBytes property; only the
+            // DB persistence was missing. Historical rows keep 0 by default.
+            if (!HasColumn(connection, "history", "saved_bytes", StringComparison.OrdinalIgnoreCase))
+            {
+                using var addColumn = connection.CreateCommand();
+                addColumn.CommandText = "ALTER TABLE history ADD COLUMN saved_bytes INTEGER NOT NULL DEFAULT 0";
+                addColumn.ExecuteNonQuery();
+            }
+        }
+
+        if (current < 10)
+        {
+            // MEDIA-02 / issue #76: audio files with embedded JPEG cover art were falsely
+            // flagged as "truncated at 0s" because the decode check ran against the attached
+            // picture stream. The classifier is fixed from this version onwards, but cached
+            // decode-error strings on unchanged files would otherwise keep re-reporting the
+            // old false positive (cache key is path+size+mtime, which didn't change). Purge
+            // once so corrected detection runs on every file. Also drop already-Queued
+            // Playability rows so a false positive the user had approved doesn't execute.
+            using var clearDecode = connection.CreateCommand();
+            clearDecode.CommandText = "DELETE FROM decode_cache";
+            clearDecode.ExecuteNonQuery();
+            using var clearQueued = connection.CreateCommand();
+#pragma warning disable CA2100 // (int)enum is a compile-time constant, not user input.
+            clearQueued.CommandText = "DELETE FROM issues WHERE type = " + (int)IssueType.Playability + " AND status = " + (int)IssueStatus.Queued;
+#pragma warning restore CA2100
+            clearQueued.ExecuteNonQuery();
         }
 
         using var setVersion = connection.CreateCommand();

@@ -33,6 +33,7 @@ public sealed class ScanTask : IScheduledTask
     private readonly ISessionManager _sessionManager;
     private readonly RunState _runState;
     private readonly IPluginConfigurationProvider _configProvider;
+    private readonly Fixers.ProtectionService _protection;
     private readonly ILogger<ScanTask> _logger;
 
     /// <summary>
@@ -44,6 +45,7 @@ public sealed class ScanTask : IScheduledTask
     /// <param name="sessionManager">Instance of the <see cref="ISessionManager"/> interface.</param>
     /// <param name="runState">The shared run-state holder (02-A).</param>
     /// <param name="configProvider">Configuration snapshot provider (02-A).</param>
+    /// <param name="protection">Never-modify protection gate. Roadmap i-110-protected-media.</param>
     /// <param name="logger">Instance of the <see cref="ILogger{ScanTask}"/> interface.</param>
     public ScanTask(
         ILibraryManager libraryManager,
@@ -52,6 +54,7 @@ public sealed class ScanTask : IScheduledTask
         ISessionManager sessionManager,
         RunState runState,
         IPluginConfigurationProvider configProvider,
+        Fixers.ProtectionService protection,
         ILogger<ScanTask> logger)
     {
         _libraryManager = libraryManager;
@@ -60,6 +63,7 @@ public sealed class ScanTask : IScheduledTask
         _sessionManager = sessionManager;
         _runState = runState;
         _configProvider = configProvider;
+        _protection = protection;
         _logger = logger;
         // 02-A: bridge the DI singleton to Plugin.AttachedRunState so the legacy Plugin.CurrentActivity /
         // ScanScannersDone/Total facades (still used by ProbingScannerBase and the older tests) reach
@@ -114,7 +118,12 @@ public sealed class ScanTask : IScheduledTask
 
     private async Task ExecuteScanBodyAsync(bool bypassIdleCheck, PluginConfiguration runConfig, IProgress<double> progress, CancellationToken cancellationToken)
     {
-        // ponytail: widened for v0.9 to include non-video kinds (music, audiobook, book, comic)
+        // ponytail: widened for v0.9 to include non-video kinds (music, audiobook, book, comic).
+        // E2E audit E2E-04 / E2E-09: Photo added so BMP/TIFF/JPEG/PNG items already indexed by
+        // Jellyfin surface to FormatCompatibilityScanner (healthy browser-incompatible images)
+        // AND to PlayabilityScanner (corrupt JPEG/PNG). The unindexed-sweep in
+        // FormatCompatibilityScanner can't compensate for already-indexed Photo items because
+        // ServerIndexes=true in the matrix row.
         var items = _libraryManager.GetItemList(new InternalItemsQuery
         {
             IncludeItemTypes =
@@ -124,7 +133,8 @@ public sealed class ScanTask : IScheduledTask
                 BaseItemKind.Audio,
                 BaseItemKind.AudioBook,
                 BaseItemKind.Book,
-                BaseItemKind.MusicVideo
+                BaseItemKind.MusicVideo,
+                BaseItemKind.Photo
             ],
             IsVirtualItem = false,
             Recursive = true
@@ -335,7 +345,7 @@ public sealed class ScanTask : IScheduledTask
                 IReadOnlyList<Data.Issue>? issues = null;
                 try
                 {
-                    issues = await scanner.ScanAsync(items, scannerProgress, cancellationToken).ConfigureAwait(false);
+                    issues = await scanner.ScanAsync(_protection.FilterScannable(items, scanner.Type), scannerProgress, cancellationToken).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
                 {
@@ -380,6 +390,12 @@ public sealed class ScanTask : IScheduledTask
                 foreach (var typeToReplace in typesToReplace)
                 {
                     var groupIssues = groupedByType.TryGetValue(typeToReplace, out var g) ? g : (IReadOnlyList<Data.Issue>)System.Array.Empty<Data.Issue>();
+                    // Roadmap i-110-protected-media: drop issues that are inside a protected
+                    // folder/library with this scanner masked. The DELETE portion of
+                    // ReplaceDetectedIssues still runs — Detected rows for protected paths get
+                    // wiped, and no fresh rows replace them, so protection is idempotent even
+                    // if it was added between the previous scan and this one.
+                    groupIssues = _protection.FilterEmittable(groupIssues, typeToReplace);
                     try
                     {
                         _db.ReplaceDetectedIssues(typeToReplace, groupIssues, pathsForReplace);
@@ -437,6 +453,12 @@ public sealed class ScanTask : IScheduledTask
         {
             _runState.RecordManualScanCompleted();
         }
+
+        // UI-15: Overview's "Last scan" used to be derived from the newest issue's detection
+        // timestamp. A clean library (no issues found) could never report a successful scan; an
+        // older issue could make a recent scan read as the ancient one. Persist a dedicated
+        // completion timestamp so the UI can show scan truth, independent of what the scan found.
+        _db.SetState("LastScanCompletedUtc", DateTime.UtcNow.ToString("O", System.Globalization.CultureInfo.InvariantCulture));
 
         progress.Report(100);
     }

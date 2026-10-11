@@ -138,4 +138,28 @@ public class LanguageHelperTests
         Assert.False(LanguageHelper.IsAllowed("zsm", ["zho"]));  // Malay ≠ Chinese
         Assert.False(LanguageHelper.IsAllowed("arb", ["eng"]));  // Arabic ≠ English
     }
+
+    [Fact]
+    public void WantsOriginal_DetectsSentinelInAnyPosition()
+    {
+        // GitHub #78 opt-in: scanners must preserve identified original languages whenever "orig" appears
+        // in the allowed list, in any position, in any case. A regression here silently reverts
+        // to the plain-language behaviour and users lose the original-language track they asked
+        // to keep.
+        Assert.True(LanguageHelper.WantsOriginal(["orig"]));
+        Assert.True(LanguageHelper.WantsOriginal(["eng", "orig"]));
+        Assert.True(LanguageHelper.WantsOriginal(["ORIG", "eng"]));
+        Assert.True(LanguageHelper.WantsOriginal([" orig "]));
+        Assert.False(LanguageHelper.WantsOriginal(["eng", "spa"]));
+        Assert.False(LanguageHelper.WantsOriginal([]));
+    }
+
+    [Fact]
+    public void WantsOriginal_SentinelIsNotTreatedAsAnIsoCode()
+    {
+        // Guard: "orig" must not accidentally match any track via IsAllowed. If it did, a plain
+        // "orig" list would silently keep tracks tagged "orig" (nonexistent) and delete the rest.
+        Assert.False(LanguageHelper.IsAllowed("eng", ["orig"]));
+        Assert.False(LanguageHelper.IsAllowed("kor", ["orig"]));
+    }
 }

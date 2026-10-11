@@ -33,4 +33,11 @@ public sealed class PlayabilityFixerDetailReasonTests
         Assert.Null(PlayabilityFixer.TryGetDetail("{\"detail\":123}"));
         Assert.Null(PlayabilityFixer.TryGetDetail("{\"detail\":null}"));
     }
+
+    [Fact]
+    public void ReadsInterleaveReasonFromScannerJson()
+    {
+        var json = "{\"reason\":\"audio-not-interleaved\",\"detail\":\"x\"}";
+        Assert.Equal(Jellyfin.Plugin.MediaDash.Probing.InterleaveAnalyzer.IssueReason, PlayabilityFixer.TryGetReasonForTest(json));
+    }
 }

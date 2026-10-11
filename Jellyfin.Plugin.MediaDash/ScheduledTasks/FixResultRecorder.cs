@@ -32,6 +32,12 @@ public sealed class FixResultRecorder
     // rows stay put (they represent user intent that outlives a mid-run state race).
     private static readonly IReadOnlyCollection<IssueStatus> FixedFromQueued = new[] { IssueStatus.Queued };
 
+    // After a Failed+InsufficientSavings outcome flips Queued → Fixed via RecordFixOutcome, we
+    // promote the row to Dismissed so the scanner's re-insert NOT EXISTS clause (which suppresses
+    // only Queued/Dismissed) stops re-detecting the same file on every rescan. The user can
+    // un-dismiss from the Issues tab if they lower the savings threshold and want to retry.
+    private static readonly IReadOnlyCollection<IssueStatus> DismissedFromFixed = new[] { IssueStatus.Fixed };
+
     private readonly MediaDashDb _db;
     private readonly ILogger<FixResultRecorder> _logger;
 
@@ -103,6 +109,36 @@ public sealed class FixResultRecorder
                     pair.Key);
             }
         }
+
+        // Auto-dismiss on Failed+InsufficientSavings so an identical rescan doesn't re-queue and
+        // re-encode the same input. Skip dry-run: no real transition happened above, and dry-run
+        // must never mutate persistent state. Best-effort: if this call throws, the retry loop
+        // reappears on the next scan (the pre-fix behaviour), which is safe — never worse.
+        if (!result.WasDryRun
+            && result.Outcome == Fixers.FixOutcome.Failed
+            && result.Reason == Fixers.FixReason.InsufficientSavings
+            && transitions.TryGetValue(execution.PrimaryIssueId, out var flipped)
+            && flipped)
+        {
+            try
+            {
+                var dismissResult = _db.TryTransitionIssueStatus(execution.PrimaryIssueId, DismissedFromFixed, IssueStatus.Dismissed);
+                if (dismissResult != StatusTransitionResult.Applied)
+                {
+                    _logger.LogInformation(
+                        "Auto-dismiss on InsufficientSavings for issue {Id} did not apply ({Result}); the retry-suppression relies on the Fixed→Dismissed hop.",
+                        execution.PrimaryIssueId,
+                        dismissResult);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Auto-dismiss on InsufficientSavings for issue {Id} failed; next scan may re-queue the same encode.",
+                    execution.PrimaryIssueId);
+            }
+        }
     }
 
     private static List<HistoryEntry> BuildHistoryRows(
@@ -124,6 +160,7 @@ public sealed class FixResultRecorder
             Path = plan.Primary.Path,
             Action = result.Message,
             BytesFreed = result.Success && !result.WasDryRun ? result.BytesFreed : 0,
+            SavedBytes = result.Success && !result.WasDryRun ? result.SavedBytes : 0,
             RecyclePath = result.RecyclePath,
             FixedAtUtc = fixedAtUtc,
             WasDryRun = result.WasDryRun,

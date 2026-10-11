@@ -45,7 +45,10 @@ public sealed class FixTaskStaleFailureTests
             "Jellyfin.Plugin.MediaDash/Fixers/TrickplayOptimizeFixer.cs"
         }),
         ("plays fine now", new[] { "Jellyfin.Plugin.MediaDash/Fixers/PlayabilityFixer.cs" }),
-        ("same name already exists", new[]
+        // Reworded 2026-09-25 from "same name already exists" to be clearer about which copy is which
+        // and offer explicit next steps. The pinned substring is the durable part — "already exists at"
+        // — which both fixers still emit when a destination file/folder occupies the target path.
+        ("already exists at", new[]
         {
             "Jellyfin.Plugin.MediaDash/Fixers/MediaGrouperFixer.cs",
             "Jellyfin.Plugin.MediaDash/Fixers/MediaSorterFixer.cs"

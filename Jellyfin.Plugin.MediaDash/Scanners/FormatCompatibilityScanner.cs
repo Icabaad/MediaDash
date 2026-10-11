@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using Jellyfin.Data.Enums;
 using Jellyfin.Plugin.MediaDash.Configuration;
 using Jellyfin.Plugin.MediaDash.Data;
+using Jellyfin.Plugin.MediaDash.Fixers;
 using Jellyfin.Plugin.MediaDash.Fixers.Converters;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
@@ -35,20 +36,23 @@ public sealed class FormatCompatibilityScanner : IScanner
     private readonly Func<IEnumerable<VirtualFolderInfo>> _getFolders;
     private readonly IPluginConfigurationProvider _configProvider;
     private readonly ILogger<FormatCompatibilityScanner> _logger;
+    private readonly ProtectionService? _protection;
 
     /// <summary>Initializes a new instance of the <see cref="FormatCompatibilityScanner"/> class.</summary>
     /// <param name="registry">Converter registry.</param>
     /// <param name="resolver">Library-collection-type resolver.</param>
     /// <param name="libraryManager">Jellyfin library manager (for filesystem sweep of unindexed formats).</param>
     /// <param name="configProvider">Plugin configuration provider.</param>
+    /// <param name="protection">Rules excluding protected files from analysis.</param>
     /// <param name="logger">Logger.</param>
     public FormatCompatibilityScanner(
         IFormatConverterRegistry registry,
         ILibraryCollectionResolver resolver,
         ILibraryManager libraryManager,
         IPluginConfigurationProvider configProvider,
-        ILogger<FormatCompatibilityScanner> logger)
-        : this(registry, resolver, libraryManager.GetVirtualFolders, configProvider, logger)
+        ILogger<FormatCompatibilityScanner> logger,
+        ProtectionService? protection = null)
+        : this(registry, resolver, libraryManager.GetVirtualFolders, configProvider, logger, protection)
     {
     }
 
@@ -58,13 +62,15 @@ public sealed class FormatCompatibilityScanner : IScanner
         ILibraryCollectionResolver resolver,
         Func<IEnumerable<VirtualFolderInfo>> getFolders,
         IPluginConfigurationProvider configProvider,
-        ILogger<FormatCompatibilityScanner> logger)
+        ILogger<FormatCompatibilityScanner> logger,
+        ProtectionService? protection = null)
     {
         _registry = registry;
         _resolver = resolver;
         _getFolders = getFolders;
         _configProvider = configProvider;
         _logger = logger;
+        _protection = protection;
     }
 
     /// <inheritdoc />
@@ -97,7 +103,7 @@ public sealed class FormatCompatibilityScanner : IScanner
             }
 
             var path = item.Path;
-            if (string.IsNullOrEmpty(path))
+            if (string.IsNullOrEmpty(path) || _protection?.IsScannerBlocked(path, Type) == true)
             {
                 continue;
             }
@@ -165,10 +171,23 @@ public sealed class FormatCompatibilityScanner : IScanner
         }
 
         var unindexedExts = new HashSet<string>(unindexedRows.Select(r => r.Extension), StringComparer.OrdinalIgnoreCase);
+        // External review #5: honour EnabledLibraries so a user who deselected a library in
+        // Settings isn't walked anyway via the unindexed-sweep back door. Empty set is the
+        // "scan all" sentinel elsewhere in the plugin, so preserve that semantics.
+        var enabled = _configProvider.GetSnapshot().EnabledLibraries;
+        var hasEnabledFilter = enabled is { Length: > 0 };
+        var enabledSet = hasEnabledFilter
+            ? new HashSet<string>(enabled!, StringComparer.OrdinalIgnoreCase)
+            : null;
 
         foreach (var folder in _getFolders())
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (hasEnabledFilter && !enabledSet!.Contains(folder.ItemId))
+            {
+                continue;
+            }
+
             var libraryType = ToCollectionType(folder.CollectionType);
             var isMixed = libraryType is null;
 
@@ -179,9 +198,47 @@ public sealed class FormatCompatibilityScanner : IScanner
                     continue;
                 }
 
-                foreach (var file in Directory.EnumerateFiles(location, "*", WalkOptions))
+                // External review #6: Directory.EnumerateFiles can throw UnauthorizedAccessException
+                // (or IOException on broken SMB mounts, PathTooLongException on legacy paths) BEFORE
+                // the IgnoreInaccessible WalkOptions kick in — the flag only suppresses per-entry
+                // errors mid-enumeration, not errors on opening the enumerator itself. One such throw
+                // used to abort the whole sweep and discard every issue accumulated so far.
+                IEnumerable<string> enumerated;
+                try
                 {
+                    enumerated = Directory.EnumerateFiles(location, "*", WalkOptions);
+                }
+                catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+                {
+                    _logger.LogInformation("FormatCompatibilityScanner: skipping unreadable library location {Location}: {Message}", location, ex.Message);
+                    continue;
+                }
+
+                using var filesIter = enumerated.GetEnumerator();
+                while (true)
+                {
+                    string file;
+                    try
+                    {
+                        if (!filesIter.MoveNext())
+                        {
+                            break;
+                        }
+
+                        file = filesIter.Current;
+                    }
+                    catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+                    {
+                        _logger.LogDebug("FormatCompatibilityScanner: skipping subtree under {Location}: {Message}", location, ex.Message);
+                        break;
+                    }
+
                     cancellationToken.ThrowIfCancellationRequested();
+                    if (_protection?.IsScannerBlocked(file, Type) == true)
+                    {
+                        continue;
+                    }
+
                     var ext = Path.GetExtension(file);
                     if (string.IsNullOrEmpty(ext) || !unindexedExts.Contains(ext))
                     {
@@ -249,9 +306,22 @@ public sealed class FormatCompatibilityScanner : IScanner
             return;
         }
 
+        // External review #5 (same reasoning as the unindexed sweep): honour EnabledLibraries so
+        // disabled Books libraries aren't walked anyway.
+        var enabled = cfg.EnabledLibraries;
+        var hasEnabledFilter = enabled is { Length: > 0 };
+        var enabledSet = hasEnabledFilter
+            ? new HashSet<string>(enabled!, StringComparer.OrdinalIgnoreCase)
+            : null;
+
         foreach (var folder in _getFolders())
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (hasEnabledFilter && !enabledSet!.Contains(folder.ItemId))
+            {
+                continue;
+            }
+
             var libraryType = ToCollectionType(folder.CollectionType);
             // Only Books libraries. Mixed-library merge doesn't make sense; user should move first.
             if (libraryType != CollectionType.books)
@@ -266,12 +336,58 @@ public sealed class FormatCompatibilityScanner : IScanner
                     continue;
                 }
 
-                foreach (var dir in Directory.EnumerateDirectories(location, "*", WalkOptions))
+                // External review #6: wrap the directory enumeration so one inaccessible subtree
+                // doesn't abort the whole audiobook sweep.
+                IEnumerable<string> dirs;
+                try
                 {
+                    dirs = Directory.EnumerateDirectories(location, "*", WalkOptions);
+                }
+                catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+                {
+                    _logger.LogInformation("FormatCompatibilityScanner: skipping unreadable library location {Location} during audiobook sweep: {Message}", location, ex.Message);
+                    continue;
+                }
+
+                using var dirIter = dirs.GetEnumerator();
+                while (true)
+                {
+                    string dir;
+                    try
+                    {
+                        if (!dirIter.MoveNext())
+                        {
+                            break;
+                        }
+
+                        dir = dirIter.Current;
+                    }
+                    catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+                    {
+                        _logger.LogDebug("FormatCompatibilityScanner: skipping subtree under {Location} during audiobook sweep: {Message}", location, ex.Message);
+                        break;
+                    }
+
                     cancellationToken.ThrowIfCancellationRequested();
 
+                    if (_protection?.IsScannerBlocked(dir, Type) == true || _protection?.IsAnyDescendantProtected(dir, Type, scanners: true) == true)
+                    {
+                        continue;
+                    }
+
                     // Quick rejection: already has an m4b — merge target exists.
-                    if (Directory.EnumerateFiles(dir, "*.m4b", SearchOption.TopDirectoryOnly).Any())
+                    bool hasM4b;
+                    try
+                    {
+                        hasM4b = Directory.EnumerateFiles(dir, "*.m4b", SearchOption.TopDirectoryOnly).Any();
+                    }
+                    catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+                    {
+                        _logger.LogDebug("FormatCompatibilityScanner: skipping unreadable audiobook folder {Dir}: {Message}", dir, ex.Message);
+                        continue;
+                    }
+
+                    if (hasM4b)
                     {
                         continue;
                     }
@@ -310,8 +426,17 @@ public sealed class FormatCompatibilityScanner : IScanner
 
     private static AudiobookMergeCandidate? ClassifyFolderAsAudiobookMerge(string dir)
     {
-        var mp3s = Directory.GetFiles(dir, "*.mp3", SearchOption.TopDirectoryOnly);
-        var m4as = Directory.GetFiles(dir, "*.m4a", SearchOption.TopDirectoryOnly);
+        string[] mp3s;
+        string[] m4as;
+        try
+        {
+            mp3s = Directory.GetFiles(dir, "*.mp3", SearchOption.TopDirectoryOnly);
+            m4as = Directory.GetFiles(dir, "*.m4a", SearchOption.TopDirectoryOnly);
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+        {
+            return null;
+        }
 
         // Prefer whichever is majority; refuse mixed extensions.
         string[] files;

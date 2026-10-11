@@ -81,6 +81,16 @@ public sealed class PlayabilityFixerRevalidationResultTests
         Assert.Contains("TryRepairAsync(issue, revalidation.Probe", src);
     }
 
+    [Fact]
+    public void ScannerRevalidationAndRepairVerificationShareAllAudioCheck()
+    {
+        var source = File.ReadAllText(PlayabilityFixerSourcePath());
+        Assert.Contains("FindBrokenAudioStreamAsync(issue.Path, probe, cancellationToken)", source);
+        Assert.Contains("FindBrokenAudioStreamAsync(outputPath, outputProbe, cancellationToken)", source);
+        var scanner = Path.Combine(Path.GetDirectoryName(PlayabilityFixerSourcePath())!, "..", "Scanners", "PlayabilityScanner.cs");
+        Assert.Contains("FindBrokenAudioStreamAsync(path, probe, cancellationToken)", File.ReadAllText(scanner));
+    }
+
     private static string PlayabilityFixerSourcePath()
     {
         var here = Path.GetDirectoryName(typeof(PlayabilityFixerRevalidationResultTests).Assembly.Location)!;

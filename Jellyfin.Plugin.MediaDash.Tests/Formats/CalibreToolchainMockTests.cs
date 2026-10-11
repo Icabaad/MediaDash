@@ -15,7 +15,7 @@ public class CalibreToolchainMockTests
     public async Task NoOpDownloaderReportsUnavailable()
     {
         using var tmp = new TempDir();
-        var chain = new CalibreToolchain(new NoOpToolchainDownloader(), NullLogger<CalibreToolchain>.Instance, tmp.Path);
+        var chain = new CalibreToolchain(new NoOpToolchainDownloader(), NullLogger<CalibreToolchain>.Instance, tmp.Path, pathResolver: _ => null);
         var result = await chain.EnsureAsync(null, null, CancellationToken.None);
         Assert.Equal(ConverterAvailability.Unavailable, result);
         Assert.False(chain.IsAvailable);
@@ -30,7 +30,7 @@ public class CalibreToolchainMockTests
         var exe = Path.Combine(overrideDir, ExeName());
         File.WriteAllText(exe, "stub");
 
-        var chain = new CalibreToolchain(new NoOpToolchainDownloader(), NullLogger<CalibreToolchain>.Instance, tmp.Path);
+        var chain = new CalibreToolchain(new NoOpToolchainDownloader(), NullLogger<CalibreToolchain>.Instance, tmp.Path, pathResolver: _ => null);
         var result = await chain.EnsureAsync(overrideDir, null, CancellationToken.None);
 
         Assert.Equal(ConverterAvailability.Ready, result);
@@ -46,7 +46,7 @@ public class CalibreToolchainMockTests
         var exe = Path.Combine(toolsDir, ExeName());
         File.WriteAllText(exe, "stub");
 
-        var chain = new CalibreToolchain(new NoOpToolchainDownloader(), NullLogger<CalibreToolchain>.Instance, tmp.Path);
+        var chain = new CalibreToolchain(new NoOpToolchainDownloader(), NullLogger<CalibreToolchain>.Instance, tmp.Path, pathResolver: _ => null);
         var result = await chain.EnsureAsync(null, null, CancellationToken.None);
 
         Assert.Equal(ConverterAvailability.Ready, result);
@@ -64,7 +64,7 @@ public class CalibreToolchainMockTests
             return "fake-checksum";
         });
 
-        var chain = new CalibreToolchain(downloader, NullLogger<CalibreToolchain>.Instance, tmp.Path);
+        var chain = new CalibreToolchain(downloader, NullLogger<CalibreToolchain>.Instance, tmp.Path, pathResolver: _ => null);
         var result = await chain.EnsureAsync(null, null, CancellationToken.None);
 
         // Downloader was called. The stub writes a 1-byte file (not a real installer),
@@ -79,12 +79,28 @@ public class CalibreToolchainMockTests
         using var tmp = new TempDir();
         // Stub downloader writes a bogus "installer" — extraction will fail.
         var downloader = new StubDownloader(() => "fake-checksum");
-        var chain = new CalibreToolchain(downloader, NullLogger<CalibreToolchain>.Instance, tmp.Path);
+        var chain = new CalibreToolchain(downloader, NullLogger<CalibreToolchain>.Instance, tmp.Path, pathResolver: _ => null);
 
         var result = await chain.EnsureAsync(null, null, CancellationToken.None);
 
         Assert.Equal(ConverterAvailability.Unavailable, result);
         Assert.False(chain.IsAvailable);
+    }
+
+    [Fact]
+    public async Task ResolvesNestedCalibrePortableLayoutAfterRestart()
+    {
+        using var tmp = new TempDir();
+        var nested = Path.Combine(tmp.Path, "tools", "calibre", "Calibre Portable", "Calibre");
+        Directory.CreateDirectory(nested);
+        var exe = Path.Combine(nested, ExeName());
+        File.WriteAllText(exe, "stub");
+
+        var chain = new CalibreToolchain(new NoOpToolchainDownloader(), NullLogger<CalibreToolchain>.Instance, tmp.Path, pathResolver: _ => null);
+        var result = await chain.EnsureAsync(null, null, CancellationToken.None);
+
+        Assert.Equal(ConverterAvailability.Ready, result);
+        Assert.Equal(exe, chain.EbookConvertPath);
     }
 
     private static string ExeName()

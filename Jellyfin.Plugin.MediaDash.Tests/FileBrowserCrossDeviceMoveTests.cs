@@ -1,3 +1,5 @@
+using System;
+using System.Diagnostics;
 using System.IO;
 using Jellyfin.Plugin.MediaDash.Api;
 using Xunit;
@@ -6,6 +8,52 @@ namespace Jellyfin.Plugin.MediaDash.Tests;
 
 public class FileBrowserCrossDeviceMoveTests
 {
+    [Theory]
+    [InlineData(FileAttributes.Hidden)]
+    [InlineData(FileAttributes.System)]
+    public void CrossDeviceMove_LinkInsideHiddenOrSystemFolder_RefusesBeforeCopy(FileAttributes attributes)
+    {
+        var root = NewSandbox();
+        var source = Path.Combine(root, "src");
+        var destination = Path.Combine(root, "dst");
+        var parent = Path.Combine(source, "hidden");
+        var link = Path.Combine(parent, "link");
+        var target = Path.Combine(root, "link-target");
+        Directory.CreateDirectory(parent);
+        Directory.CreateDirectory(target);
+        File.WriteAllText(Path.Combine(source, "keep.txt"), "source");
+        File.WriteAllText(Path.Combine(target, "keep.txt"), "target");
+        try
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                using var process = Process.Start(new ProcessStartInfo("cmd.exe", $"/c mklink /J \"{link}\" \"{target}\"")
+                {
+                    UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true
+                })!;
+                process.WaitForExit();
+                Assert.Equal(0, process.ExitCode);
+                File.SetAttributes(parent, File.GetAttributes(parent) | attributes);
+            }
+            else
+            {
+                Directory.CreateSymbolicLink(link, target);
+            }
+
+            Assert.Throws<IOException>(() => FileBrowserController.CrossDeviceMove(source, destination, true));
+            Assert.True(Directory.Exists(link));
+            Assert.Equal("source", File.ReadAllText(Path.Combine(source, "keep.txt")));
+            Assert.Equal("target", File.ReadAllText(Path.Combine(target, "keep.txt")));
+            Assert.False(Directory.Exists(destination));
+        }
+        finally
+        {
+            if (Directory.Exists(link)) Directory.Delete(link);
+            if (Directory.Exists(parent)) File.SetAttributes(parent, FileAttributes.Directory);
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static string NewSandbox()
     {
         var dir = Path.Combine(Path.GetTempPath(), "mediadash-xdev-" + Path.GetRandomFileName());

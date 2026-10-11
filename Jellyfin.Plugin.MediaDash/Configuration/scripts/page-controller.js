@@ -380,6 +380,9 @@
             var _postUpgradeChecked = false;
       // fetched once per session unless invalidated
             var _postUpgradeAvailable = false;
+            // UI-14: count of consecutive /Status failures. Resets on first success. Drives the
+            // backoff schedule and the "retrying…" state message.
+            var _statusFailStreak = 0;
 
             function refresh(silent) {
                 if (!silent) Dashboard.showLoadingMsg();
@@ -392,6 +395,24 @@
                 api('Status').then(function (s) {
                     overviewTab.renderStatus(s, !!silent);
                     if (!silent) Dashboard.hideLoadingMsg();
+                    _statusFailStreak = 0;
+                }, function () {
+                    // UI-14: a single failed Status request used to leave the poll chain dead —
+                    // schedulePoll was only called from renderStatus's success tail, so a transient
+                    // network blip froze progress and state until another action triggered refresh.
+                    // Backoff retries: 3s → 6s → 12s (capped), surface a stale indicator so users
+                    // know the UI isn't up to date, give up after the cap continues.
+                    _statusFailStreak = Math.min(_statusFailStreak + 1, 4);
+                    if (!silent) Dashboard.hideLoadingMsg();
+                    var stateEl = view.querySelector('#mdScanState');
+                    if (stateEl && _statusFailStreak >= 2) {
+                        stateEl.textContent = 'Status check failed — retrying…';
+                    }
+                    if (lifetime.accepts(lifetime.current())) {
+                        var backoff = Math.min(3000 * Math.pow(2, _statusFailStreak - 1), 15000);
+                        lifetime.clearTimer(pollTimer);
+                        pollTimer = lifetime.timeout(function () { refresh(true); }, backoff);
+                    }
                 });
                 // Piggyback the error count on every refresh so the tab badge stays live without opening the tab.
                 // When the user is currently on the Errors tab, delegate to loadErrors so the badge + list
@@ -451,6 +472,7 @@
                 }
                 if (!silent) {
                     api.configuration(PLUGIN_ID).then(function (c) {
+                        configCache = c;
                         view.querySelector('#mdDryRunNote').style.display = c.DryRun ? '' : 'none';
                         view.querySelector('#mdDryRunText').textContent = STR.dryRunOn;
                         view.querySelector('#mdFirstRun').style.display = c.FirstRunDone ? 'none' : '';
@@ -458,6 +480,34 @@
                     });
                 }
             }
+
+            // Shared config cache for cross-tab reads (Issues tab reads disposal + dry-run so each row's
+            // Approve description matches what will actually happen under the current settings — UI-02).
+            // Refreshed on every non-silent refresh(); null on first paint, in which case readers fall
+            // back to the generic action copy.
+            var configCache = null;
+            // Fix-type → disposal-field map, mirrored from settings-tab.js FIX_TYPES. Kept inline so the
+            // Issues tab doesn't need to reach into the settings factory before Settings has been opened.
+            var ISSUE_DISPOSAL_KEY = {
+                Duplicate: 'DuplicateDisposal',
+                Playability: 'PlayabilityDisposal',
+                Quality: 'TranscodeDisposal',
+                SubtitleLanguage: 'SubtitleDisposal',
+                AudioLanguage: 'AudioDisposal',
+                MalwareRisk: 'SuspiciousFileDisposal',
+                CorruptNfo: 'NfoDisposal',
+                HeavyTranscode: 'HeavyTranscodeDisposal',
+                FailedTranscode: 'FailedTranscodeDisposal',
+                EmbeddedCoverArt: 'EmbeddedCoverDisposal',
+                OrphanedDebris: 'OrphanCleanupDisposal',
+                FormatCompatibility: 'FormatCompatibilityDisposal'
+            };
+            function getIssueDisposal(issueType) {
+                if (!configCache) return null;
+                var key = ISSUE_DISPOSAL_KEY[issueType];
+                return key ? (configCache[key] || null) : null;
+            }
+            function getDryRun() { return !!(configCache && configCache.DryRun); }
 
 
             function schedulePoll() {
@@ -851,6 +901,8 @@
                 get applySubtitleProviderHint() { return applySubtitleProviderHint; }
             });
             var filesTab = window.MediaDash.createFilesTab({
+                get lifetime() { return lifetime; },
+                get ownGlobal() { return ownGlobal; },
                 get esc() { return esc; },
                 get bytes() { return bytes; },
                 get view() { return view; },
@@ -887,6 +939,7 @@
                 // are disposed on pagehide via lifetime.stop() so they need reattach.
                 wireIssueMenuGlobals();
                 settingsTab.activateSettings();
+                filesTab.activateFiles();
 
                 // Tab factories are created ONCE per page identity (Jellyfin reuses the
                 // same DOM instance across pagehide/pageshow, so the same view root is
@@ -916,7 +969,9 @@
                         refresh: refresh, post: post, bulkIssueAction: bulkIssueAction,
                         closeIssueContextMenu: closeIssueContextMenu,
                         openInFileBrowser: openInFileBrowser,
-                        updateTabBadge: updateTabBadge
+                        updateTabBadge: updateTabBadge,
+                        getIssueDisposal: getIssueDisposal,
+                        getDryRun: getDryRun
                     });
                 }
                 if (!errorsTab) {
@@ -1003,28 +1058,30 @@
                             overviewTab.setProgress(true, 3);
                             post('Scan').then(function () { lifetime.timeout(refresh, 700); });
                         };
-                        // Issue #64: users edited settings then hit Scan without Save, so the
-                        // scan ran against the pre-edit config. Persist first, then scan.
+                        // Issue #64 / UI-08: scan must run against the config the user intended, not
+                        // the pre-edit snapshot. Previously this polled mdSettingsDirty for ~3s then
+                        // scanned anyway — a cancelled save (Automatic/Permanent confirmation declined),
+                        // low-space warning, or network failure would still start the scan with stale
+                        // config. Now we await the save promise explicitly; only a resolved save
+                        // proceeds to scan. Rejections surface a message instead of silently scanning
+                        // the wrong settings.
                         if (settingsTab.mdSettingsDirty) {
-                            var form = view.querySelector('#mdSettingsForm');
-                            if (form && form.requestSubmit) { form.requestSubmit(); } else if (form) { form.submit(); }
-                            // saveSettings clears mdSettingsDirty inside its promise chain; poll briefly
-                            // (up to ~3s) for the flip before firing the scan. Avoids a full promise
-                            // refactor of saveSettings/validateAndSaveConfig for a one-off wait.
-                            var waited = 0;
-                            var waitInterval = lifetime.interval(function () {
-                                waited += 100;
-                                if (!settingsTab.mdSettingsDirty) {
-                                    lifetime.clearTimer(waitInterval);
-                                    startScan();
-                                } else if (waited >= 3000) {
-                                    lifetime.clearTimer(waitInterval);
-                                    // Save didn't complete — fire the scan anyway so the user isn't
-                                    // silently blocked. The server-side rescanner still picks up any
-                                    // save that lands late.
-                                    startScan();
+                            view.querySelector('#mdScanState').textContent = 'Saving your settings before scanning…';
+                            settingsTab.saveSettingsAsync().then(startScan, function (err) {
+                                var reason = (err && err.message) || 'unknown';
+                                var msg;
+                                if (reason === 'cancelled') {
+                                    msg = 'Scan not started — you cancelled the save confirmation. Review Settings and click Scan again.';
+                                } else if (reason === 'low-space-warn') {
+                                    msg = 'Scan not started — the recycle bin location is below the 5 GB floor. Resolve the warning or Save anyway, then Scan.';
+                                } else if (reason === 'not-loaded') {
+                                    msg = 'Scan not started — Settings are still loading. Try again in a moment.';
+                                } else {
+                                    msg = 'Scan not started — could not save your settings. Try Save from the Settings tab for the exact reason.';
                                 }
-                            }, 100);
+                                view.querySelector('#mdScanState').textContent = msg;
+                                overviewTab.setProgress(false);
+                            });
                             return;
                         }
                         startScan();

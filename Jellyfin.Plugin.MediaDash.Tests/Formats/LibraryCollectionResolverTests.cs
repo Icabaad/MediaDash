@@ -17,6 +17,8 @@ namespace Jellyfin.Plugin.MediaDash.Tests.Formats;
 /// </summary>
 public class LibraryCollectionResolverTests
 {
+    private static string P(string path) => System.IO.Path.Combine(System.IO.Path.GetTempPath(), path.Replace('/', System.IO.Path.DirectorySeparatorChar));
+
     private static LibraryCollectionResolver Resolver(params VirtualFolderInfo[] folders)
         => new(() => folders);
 
@@ -27,11 +29,11 @@ public class LibraryCollectionResolverTests
     {
         var resolver = Resolver(new VirtualFolderInfo
         {
-            Locations = [@"C:\media\books"],
+            Locations = [P("media/books")],
             CollectionType = CollectionTypeOptions.books,
         });
 
-        var result = resolver.Resolve(Item(@"C:\media\books\mybook.mobi"));
+        var result = resolver.Resolve(Item(P("media/books/mybook.mobi")));
 
         Assert.Equal(CollectionType.books, result);
     }
@@ -41,11 +43,11 @@ public class LibraryCollectionResolverTests
     {
         var resolver = Resolver(new VirtualFolderInfo
         {
-            Locations = [@"C:\media\movies"],
+            Locations = [P("media/movies")],
             CollectionType = CollectionTypeOptions.movies,
         });
 
-        var result = resolver.Resolve(Item(@"C:\media\movies\film.mkv"));
+        var result = resolver.Resolve(Item(P("media/movies/film.mkv")));
 
         Assert.Equal(CollectionType.movies, result);
     }
@@ -55,11 +57,11 @@ public class LibraryCollectionResolverTests
     {
         var resolver = Resolver(new VirtualFolderInfo
         {
-            Locations = [@"C:\media\books"],
+            Locations = [P("media/books")],
             CollectionType = CollectionTypeOptions.books,
         });
 
-        var result = resolver.Resolve(Item(@"C:\other\file.txt"));
+        var result = resolver.Resolve(Item(P("other/file.txt")));
 
         Assert.Null(result);
     }
@@ -69,11 +71,11 @@ public class LibraryCollectionResolverTests
     {
         var resolver = Resolver(new VirtualFolderInfo
         {
-            Locations = [@"C:\media\misc"],
+            Locations = [P("media/misc")],
             CollectionType = null,
         });
 
-        var result = resolver.Resolve(Item(@"C:\media\misc\file.epub"));
+        var result = resolver.Resolve(Item(P("media/misc/file.epub")));
 
         Assert.Null(result);
     }
@@ -83,11 +85,11 @@ public class LibraryCollectionResolverTests
     {
         var resolver = Resolver(new VirtualFolderInfo
         {
-            Locations = [@"C:\media\mixed"],
+            Locations = [P("media/mixed")],
             CollectionType = CollectionTypeOptions.mixed,
         });
 
-        var result = resolver.Resolve(Item(@"C:\media\mixed\file.epub"));
+        var result = resolver.Resolve(Item(P("media/mixed/file.epub")));
 
         Assert.Null(result);
     }
@@ -97,7 +99,7 @@ public class LibraryCollectionResolverTests
     {
         var resolver = Resolver(new VirtualFolderInfo
         {
-            Locations = [@"C:\media\books"],
+            Locations = [P("media/books")],
             CollectionType = CollectionTypeOptions.books,
         });
 
@@ -110,11 +112,11 @@ public class LibraryCollectionResolverTests
     public void MatchesCorrectLibraryWhenMultipleExist()
     {
         var resolver = Resolver(
-            new VirtualFolderInfo { Locations = [@"C:\media\books"], CollectionType = CollectionTypeOptions.books },
-            new VirtualFolderInfo { Locations = [@"C:\media\movies"], CollectionType = CollectionTypeOptions.movies });
+            new VirtualFolderInfo { Locations = [P("media/books")], CollectionType = CollectionTypeOptions.books },
+            new VirtualFolderInfo { Locations = [P("media/movies")], CollectionType = CollectionTypeOptions.movies });
 
-        Assert.Equal(CollectionType.books, resolver.Resolve(Item(@"C:\media\books\thing.epub")));
-        Assert.Equal(CollectionType.movies, resolver.Resolve(Item(@"C:\media\movies\film.mkv")));
+        Assert.Equal(CollectionType.books, resolver.Resolve(Item(P("media/books/thing.epub"))));
+        Assert.Equal(CollectionType.movies, resolver.Resolve(Item(P("media/movies/film.mkv"))));
     }
 
     [Fact]
@@ -122,12 +124,12 @@ public class LibraryCollectionResolverTests
     {
         var resolver = Resolver(new VirtualFolderInfo
         {
-            Locations = [@"C:\Media\Books"],
+            Locations = [P("Media/Books")],
             CollectionType = CollectionTypeOptions.books,
         });
 
         // Different casing in item path — should still match (OrdinalIgnoreCase).
-        var result = resolver.Resolve(Item(@"C:\media\books\mybook.epub"));
+        var result = resolver.Resolve(Item(P("media/books/mybook.epub")));
 
         Assert.Equal(CollectionType.books, result);
     }
@@ -136,11 +138,11 @@ public class LibraryCollectionResolverTests
     public void DoesNotFalsePositiveOnSharedPrefix()
     {
         var resolver = Resolver(
-            new VirtualFolderInfo { Locations = [@"C:\media\books"], CollectionType = CollectionTypeOptions.books },
-            new VirtualFolderInfo { Locations = [@"C:\media\books_extended"], CollectionType = CollectionTypeOptions.mixed });
+            new VirtualFolderInfo { Locations = [P("media/books")], CollectionType = CollectionTypeOptions.books },
+            new VirtualFolderInfo { Locations = [P("media/books_extended")], CollectionType = CollectionTypeOptions.mixed });
 
         // books_extended shares the "C:\media\books" prefix — must not match the books library.
-        var result = resolver.Resolve(Item(@"C:\media\books_extended\thing.mobi"));
+        var result = resolver.Resolve(Item(P("media/books_extended/thing.mobi")));
 
         Assert.Null(result);
     }

@@ -47,6 +47,7 @@ public sealed class FixExecutor
     private readonly IPluginConfigurationProvider _configProvider;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<FixExecutor> _logger;
+    private readonly Fixers.ProtectionService _protection;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="FixExecutor"/> class.
@@ -55,18 +56,21 @@ public sealed class FixExecutor
     /// <param name="fixers">Registered fixers, used for <see cref="IFixer.CanFix"/> dispatch.</param>
     /// <param name="configProvider">Configuration snapshot provider — the executor re-reads current config per operation so a mid-run save takes effect on the next item.</param>
     /// <param name="timeProvider">Clock used for sharing-violation retry delays. Injected so tests can fake-tick.</param>
+    /// <param name="protection">Never-modify protection gate. Roadmap i-110-protected-media.</param>
     /// <param name="logger">Diagnostics logger.</param>
     public FixExecutor(
         IssueStore issues,
         IEnumerable<IFixer> fixers,
         IPluginConfigurationProvider configProvider,
         TimeProvider timeProvider,
+        Fixers.ProtectionService protection,
         ILogger<FixExecutor> logger)
     {
         _issues = issues;
         _fixers = fixers;
         _configProvider = configProvider;
         _timeProvider = timeProvider;
+        _protection = protection;
         _logger = logger;
     }
 
@@ -124,6 +128,18 @@ public sealed class FixExecutor
             return null;
         }
 
+        // Roadmap i-110-protected-media: fix-time recheck of the persistent Never-modify list.
+        // Protection added between plan build and now must stop the fixer. Silent skip keeps the
+        // Issue queued so removing protection later re-tries automatically.
+        if (_protection.IsFixerBlocked(primary.Path, primary.Type))
+        {
+            _logger.LogInformation(
+                "Skipping {Path}: protected against {Type} fixer.",
+                primary.Path,
+                primary.Type);
+            return null;
+        }
+
         // Fixer dispatch — silent skip when nothing handles the type (matches pre-refactor
         // "if (fixer is null) continue").
         var fixer = _fixers.FirstOrDefault(f => f.CanFix(primary.Type));
@@ -144,14 +160,16 @@ public sealed class FixExecutor
         {
             partner = plan.Companions[0];
             var partnerStatus = _issues.GetIssueStatus(partner.Id);
-            if (partnerStatus == IssueStatus.Queued)
+            if (partnerStatus == IssueStatus.Queued
+                && TranscodeFixer.IsTypeAuthorized(currentConfig, partner.Type)
+                && !_protection.IsFixerBlocked(partner.Path, partner.Type))
             {
                 isCombinedPair = true;
             }
             else
             {
                 _logger.LogInformation(
-                    "Combined pair audio {AudioId} + subtitle {PartnerId}: partner is no longer Queued — running audio-only fix instead.",
+                    "Combined pair audio {AudioId} + subtitle {PartnerId}: partner is no longer authorized — running audio-only fix instead.",
                     primary.Id,
                     partner.Id);
                 partner = null;
@@ -178,7 +196,12 @@ public sealed class FixExecutor
         {
             if (isCombinedPair && partner is not null && fixer is TrackFixer trackFixer)
             {
-                return await trackFixer.FixCombinedAsync(primary, partner, itemProgress, cancellationToken).ConfigureAwait(false);
+                return await trackFixer.FixCombinedAsync(
+                    primary,
+                    partner,
+                    itemProgress,
+                    () => _issues.GetIssueStatus(primary.Id) == IssueStatus.Queued && _issues.GetIssueStatus(partner.Id) == IssueStatus.Queued,
+                    cancellationToken).ConfigureAwait(false);
             }
 
             return await RunFixWithSharingRetryAsync(fixer, primary, itemProgress, cancellationToken).ConfigureAwait(false);

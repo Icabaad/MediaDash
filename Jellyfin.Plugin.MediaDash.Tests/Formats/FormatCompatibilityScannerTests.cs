@@ -198,14 +198,24 @@ public class FormatCompatibilityScannerTests
     private sealed class FakeResolver : ILibraryCollectionResolver
     {
         private readonly Dictionary<BaseItem, CollectionType?> _map = new();
+        private readonly Dictionary<string, CollectionType?> _pathMap = new(StringComparer.OrdinalIgnoreCase);
 
         public void Assign(BaseItem item, CollectionType? type)
         {
             _map[item] = type;
+            if (!string.IsNullOrEmpty(item.Path))
+            {
+                _pathMap[item.Path] = type;
+            }
         }
 
+        public void AssignByPath(string path, CollectionType? type) => _pathMap[path] = type;
+
         public CollectionType? Resolve(BaseItem item)
-            => _map.TryGetValue(item, out var t) ? t : null;
+            => _map.TryGetValue(item, out var t) ? t : ResolveByPath(item.Path);
+
+        public CollectionType? ResolveByPath(string path)
+            => _pathMap.TryGetValue(path ?? string.Empty, out var t) ? t : null;
     }
 
     private sealed class FakeBaseItem : BaseItem

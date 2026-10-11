@@ -110,11 +110,21 @@ public sealed class VideoConverter : IFormatConverter
             psi.ArgumentList.Add("-nostdin");
             psi.ArgumentList.Add("-i");
             psi.ArgumentList.Add(sourcePath);
+            // External review #2: ffmpeg's default stream selection on an input picks ONE best
+            // video + ONE best audio stream and silently drops any extras. RMVB files commonly
+            // ship multiple audio tracks (dub + original); without -map 0 they vanish on remux.
+            // -map 0 maps every stream from input 0, then -c:s copy preserves subtitle tracks
+            // alongside the video and audio copies that follow. Attached pictures (cover art)
+            // are preserved too — they're low-cost and some players show them.
+            psi.ArgumentList.Add("-map");
+            psi.ArgumentList.Add("0");
             // Stream-copy: RMVB → MKV container remux. RealVideo rv30/rv40 are valid in MKV.
             // If the codec is genuinely incompatible the fixer's error path takes over.
             psi.ArgumentList.Add("-c:v");
             psi.ArgumentList.Add("copy");
             psi.ArgumentList.Add("-c:a");
+            psi.ArgumentList.Add("copy");
+            psi.ArgumentList.Add("-c:s");
             psi.ArgumentList.Add("copy");
             psi.ArgumentList.Add(stagedTargetPath);
 

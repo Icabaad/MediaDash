@@ -110,6 +110,12 @@
                             '</div>'
                         : '';
 
+                    // E2E audit E2E-10: mdBinRowMsg used to live inside mdBinRowAction (narrow
+                    // button column). A long "Restored as X" success message wrapped vertically
+                    // inside that column and overlapped the Delete button. Moved to a full-width
+                    // footer row via mdBinRowFooter so long messages always have horizontal room
+                    // and never obscure the row's controls. Styled .mdBinRowMsg with
+                    // display:block in configPage.css to pick up the new container width.
                     html += '<div class="mdBinRow" title="' + esc(f.OriginalPath || f.FileName) + '">' +
                         '<div class="mdBinRowFile">' +
                             '<div class="mdBinRowName">' + esc(f.FileName) + '</div>' +
@@ -124,7 +130,8 @@
                         '</div>' +
                         '<div class="mdBinRowSize">' + esc(bytes(f.SizeBytes)) + '</div>' +
                         '<div class="mdBinRowDate">' + esc(recycledAt.toLocaleDateString()) + '</div>' +
-                        '<div class="mdBinRowAction">' + restoreBtn + deleteBtn + '<span class="mdBinRowMsg"></span></div>' +
+                        '<div class="mdBinRowAction">' + restoreBtn + deleteBtn + '</div>' +
+                        '<div class="mdBinRowFooter"><span class="mdBinRowMsg"></span></div>' +
                         '</div>';
                 });
             }

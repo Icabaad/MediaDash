@@ -174,7 +174,14 @@
                 if (kind === 'dryrun') {
                     restoreAction = '<span class="mdHistNoOp">nothing changed</span>';
                 } else if (kind === 'failed') {
-                    restoreAction = '<button is="emby-button" type="button" class="raised mdRestore mdHistRetry" data-id="' + h.Id + '"><span class="material-icons">replay</span><span>Retry</span></button>';
+                    // UI-10: the previous Retry button carried the mdRestore class and routed
+                    // through tryRestore / History/{id}/Restore, which only succeeds for rows that
+                    // have a recycled original — nearly none for failed fixes, since the fix never
+                    // ran. The failed issue stays Queued with LastAttemptSuccess=false and is
+                    // retried on the next scheduled fix cycle (or by clicking "Run fixes now").
+                    // Point users at that flow instead of a button that reliably reports "not in
+                    // the recycle bin".
+                    restoreAction = '<span class="mdHistNoOp" title="This issue is still queued on the Issues tab and will retry on the next fix run. Dismiss it there to stop retrying.">will retry</span>';
                 } else if (h.CanRestore) {
                     restoreAction = '<button is="emby-button" type="button" class="raised mdRestore" data-id="' + h.Id + '"><span class="material-icons">restore</span><span>' + esc(strings.restore) + '</span></button>';
                 } else {

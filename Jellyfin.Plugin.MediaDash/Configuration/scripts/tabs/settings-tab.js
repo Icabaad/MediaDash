@@ -601,7 +601,7 @@
                         '<div class="mdField">' +
                             '<label>Subtitle languages to keep</label>' +
                             langChipInputHtml('mdSubLangs') +
-                            '<span class="mdFieldHint">Removal is a lossless remux — no quality loss. Empty list = task is skipped entirely (no subs are touched).</span>' +
+                            '<span class="mdFieldHint">Removal is a lossless remux — no quality loss. Original language uses item metadata or original audio flags; cleanup is skipped if neither identifies it. Empty list = task is skipped entirely (no subs are touched).</span>' +
                         '</div>' +
                         disposalField('SubtitleLanguage', 'Cleaned-up originals go to') +
                         '</div>' +
@@ -640,7 +640,7 @@
                         '<div class="mdField">' +
                             '<label>Audio languages to keep</label>' +
                             langChipInputHtml('mdAudioLangs') +
-                            '<span class="mdFieldHint">A file\'s only audio track is never removed, whatever its language. Empty list = task is skipped entirely (no audio is touched).</span>' +
+                            '<span class="mdFieldHint">A file\'s only audio track is never removed. Original language uses item metadata or original audio flags; cleanup is skipped if neither identifies it. Empty list = task is skipped entirely (no audio is touched).</span>' +
                         '</div>' +
                         disposalField('AudioLanguage', 'Cleaned-up originals go to') +
                         '</div>';
@@ -1388,8 +1388,12 @@
                     var v = input.value.trim().toLowerCase();
                     if (!v) return false;
                     var byCode = langNameMap();
-                    var byName = {}; Object.keys(byCode).forEach(function (c) { byName[byCode[c].toLowerCase()] = c; });
+                    var byName = {}; Object.keys(byCode).forEach(function (c) {
+                        if (c.length === 3 || c === 'orig') byName[byCode[c].toLowerCase()] = c;
+                    });
                     if (byName[v]) v = byName[v];
+                    var culture = (mdCulturesCache || []).find(function (c) { return c.TwoLetterISOLanguageName === v; });
+                    if (culture) v = culture.ThreeLetterISOLanguageName;
                     if (!byCode[v]) return false;
                     var codes = currentCodes();
                     if (codes.indexOf(v) === -1) codes.push(v);
@@ -1410,11 +1414,13 @@
                         notifyLangChange();
                     }
                 });
-                // Datalist selection fires 'input' + 'change' (or just 'input' in some browsers)
-                // without a keydown-Enter, so second-and-later languages weren't being committed
-                // when picked from the dropdown. commitCurrent() no-ops on partial/invalid values,
-                // so typing "F" → "Fr" → "Fre" is safe — only "French" / "fra" commits.
-                input.addEventListener('input', function () { commitCurrent(); });
+                // A typed prefix can itself be another language: fi (Finnish) starts
+                // Filipino and sl (Slovenian) starts Slovak. Wait for confirmation while
+                // typing; dropdown replacements and pastes can commit the whole value.
+                input.addEventListener('input', function (e) {
+                    if (e && (e.isComposing || (e.inputType && e.inputType !== 'insertReplacementText' && e.inputType !== 'insertFromPaste'))) return;
+                    commitCurrent();
+                });
                 input.addEventListener('change', function () { commitCurrent(); });
                 input.addEventListener('blur', function () { commitCurrent(); });
                 chipEl._redraw = redraw;
@@ -1546,12 +1552,27 @@
             // routing — the plugin page's internal tabs share DOM state so intra-page nav preserves
             // pending changes anyway.
             var mdSettingsDirty = false;
+            // UI-12: revision counter bumped on every user edit so a save completion only clears
+            // the dirty flag if no further edits have arrived during the round-trip. Without this,
+            // a save that lands after a mid-save edit would mark the form clean and the user's
+            // newer change would be silently overwritten on the next hydration.
+            var mdEditRevision = 0;
 
 
-            function markSettingsDirty() { mdSettingsDirty = true; }
+            function markSettingsDirty() {
+                mdSettingsDirty = true;
+                mdEditRevision++;
+            }
 
 
-            function markSettingsClean() { mdSettingsDirty = false; }
+            function markSettingsClean(revisionAtSaveStart) {
+                // Only clear dirty if nothing else was edited while the save was in flight. When
+                // called without a captured revision (loadSettings' own post-hydration cleanup),
+                // treat as unconditional — hydration is already dirty-aware.
+                if (revisionAtSaveStart == null || revisionAtSaveStart === mdEditRevision) {
+                    mdSettingsDirty = false;
+                }
+            }
 
 
             function installUnsavedGuardOnce() {
@@ -1673,19 +1694,31 @@
             }
 
 
-            // Populates <datalist id="mdLangList"> with every culture Jellyfin natively supports.
-            // Fired at settings-load; cached because Jellyfin's culture list is constant per version.
+            // Populates the language datalist from the curated list shared with the chip picker.
             var mdLangCache = null;
 
             var mdCulturesCache = null;
 
+            // ISO 639-1 codes are not prefixes of ISO 639-2: Swedish swe is sv,
+            // while sw means Swahili. Filipino has no ISO 639-1 code.
+            var languageIso2 = {
+                sqi: 'sq', ara: 'ar', ben: 'bn', bul: 'bg', zho: 'zh', hrv: 'hr',
+                ces: 'cs', dan: 'da', nld: 'nl', eng: 'en', est: 'et', fin: 'fi',
+                fra: 'fr', deu: 'de', ell: 'el', heb: 'he', hin: 'hi', hun: 'hu',
+                isl: 'is', ind: 'id', ita: 'it', jpn: 'ja', kor: 'ko', lav: 'lv',
+                lit: 'lt', msa: 'ms', nor: 'no', fas: 'fa', pol: 'pl', por: 'pt',
+                pan: 'pa', ron: 'ro', rus: 'ru', srp: 'sr', slk: 'sk', slv: 'sl',
+                spa: 'es', swe: 'sv', tam: 'ta', tha: 'th', tur: 'tr', ukr: 'uk',
+                urd: 'ur', vie: 'vi', cym: 'cy'
+            };
+
             function populateLanguageDatalist() {
-                // Core language shortlist only — the picker offers the same 27 codes that STR.languages
+                // Core language shortlist only — the picker offers the same codes that STR.languages
                 // knows how to commit as chips. Larger lists (Jellyfin's full culture set) let users
                 // pick codes the chip input silently rejects.
                 var list = deps.view.querySelector('#mdLangList');
                 mdCulturesCache = (deps.STR.languages || []).map(function (p) {
-                    return { ThreeLetterISOLanguageName: p[0], TwoLetterISOLanguageName: p[0].slice(0, 2), DisplayName: p[1], Name: p[1] };
+                    return { ThreeLetterISOLanguageName: p[0], TwoLetterISOLanguageName: languageIso2[p[0]] || '', DisplayName: p[1], Name: p[1] };
                 });
                 if (list) {
                     list.innerHTML = (deps.STR.languages || []).map(function (p) {
@@ -1701,8 +1734,11 @@
             // in AllowedAudioLanguages / AllowedSubtitleLanguages (e.g. "eng"). Returns 'eng' if we can't map.
             function localeToIso3() {
                 var loc = (deps.currentLocale() || 'en').toLowerCase().split(/[-_]/)[0];
+                if (loc === 'nb' || loc === 'nn' || loc === 'nob' || loc === 'nno') loc = 'nor';
                 var cultures = mdCulturesCache || [];
-                var hit = cultures.find(function (c) { return (c.TwoLetterISOLanguageName || '').toLowerCase() === loc; });
+                var hit = cultures.find(function (c) {
+                    return (c.TwoLetterISOLanguageName || '').toLowerCase() === loc || (c.ThreeLetterISOLanguageName || '').toLowerCase() === loc;
+                });
                 return (hit && (hit.ThreeLetterISOLanguageName || hit.TwoLetterISOLanguageName)) || 'eng';
             }
 
@@ -1826,26 +1862,29 @@
                     // Reproduced live in the 06-C.3 QA sweep (2026-09-23) — toggling a
                     // checkbox then Overview → Settings silently reverted the toggle
                     // because loadSettings unconditionally re-hydrated form state from
-                    // the server. Same intent as installUnsavedGuardOnce's beforeunload
-                    // guard: user's in-progress edits outlive incidental refreshes.
-                    // First load has mdSettingsDirty === false so the guard passes.
-                    if (mdSettingsDirty) return;
-                    applyConfigToForm(deps.view, c);
-                    // One-shot subForce change listener install: loadSettings runs on wizard
-                    // finish AND every Settings tab activation. ponytail: current addEventListener
-                    // multiplies with each re-run; syncSubForceFontFace is idempotent so it's
-                    // cosmetic churn only. Guarded here so we don't stack listeners; a proper
-                    // ownGlobal/dispose lifecycle lands in 06-D.
-                    var subForce = deps.view.querySelector('#mdSubForceFont');
-                    if (subForce && !subForce.dataset.mdFontFaceBound) {
-                        subForce.addEventListener('change', syncSubForceFontFace);
-                        subForce.dataset.mdFontFaceBound = '1';
+                    // the server. UI-11: on dirty bail we still need to finish the
+                    // non-form bits (libraries, stale-exclusion checkboxes) AND flip
+                    // mdConfigLoaded = true, otherwise an edit that lands before the
+                    // very first hydration completes locks Save forever.
+                    var dirtyBeforeApply = mdSettingsDirty;
+                    if (!dirtyBeforeApply) {
+                        applyConfigToForm(deps.view, c);
+                        // One-shot subForce change listener install: loadSettings runs on wizard
+                        // finish AND every Settings tab activation. ponytail: current addEventListener
+                        // multiplies with each re-run; syncSubForceFontFace is idempotent so it's
+                        // cosmetic churn only. Guarded here so we don't stack listeners; a proper
+                        // ownGlobal/dispose lifecycle lands in 06-D.
+                        var subForce = deps.view.querySelector('#mdSubForceFont');
+                        if (subForce && !subForce.dataset.mdFontFaceBound) {
+                            subForce.addEventListener('change', syncSubForceFontFace);
+                            subForce.dataset.mdFontFaceBound = '1';
+                        }
+                        // Population above fires change/input events — reset the dirty flag so a fresh
+                        // load doesn't immediately trip the unsaved-settings guard on the next unload.
+                        deps.lifetime.timeout(function () { markSettingsClean(); }, 0);
+                        syncSliderLabels();
+                        initTaskCardsAfterLoad();
                     }
-                    // Population above fires change/input events — reset the dirty flag so a fresh
-                    // load doesn't immediately trip the unsaved-settings guard on the next unload.
-                    deps.lifetime.timeout(markSettingsClean, 0);
-                    syncSliderLabels();
-                    initTaskCardsAfterLoad();
                     // Empty library selections mean all libraries. Save must wait for both lists.
                     return Promise.all([loadLibraries(c), loadStaleExcludedLibraries(c)]).then(function () {
                         mdConfigLoaded = true;
@@ -1933,7 +1972,11 @@
                 c.SkipHdrContent = view.querySelector('#mdSkipHdr').checked;
                 c.QualityScanAudiobooks = view.querySelector('#mdQualityScanAudiobooks').checked;
                 c.ReencodeFileTypes = deps.csv(view.querySelector('#mdFileTypes').value);
-                c.QualityTolerancePercent = parseInt(view.querySelector('#mdTolerance').value, 10) || 15;
+                // UI-13: `|| 15` coerces a valid 0 to 15; the slider lets you drop to zero (strict
+                // ceiling) and the user's selection must survive. Only an unparseable value falls
+                // back to the default.
+                var tol = parseInt(view.querySelector('#mdTolerance').value, 10);
+                c.QualityTolerancePercent = isNaN(tol) ? 15 : Math.max(0, Math.min(50, tol));
                 c.QualityMinSavingsPercent = Math.max(0, Math.min(95, parseInt(view.querySelector('#mdMinSavingsPct').value, 10) || 0));
                 c.QualityMinSavingsBytes = Math.max(0, parseInt(view.querySelector('#mdMinSavingsMb').value, 10) || 0) * 1024 * 1024;
                 c.AllowedAudioLanguages = deps.csv(view.querySelector('#mdAudioLangs').value);
@@ -2011,24 +2054,31 @@
             }
 
 
+            // UI-08: the Scan button needs to know whether Save actually completed before firing.
+            // saveSettings is called from the form submit event (which lets the browser's native
+            // Enter-to-submit still work) and returns no promise. Internal helper saveSettingsAsync
+            // returns a promise so external callers (Scan handler) can await success / failure /
+            // user-cancellation without polling the dirty flag.
             function saveSettings(e) {
-                e.preventDefault();
+                if (e) e.preventDefault();
+                saveSettingsAsync();
+                return false;
+            }
+
+            function saveSettingsAsync() {
                 // Race gate — refuse to save until the load pass has hydrated every checkbox
                 // from the server-side config. Without this, an early click of Save persists
                 // every un-hydrated checkbox as `false` (DryRun silently off → real deletes,
-                // PauseDuringPlayback silently off → fixes fire during playback, etc.). The
-                // load pass sets mdConfigLoaded = true at its .then's tail. See declaration
-                // near PLUGIN_ID for the full rationale (audit round 3 finding).
+                // PauseDuringPlayback silently off → fixes fire during playback, etc.).
                 if (!mdConfigLoaded) {
                     if (window.Dashboard && Dashboard.alert) {
                         Dashboard.alert({ title: 'Still loading', message: 'Settings are still loading from the server — wait a moment and try Save again.' });
                     } else {
                         window.alert('Settings are still loading from the server — wait a moment and try Save again.');
                     }
-                    return;
+                    return Promise.reject(new Error('not-loaded'));
                 }
-
-                deps.api.configuration(deps.PLUGIN_ID).then(function (c) {
+                return deps.api.configuration(deps.PLUGIN_ID).then(function (c) {
                     var turnedAuto = false, turnedPermanent = false;
                     FIX_TYPES.forEach(function (t) {
                         var newMode = deps.view.querySelector('#mdMode' + t.key).value;
@@ -2038,13 +2088,16 @@
                             if (newDisposal === 'Permanent' && c[t.disposal] !== 'Permanent') turnedPermanent = true;
                         }
                     });
-                    if (turnedAuto && !window.confirm(deps.STR.confirmAuto)) return;
-                    if (turnedPermanent && !window.confirm(deps.STR.confirmPermanent)) return;
+                    if (turnedAuto && !window.confirm(deps.STR.confirmAuto)) {
+                        return Promise.reject(new Error('cancelled'));
+                    }
+                    if (turnedPermanent && !window.confirm(deps.STR.confirmPermanent)) {
+                        return Promise.reject(new Error('cancelled'));
+                    }
 
                     readFormIntoConfig(deps.view, c);
-                    validateAndSaveConfig(c, deps.view.querySelector('#mdBinPath').value.trim());
+                    return validateAndSaveConfig(c, deps.view.querySelector('#mdBinPath').value.trim());
                 });
-                return false;
             }
 
 
@@ -2061,39 +2114,31 @@
                 if (warnEl) warnEl.style.display = 'none';
                 var url = 'RecycleBin/DiskInfo';
                 if (binPath) url += '?path=' + encodeURIComponent(binPath);
-                deps.api(url).then(function (info) {
-                    if (!forceSaveDespiteLowSpace && info && info.MeetsFiveGbMinimum === false) {
-                        showBinDiskWarning(info, c, binPath);
-                        return;
-                    }
-
-                    // #65: do NOT auto-seed the pause cap on save. The slider's `0` value is
-                    // labelled "(off)" in the UI (see slider format helper) — a user who leaves
-                    // or moves it to 0 is asking for "no cap / unlimited". Silently overwriting
-                    // that with `TotalBytes/GiB - 3` reverted the setting to a nonsense number
-                    // (162 GB on a 165 GB system disk that had nothing to do with the bin path).
-                    // The wizard finish path still seeds a default on first-run where the user
-                    // hasn't seen the slider yet. Per-run safety floor still enforced in FixTask.
-
-                    // Do NOT post('Schedule/Apply') here. That endpoint hard-writes the fix trigger back
-                    // to the interval default, which resurrects a trigger the user has intentionally
-                    // deleted from Dashboard → Scheduled Tasks. Trigger seeding is owned by
-                    // ScheduleMigrator (first-boot) and the explicit "Reset scheduled task" button.
-                    ApiClient.updatePluginConfiguration(deps.PLUGIN_ID, c).then(function (result) {
+                // UI-12: capture the edit revision at the moment we commit to persist. If any
+                // further edit happens before the API round-trip completes, markSettingsClean no
+                // longer clears the dirty flag and those edits remain protected from the next
+                // hydration overwrite.
+                var revAtStart = mdEditRevision;
+                var persist = function () {
+                    return ApiClient.updatePluginConfiguration(deps.PLUGIN_ID, c).then(function (result) {
                         deps.view.querySelector('#mdSaveMsg').textContent = deps.STR.saved;
                         Dashboard.processPluginConfigurationUpdateResult(result);
                         deps.refresh();
-                        markSettingsClean();
+                        markSettingsClean(revAtStart);
                     });
+                };
+                return deps.api(url).then(function (info) {
+                    if (!forceSaveDespiteLowSpace && info && info.MeetsFiveGbMinimum === false) {
+                        showBinDiskWarning(info, c, binPath);
+                        // showBinDiskWarning stashes a "Save anyway" closure — treat as cancelled
+                        // for the UI-08 scan-after-save flow; the user hasn't actually committed.
+                        return Promise.reject(new Error('low-space-warn'));
+                    }
+                    return persist();
                 }, function () {
                     // Endpoint failed (network, permission) — fall through and save. Missing pre-flight
                     // isn't worth blocking a settings save; the FixTask floor still enforces safety.
-                    ApiClient.updatePluginConfiguration(deps.PLUGIN_ID, c).then(function (result) {
-                        deps.view.querySelector('#mdSaveMsg').textContent = deps.STR.saved;
-                        Dashboard.processPluginConfigurationUpdateResult(result);
-                        deps.refresh();
-                        markSettingsClean();
-                    });
+                    return persist();
                 });
             }
 
@@ -2355,7 +2400,10 @@
             get localeToIso3() { return localeToIso3; },
             get populateGenreDatalist() { return populateGenreDatalist; },
             get loadSettings() { return loadSettings; },
-            get bindSettings() { return bindSettings; }
+            get bindSettings() { return bindSettings; },
+            // UI-08: Scan handler awaits this instead of polling the dirty flag; promise resolves
+            // when the server confirms persistence and rejects on cancel / low-space-warn / failure.
+            get saveSettingsAsync() { return saveSettingsAsync; }
         };
     };
 })();

@@ -15,6 +15,17 @@ namespace Jellyfin.Plugin.MediaDash.Tests;
 /// </summary>
 public class PlayabilityFixerRepairTests
 {
+    [Theory]
+    [InlineData("mkv", "matroska")]
+    [InlineData("mp4", "mp4")]
+    [InlineData("ts", "mpegts")]
+    public void InterleaveRepair_SelectsMuxerForTemporarySuffix(string ext, string format)
+    {
+        var output = TranscodeFixer.SidecarPath("movie." + ext, "repair.tmp5", ext);
+        Assert.Equal(new[] { "-i", "movie." + ext, "-map", "0", "-c", "copy", "-max_interleave_delta", "0", "-f", format, output },
+            PlayabilityFixer.BuildInterleaveRepairArgs("movie." + ext, output, ext));
+    }
+
     [Fact]
     public void HasFreeSpace_TrueForTinyFile()
     {

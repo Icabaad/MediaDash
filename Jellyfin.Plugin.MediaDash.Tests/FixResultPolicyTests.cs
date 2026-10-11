@@ -55,6 +55,9 @@ public sealed class FixResultPolicyTests
     // issue queued so the next scheduled run retries.
     [InlineData("Failed", "SourceMissing", "CompleteLegacy")]
     [InlineData("Failed", "SourceChanged", "CompleteLegacy")]
+    // Roadmap i-110-minimum-savings: Quality re-encode that missed savings threshold must NOT
+    // resurrect the retry loop — an identical encode on the next run produces an identical output.
+    [InlineData("Failed", "InsufficientSavings", "CompleteLegacy")]
     [InlineData("Failed", "AccessDenied", "KeepQueued")]
     [InlineData("Failed", "InsufficientSpace", "KeepQueued")]
     [InlineData("Failed", "FileLocked", "KeepQueued")]

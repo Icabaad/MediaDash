@@ -98,17 +98,41 @@ public class TranscodeFixerHwAccelTests
     }
 
     [Fact]
-    public void Nvenc_Mpeg2Input_SkipsHwDecode_KeepsHwEncode()
+    public void Nvenc_Mpeg4Input_SkipsHwDecode_KeepsHwEncode()
     {
-        // mpeg2video isn't on the whitelist. Today's behavior for this input on NVENC: SW decode +
-        // HW encode + CPU scale. The fix must preserve that so we don't regress on legacy sources.
-        var (probe, video) = Make(codec: "mpeg2video", height: 1080);
+        // mpeg4 (DivX/XviD) is deliberately off the whitelist — ffmpeg's mpeg4 HW decoder is
+        // spotty across families. SW decode + HW encode + CPU scale is the fallback contract.
+        var (probe, video) = Make(codec: "mpeg4", height: 1080);
         var args = TranscodeFixer.BuildArgs("in.mkv", "out.mkv", probe, video, Config(720), needsDownscale: true, "mkv", "h264_nvenc", vaapiDevice: null);
 
         Assert.DoesNotContain("-hwaccel", args);
         Assert.DoesNotContain("-hwaccel_output_format", args);
         Assert.Equal("scale=-2:720", ValueOf(args, "-vf"));
         Assert.True(ContainsPair(args, "-pix_fmt", "yuv420p"));
+    }
+
+    [Fact]
+    public void Nvenc_Mpeg2Input_UsesHwDecode()
+    {
+        // mpeg2video is on the whitelist as of i-bl-02; NVENC full GPU-resident pipeline.
+        var (probe, video) = Make(codec: "mpeg2video", height: 1080);
+        var args = TranscodeFixer.BuildArgs("in.mkv", "out.mkv", probe, video, Config(720), needsDownscale: true, "mkv", "h264_nvenc", vaapiDevice: null);
+
+        Assert.True(ContainsPair(args, "-hwaccel", "cuda"));
+        Assert.True(ContainsPair(args, "-hwaccel_output_format", "cuda"));
+        Assert.Equal("scale_cuda=w=-2:h=720:format=yuv420p", ValueOf(args, "-vf"));
+    }
+
+    [Fact]
+    public void Nvenc_Vc1Input_UsesHwDecode()
+    {
+        // vc1 is on the whitelist as of i-bl-02.
+        var (probe, video) = Make(codec: "vc1", height: 1080);
+        var args = TranscodeFixer.BuildArgs("in.mkv", "out.mkv", probe, video, Config(720), needsDownscale: true, "mkv", "h264_nvenc", vaapiDevice: null);
+
+        Assert.True(ContainsPair(args, "-hwaccel", "cuda"));
+        Assert.True(ContainsPair(args, "-hwaccel_output_format", "cuda"));
+        Assert.Equal("scale_cuda=w=-2:h=720:format=yuv420p", ValueOf(args, "-vf"));
     }
 
     [Fact]
@@ -163,8 +187,8 @@ public class TranscodeFixerHwAccelTests
     [Fact]
     public void Vaapi_LegacyCodecInput_FallsBackToSwDecodePlusHwUpload()
     {
-        // mpeg2video isn't whitelisted; VAAPI's SW-decode → hwupload path (today's behavior) must remain.
-        var (probe, video) = Make(codec: "mpeg2video", height: 1080);
+        // mpeg4 is off the whitelist; VAAPI's SW-decode → hwupload path must remain for it.
+        var (probe, video) = Make(codec: "mpeg4", height: 1080);
         var args = TranscodeFixer.BuildArgs("in.mkv", "out.mkv", probe, video, Config(1080), needsDownscale: false, "mkv", "hevc_vaapi", vaapiDevice: "/dev/dri/renderD128");
 
         Assert.DoesNotContain("-hwaccel", args);

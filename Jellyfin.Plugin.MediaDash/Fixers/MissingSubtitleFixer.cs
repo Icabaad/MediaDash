@@ -3,10 +3,10 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Net.Http;
-using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Plugin.MediaDash.Data;
+using Jellyfin.Plugin.MediaDash.Probing;
 using Jellyfin.Plugin.MediaDash.Scanners;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
@@ -26,6 +26,7 @@ public sealed class MissingSubtitleFixer : IFixer
     private readonly ISubtitleManager _subtitleManager;
     private readonly ILibraryManager _libraryManager;
     private readonly ILogger<MissingSubtitleFixer> _logger;
+    private readonly FfprobeService? _ffprobe;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="MissingSubtitleFixer"/> class.
@@ -33,11 +34,13 @@ public sealed class MissingSubtitleFixer : IFixer
     /// <param name="subtitleManager">Jellyfin's subtitle download service.</param>
     /// <param name="libraryManager">The Jellyfin library manager, used to resolve the video from the issue's item id.</param>
     /// <param name="logger">The logger.</param>
-    public MissingSubtitleFixer(ISubtitleManager subtitleManager, ILibraryManager libraryManager, ILogger<MissingSubtitleFixer> logger)
+    /// <param name="ffprobe">Resolves flagged original audio on hosts without original-language metadata.</param>
+    public MissingSubtitleFixer(ISubtitleManager subtitleManager, ILibraryManager libraryManager, ILogger<MissingSubtitleFixer> logger, FfprobeService? ffprobe = null)
     {
         _subtitleManager = subtitleManager;
         _libraryManager = libraryManager;
         _logger = logger;
+        _ffprobe = ffprobe;
     }
 
     /// <inheritdoc />
@@ -53,8 +56,15 @@ public sealed class MissingSubtitleFixer : IFixer
             return FixResult.Fail(FixReason.SourceMissing, "The library item is no longer available — re-scan to refresh the list.");
         }
 
-        IReadOnlyList<string> wanted = ReadMissingLanguages(issue) ?? (IReadOnlyList<string>)config.AllowedSubtitleLanguages;
-        if (wanted.Count == 0)
+        var probe = LanguageHelper.WantsOriginal(config.AllowedSubtitleLanguages) && _ffprobe is not null
+            ? await _ffprobe.ProbeAsync(issue.Path, cancellationToken).ConfigureAwait(false) : null;
+        var wanted = LanguageHelper.ResolveLanguages(config.AllowedSubtitleLanguages, video, probe);
+        if (wanted is null)
+        {
+            return FixResult.Refused(FixReason.ConsentChanged, "The original language could not be identified. No subtitle search was made; select a language explicitly or refresh the item's original-language metadata.");
+        }
+
+        if (wanted.Length == 0)
         {
             return FixResult.Refused(FixReason.ConsentChanged, "No wanted subtitle languages configured. Set some in Settings → Languages, then re-scan.");
         }
@@ -190,32 +200,5 @@ public sealed class MissingSubtitleFixer : IFixer
 
         return message.Contains("download limit reached", StringComparison.OrdinalIgnoreCase)
             || message.Contains("download quota", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static List<string>? ReadMissingLanguages(Issue issue)
-    {
-        try
-        {
-            using var doc = JsonDocument.Parse(issue.DetailsJson);
-            // Phase 1: guard root shape (TryGetProperty on non-object throws IOE, not
-            // JsonException). Also filter each array element on ValueKind == String — GetString
-            // on non-string entries would throw and abort the LINQ pipeline mid-materialise.
-            if (doc.RootElement.ValueKind == JsonValueKind.Object
-                && doc.RootElement.TryGetProperty("missingLanguages", out var arr)
-                && arr.ValueKind == JsonValueKind.Array)
-            {
-                return arr.EnumerateArray()
-                    .Where(e => e.ValueKind == JsonValueKind.String)
-                    .Select(e => e.GetString())
-                    .Where(s => !string.IsNullOrWhiteSpace(s))
-                    .Select(s => s!)
-                    .ToList();
-            }
-        }
-        catch (JsonException)
-        {
-        }
-
-        return null;
     }
 }

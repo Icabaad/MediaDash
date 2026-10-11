@@ -91,6 +91,36 @@ public class RunStateTests
     }
 
     [Fact]
+    public void CurrentOperationProgress_FillsWhenRunning_ClearsAcrossFilesAndOnComplete()
+    {
+        // 3f821f32: per-file ffmpeg % must surface while running, drop when advancing to the next
+        // file (UpdateProgress), and clear again on Complete so a stale bar can't bleed into the
+        // next run's very first tick.
+        var state = new RunState();
+        state.TryBegin(RunRole.Fix);
+        state.UpdateProgress(RunRole.Fix, "/a", "TranscodeFixer", 0, 2);
+        state.SetCurrentOperationProgress(RunRole.Fix, 0.45);
+        Assert.Equal(0.45, state.ReadSnapshot(RunRole.Fix).CurrentOperationProgress);
+
+        // Clamps out-of-range fractions rather than propagating garbage.
+        state.SetCurrentOperationProgress(RunRole.Fix, 1.7);
+        Assert.Equal(1.0, state.ReadSnapshot(RunRole.Fix).CurrentOperationProgress);
+
+        // Advancing to the next file drops the leftover fraction — no ghost bar from file #1.
+        state.UpdateProgress(RunRole.Fix, "/b", "TranscodeFixer", 1, 2);
+        Assert.Null(state.ReadSnapshot(RunRole.Fix).CurrentOperationProgress);
+
+        state.SetCurrentOperationProgress(RunRole.Fix, 0.9);
+        state.Complete(RunRole.Fix);
+        Assert.Null(state.ReadSnapshot(RunRole.Fix).CurrentOperationProgress);
+
+        // No-op when the slot isn't running, so a late report from a torn-down fixer can't
+        // resurrect the dashboard bar after Complete.
+        state.SetCurrentOperationProgress(RunRole.Fix, 0.5);
+        Assert.Null(state.ReadSnapshot(RunRole.Fix).CurrentOperationProgress);
+    }
+
+    [Fact]
     public void Complete_ClearsProgressButKeepsPauseReason()
     {
         // PauseReason is deliberately sticky post-run so the dashboard can surface why a run

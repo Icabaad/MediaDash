@@ -48,9 +48,9 @@ public sealed class AudioLanguageScanner : ProbingScannerBase
             return Task.FromResult<Issue?>(null);
         }
 
-        var allowed = Config.AllowedAudioLanguages;
-        var keep = audioTracks.Where(t => LanguageHelper.IsAllowed(t.Language, allowed)).ToList();
-        var remove = audioTracks.Where(t => !LanguageHelper.IsAllowed(t.Language, allowed)).ToList();
+        var removeIndexes = TrackFixer.ComputeRemovableIndexes(probe!, Type, Config, item).ToHashSet();
+        var keep = audioTracks.Where(t => !removeIndexes.Contains(t.Index)).ToList();
+        var remove = audioTracks.Where(t => removeIndexes.Contains(t.Index)).ToList();
         if (remove.Count == 0 || keep.Count == 0)
         {
             // Nothing to remove, or removing would leave no allowed track — keep everything.

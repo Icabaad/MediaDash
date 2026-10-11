@@ -316,6 +316,61 @@ public sealed class FixResultRecorderTests : IDisposable
     }
 
     [Fact]
+    public void Record_FailedInsufficientSavings_PromotesFixedToDismissedToBreakRescanLoop()
+    {
+        // External audit finding P2-F4: pre-fix a Failed+InsufficientSavings outcome flipped the
+        // primary Queued→Fixed but the scanner's re-insert NOT EXISTS clause only suppresses
+        // Queued/Dismissed rows, so the next scan re-detected the same file, auto-queued, and
+        // re-encoded. Post-fix the recorder promotes Fixed→Dismissed on this specific outcome so
+        // the existing suppression path closes the loop.
+        var id = SeedQueuedIssue(IssueType.Quality, "/lib/movie.mkv");
+        var primary = LoadIssue(id);
+        var plan = new PlannedFix(PlannedFixKind.Single, primary, Array.Empty<Issue>());
+        var result = FixResult.Fail(FixReason.InsufficientSavings, "Saved only 12% — under the configured minimum. Original kept.");
+
+        _recorder.Record(plan, new FixExecutionResult(result, id, new[] { id }), DateTime.UtcNow);
+
+        var row = Assert.Single(_db.GetHistory());
+        Assert.False(row.Success);
+        Assert.Equal(IssueStatus.Dismissed, LoadIssue(id).Status);
+    }
+
+    [Fact]
+    public void Record_DryRunInsufficientSavings_LeavesQueuedUntouched()
+    {
+        // A dry-run must never mutate persistent state (F-206). Even for InsufficientSavings the
+        // auto-dismiss must skip when WasDryRun is true.
+        var id = SeedQueuedIssue(IssueType.Quality, "/lib/movie.mkv");
+        var primary = LoadIssue(id);
+        var plan = new PlannedFix(PlannedFixKind.Single, primary, Array.Empty<Issue>());
+        var result = FixResult.Fail(FixReason.InsufficientSavings, "Saved only 12% — under the configured minimum. Original kept.");
+        result.WasDryRun = true;
+
+        // Dry-run branch in FixExecutor.ComputeResolvedIds returns an empty ResolvedIssueIds set,
+        // which means no Queued→Fixed transition happens above, and therefore no promotion.
+        _recorder.Record(plan, new FixExecutionResult(result, id, Array.Empty<long>()), DateTime.UtcNow);
+
+        Assert.Equal(IssueStatus.Queued, LoadIssue(id).Status);
+    }
+
+    [Fact]
+    public void Record_FailedSourceMissing_StaysFixedNoAutoDismiss()
+    {
+        // Control: other CompleteLegacy failure reasons must NOT dismiss — the "same input →
+        // same failure" invariant is specific to InsufficientSavings. SourceMissing might resolve
+        // if the file reappears, so Fixed is the correct terminal state (matches existing
+        // FixResultPolicy contract).
+        var id = SeedQueuedIssue(IssueType.Playability, "/lib/gone.mkv");
+        var primary = LoadIssue(id);
+        var plan = new PlannedFix(PlannedFixKind.Single, primary, Array.Empty<Issue>());
+        var result = FixResult.Fail(FixReason.SourceMissing, "File went missing between scan and fix");
+
+        _recorder.Record(plan, new FixExecutionResult(result, id, new[] { id }), DateTime.UtcNow);
+
+        Assert.Equal(IssueStatus.Fixed, LoadIssue(id).Status);
+    }
+
+    [Fact]
     public void Record_RevokedCompanionAbsentFromResolvedIds_WritesPrimaryOnly()
     {
         // Executor detected the subtitle partner was Dismissed at pre-execution check and dropped

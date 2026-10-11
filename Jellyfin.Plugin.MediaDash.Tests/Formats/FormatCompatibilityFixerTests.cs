@@ -89,18 +89,19 @@ public class FormatCompatibilityFixerTests
 
     /// <summary>
     /// P1-3: VerifyOutputAsync returns a failure message for a bogus EPUB (random bytes).
-    /// Tests the internal method directly — simpler than wiring a full VRS seam.
+    /// Instantiates a real fixer (null seams for VRS/guard/protection) and invokes the instance
+    /// method so the behaviour under test is the production code path, not a replica.
     /// </summary>
     [Fact]
     public async Task RefusesOutputWhenProbeFails()
     {
-        // Write garbage bytes at an .epub path — probe must reject.
         var bogusEpub = Path.Combine(Path.GetTempPath(), "mediadash-p13-" + Guid.NewGuid() + ".epub");
         try
         {
             File.WriteAllBytes(bogusEpub, new byte[] { 0xFF, 0xFE, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05 });
 
-            var error = await FormatCompatibilityFixer.VerifyOutputAsync(bogusEpub, CancellationToken.None);
+            var (fixer, _, _) = Setup();
+            var error = await fixer.VerifyOutputAsync(bogusEpub, CancellationToken.None);
 
             Assert.NotNull(error);
             Assert.Contains("integrity probe", error, StringComparison.OrdinalIgnoreCase);
@@ -112,86 +113,172 @@ public class FormatCompatibilityFixerTests
     }
 
     /// <summary>
-    /// P1-1: CheckCurrentPolicy must refuse when dry-run is flipped on mid-conversion.
-    /// This test exercises the policy callback directly without needing a real VRS call.
+    /// P1-1: dry-run flipped on after the user approved a fix must abort the commit. Exercises
+    /// the real <see cref="FormatCompatibilityFixer.EvaluateCommitPolicy"/> (external review
+    /// feedback: tests used to mirror the gate logic instead of calling the production code).
     /// </summary>
     [Fact]
-    public void CheckCurrentPolicyRefusesWhenDryRunFlippedOn()
+    public void CommitPolicyRefusesWhenDryRunFlippedOn()
     {
-        // Arrange: a config provider that returns DryRun=true when asked.
-        var dryRunConfig = new StubConfig(dryRun: true);
-        var decision = EvaluateFormatPolicy(dryRunConfig, protection: null, converterKind: MediaKind.Ebook);
+        var decision = FormatCompatibilityFixer.EvaluateCommitPolicy(
+            freshConfig: new PluginConfiguration { DryRun = true, ConvertEbooks = true, FormatCompatibilityFixMode = FixMode.Automatic },
+            converterKind: MediaKind.Ebook,
+            protection: null,
+            path: @"C:\lib\book.mobi",
+            issueType: IssueType.FormatCompatibility);
+
+        Assert.False(decision.Allowed);
+        Assert.Equal(FixReason.TypeDisabled, decision.Reason);
+    }
+
+    [Fact]
+    public void CommitPolicyRefusesWhenFixModeOff()
+    {
+        var decision = FormatCompatibilityFixer.EvaluateCommitPolicy(
+            freshConfig: new PluginConfiguration { DryRun = false, ConvertEbooks = true, FormatCompatibilityFixMode = FixMode.Off },
+            converterKind: MediaKind.Ebook,
+            protection: null,
+            path: @"C:\lib\book.mobi",
+            issueType: IssueType.FormatCompatibility);
 
         Assert.False(decision.Allowed);
     }
 
-    /// <summary>
-    /// P1-1: CheckCurrentPolicy allows when all gates pass.
-    /// </summary>
     [Fact]
-    public void CheckCurrentPolicyAllowsWhenClean()
+    public void CommitPolicyRefusesWhenPerKindToggleOff()
     {
-        var cleanConfig = new StubConfig(dryRun: false);
-        var decision = EvaluateFormatPolicy(cleanConfig, protection: null, converterKind: MediaKind.Ebook);
+        var decision = FormatCompatibilityFixer.EvaluateCommitPolicy(
+            freshConfig: new PluginConfiguration { DryRun = false, ConvertEbooks = false, FormatCompatibilityFixMode = FixMode.Automatic },
+            converterKind: MediaKind.Ebook,
+            protection: null,
+            path: @"C:\lib\book.mobi",
+            issueType: IssueType.FormatCompatibility);
+
+        Assert.False(decision.Allowed);
+    }
+
+    [Fact]
+    public void CommitPolicyAllowsWhenClean()
+    {
+        var decision = FormatCompatibilityFixer.EvaluateCommitPolicy(
+            freshConfig: new PluginConfiguration { DryRun = false, ConvertEbooks = true, FormatCompatibilityFixMode = FixMode.Automatic },
+            converterKind: MediaKind.Ebook,
+            protection: null,
+            path: @"C:\lib\book.mobi",
+            issueType: IssueType.FormatCompatibility);
 
         Assert.True(decision.Allowed);
     }
 
-    // Mirrors the local CheckCurrentPolicy closure logic extracted for direct testability.
-    // ponytail: the closure isn't extracted to a static method on the fixer (single use),
-    // so we replicate the logic here. If the closure grows, extract then.
-    private static PolicyDecision EvaluateFormatPolicy(IPluginConfigurationProvider configProvider, ProtectionService? protection, MediaKind converterKind)
+    /// <summary>External review #1: folder-merge used to overwrite an existing sibling .m4b with
+    /// <c>File.Move(..., overwrite: true)</c>. The fixer must refuse before converting when the
+    /// destination path already holds a file.</summary>
+    [Fact]
+    public async Task FolderMergeRefusesWhenDestinationFileExists()
     {
-        var freshCfg = configProvider.GetSnapshot();
-        if (freshCfg.DryRun)
+        var tmpRoot = Path.Combine(Path.GetTempPath(), "mediadash-folder-" + Guid.NewGuid());
+        var sourceDir = Path.Combine(tmpRoot, "Book");
+        Directory.CreateDirectory(sourceDir);
+        // ChangeExtension on a folder path produces the sibling path we need to pre-populate.
+        var destinationPath = Path.ChangeExtension(sourceDir, ".m4b");
+        File.WriteAllBytes(destinationPath, new byte[] { 1, 2, 3 });
+        try
         {
-            return PolicyDecision.Refuse(FixReason.TypeDisabled);
-        }
+            var (fixer, resolver, registry) = Setup();
+            registry.Register(new StubConverter("audiobook", MediaKind.Audiobook, new CollectionType?[] { CollectionType.books }));
+            // External review #4: unindexed path now re-resolves via ResolveByPath, so the stub
+            // needs an explicit mapping — the frozen libraryKind in details is only a tiebreaker.
+            resolver.AssignByPath(sourceDir, CollectionType.books);
 
-        var mode = freshCfg.GetFixMode(IssueType.FormatCompatibility);
-        if (mode == FixMode.Off || mode == FixMode.DetectOnly)
-        {
-            return PolicyDecision.Refuse(FixReason.TypeDisabled);
-        }
+            var issue = new Issue
+            {
+                Id = 7,
+                Type = IssueType.FormatCompatibility,
+                ItemId = Guid.Empty,
+                Path = sourceDir,
+                DetailsJson = JsonSerializer.Serialize(new
+                {
+                    kind = "audiobook-folder-merge",
+                    converter = "audiobook",
+                    targetExt = ".m4b",
+                    libraryKind = "books",
+                    mixedLibrary = false
+                }),
+                SuggestedFix = "Merge",
+                Status = IssueStatus.Detected
+            };
 
-        // Per-kind toggle check mirrors IsKindEnabled.
-        var kindEnabled = converterKind switch
-        {
-            MediaKind.Ebook => freshCfg.ConvertEbooks,
-            MediaKind.Comic => freshCfg.ConvertComics,
-            MediaKind.Audiobook => freshCfg.ConvertAudiobooks,
-            MediaKind.Image => freshCfg.ConvertImages,
-            MediaKind.Music => freshCfg.ConvertMusic,
-            MediaKind.Video => freshCfg.ConvertVideos,
-            _ => false
-        };
-        if (!kindEnabled)
-        {
-            return PolicyDecision.Refuse(FixReason.TypeDisabled);
-        }
+            var result = await fixer.FixAsync(issue, null, CancellationToken.None);
 
-        return PolicyDecision.Allow;
+            Assert.False(result.Success);
+            Assert.Contains("already exists", result.Message, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            try { Directory.Delete(tmpRoot, recursive: true); } catch { }
+        }
     }
 
-    // P1-2 (CapturesSourceIdentityBeforeConversion): requires VRS invocation with a converter
-    // that mutates the source mid-run and a real VRS seam. VRS is currently null in the test
-    // constructor (tests exit via prechecks). Wiring a full VRS integration seam is tracked as
-    // a followup (Phase 2.5 test-seam work). Placeholder test documents the intent.
-    [Fact(Skip = "Needs VRS test seam — Phase 2.5 followup")]
-    public Task CapturesSourceIdentityBeforeConversion() => Task.CompletedTask;
+    [Theory]
+    [InlineData("length")]
+    [InlineData("mtime")]
+    [InlineData("unchanged")]
+    public async Task CapturesSourceIdentityBeforeConversion(string change)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "mediadash-identity-" + Guid.NewGuid());
+        Directory.CreateDirectory(root);
+        var source = Path.Combine(root, "book.mobi");
+        var destination = Path.ChangeExtension(source, ".epub");
+        var recycled = Path.Combine(root, "original.mobi");
+        File.WriteAllBytes(source, new byte[] { 1, 2, 3, 4 });
+        try
+        {
+            var replacement = new VerifiedReplacementService(path =>
+            {
+                File.Move(path, recycled);
+                return recycled;
+            }, new SystemIOReplacementFileOperations(), logger: null);
+            var (fixer, resolver, registry) = Setup(replacement: replacement);
+            resolver.AssignByPath(source, CollectionType.books);
+            registry.Register(new StubConverter("ebook", MediaKind.Ebook, new CollectionType?[] { CollectionType.books }, (path, staged) =>
+            {
+                using (var zip = System.IO.Compression.ZipFile.Open(staged, System.IO.Compression.ZipArchiveMode.Create))
+                using (var writer = new StreamWriter(zip.CreateEntry("mimetype").Open()))
+                {
+                    writer.Write("application/epub+zip");
+                }
+
+                if (change == "length") File.AppendAllText(path, "changed");
+                if (change == "mtime") File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddMinutes(1));
+            }));
+            var result = await fixer.FixAsync(MakeIssue(source, itemId: Guid.Empty), null, CancellationToken.None);
+
+            Assert.Equal(change == "unchanged", result.Success);
+            Assert.Equal(change == "unchanged", File.Exists(destination));
+            Assert.Equal(change == "unchanged", File.Exists(recycled));
+            if (change != "unchanged")
+            {
+                Assert.Equal(FixReason.SourceChanged, result.Reason);
+                var expected = change == "length" ? new byte[] { 1, 2, 3, 4, 99, 104, 97, 110, 103, 101, 100 } : new byte[] { 1, 2, 3, 4 };
+                Assert.Equal(expected, File.ReadAllBytes(source));
+                Assert.False(File.Exists(source + ".mediadash.tmp.epub"));
+            }
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
 
     // -- P2 fix tests --
 
     /// <summary>
     /// P2-4: FixResult carries RecoveryPath and RecyclePath forwarded from ReplacementResult.
-    /// VRS seam not yet injectable end-to-end, so this exercises the field assignment directly
-    /// by constructing and mutating a FixResult — confirms the property exists and round-trips.
+    /// Exercises the result properties directly to confirm they round-trip.
     /// </summary>
     [Fact]
     public void PreservesRecoveryAndRecyclePathsOnFailedReplacement()
     {
-        // ponytail: VRS seam not injectable yet (tracked Phase 2.5). Verify property existence
-        // and assignment directly; the fixer assignment path is one-liner, tested by inspection.
         var fail = FixResult.Fail(FixReason.RecoveryRequired, "Replacement failed.");
         fail.RecyclePath = "X:\\recycle\\original.mobi";
         fail.RecoveryPath = "Y:\\recovery\\original.epub.mediadash.tmp.epub";
@@ -317,17 +404,17 @@ public class FormatCompatibilityFixerTests
         bool dryRun = false,
         string ebookPreferredTarget = "",
         string imagePreferredTarget = "",
-        Func<Guid, BaseItem?>? getItemById = null)
+        Func<Guid, BaseItem?>? getItemById = null,
+        VerifiedReplacementService? replacement = null)
     {
         var registry = new StubRegistry();
         var resolver = new StubResolver();
         var config = new StubConfig(dryRun, ebookPreferredTarget, imagePreferredTarget);
-        // ponytail: guard/protection/VRS are null — all 4 tests exit via prechecks before
-        // reaching them. DryRun test reaches the guard check: null guard = pass (skip check).
+        // Guard/protection stay null; the identity tests inject a real replacement service.
         var fixer = new FormatCompatibilityFixer(
             converters: registry,
             resolver: resolver,
-            replacement: null,
+            replacement: replacement,
             guard: null,
             protection: null,
             configProvider: config,
@@ -357,6 +444,9 @@ public class FormatCompatibilityFixerTests
                 ConvertEbooks = true,
                 ConvertComics = true,
                 ConvertImages = true,
+                ConvertAudiobooks = true,
+                ConvertMusic = true,
+                ConvertVideos = true,
                 FormatCompatibilityFixMode = FixMode.Automatic,
                 EbookPreferredTarget = _ebookPreferredTarget,
                 ImagePreferredTarget = _imagePreferredTarget
@@ -373,8 +463,11 @@ public class FormatCompatibilityFixerTests
 
     private sealed class StubConverter : IFormatConverter
     {
-        public StubConverter(string key, MediaKind kind, CollectionType?[] allowed)
+        private readonly Action<string, string>? _convert;
+
+        public StubConverter(string key, MediaKind kind, CollectionType?[] allowed, Action<string, string>? convert = null)
         {
+            _convert = convert;
             Key = key;
             Kind = kind;
             AllowedLibraryTypes = new HashSet<CollectionType?>(allowed);
@@ -388,7 +481,8 @@ public class FormatCompatibilityFixerTests
         public Task<ConverterAvailability> EnsureToolchainAsync(CancellationToken ct) => Task.FromResult(ConverterAvailability.Ready);
         public Task<ConversionResult> ConvertAsync(string sourcePath, string stagedTargetPath, IProgress<double>? progress, CancellationToken ct)
         {
-            File.WriteAllBytes(stagedTargetPath, new byte[] { 5, 6, 7, 8 });
+            if (_convert is null) File.WriteAllBytes(stagedTargetPath, new byte[] { 5, 6, 7, 8 });
+            else _convert(sourcePath, stagedTargetPath);
             return Task.FromResult(new ConversionResult(true, stagedTargetPath, string.Empty));
         }
     }
@@ -404,8 +498,21 @@ public class FormatCompatibilityFixerTests
     private sealed class StubResolver : ILibraryCollectionResolver
     {
         private readonly Dictionary<BaseItem, CollectionType?> _map = new();
-        public void Assign(BaseItem item, CollectionType? type) => _map[item] = type;
-        public CollectionType? Resolve(BaseItem item) => _map.TryGetValue(item, out var t) ? t : null;
+        private readonly Dictionary<string, CollectionType?> _pathMap = new(StringComparer.OrdinalIgnoreCase);
+        public void Assign(BaseItem item, CollectionType? type)
+        {
+            _map[item] = type;
+            if (!string.IsNullOrEmpty(item.Path))
+            {
+                _pathMap[item.Path] = type;
+            }
+        }
+
+        public void AssignByPath(string path, CollectionType? type) => _pathMap[path] = type;
+
+        public CollectionType? Resolve(BaseItem item) => _map.TryGetValue(item, out var t) ? t : ResolveByPath(item.Path);
+
+        public CollectionType? ResolveByPath(string path) => _pathMap.TryGetValue(path ?? string.Empty, out var t) ? t : null;
     }
 
     private sealed class FakeItem : BaseItem
