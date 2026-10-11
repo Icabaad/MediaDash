@@ -28,6 +28,7 @@ The Jellyfin plugin catalog also shows the changelog for each version — open *
 - **Status polling** recovers from transient failures with 3s / 6s / 12s backoff.
 - **Misc UI**: first-run wizard requires at least one library ticked; History Retry on failed rows explains the row stays Queued; Files tab folder picker disables Accept while loading; recycle bin row messages span full width; "Reset scan data" preserves Queued and Dismissed decisions.
 - **Calibre**: no longer hangs on verbose installers; paths with spaces work; override path changes picked up without restart.
+- **Light-mode readability**: Files tab right-click menu, Add-to-issues submenu, SMART-disable menu and Protect-this-path dialog were rendering with hardcoded dark colours and became unreadable under Jellyfin's Light theme. Switched to the plugin's theme tokens so they match whichever Jellyfin theme is active.
 
 ### Internal
 - Shared commit-time policy helper for all fixer/converter paths — settings, protection and approvals re-checked just before the irreversible swap.

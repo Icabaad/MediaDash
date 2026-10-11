@@ -182,41 +182,18 @@
     background: transparent !important;
 }
 
-/* Manual-add / protect context menu — shared element positioned to the right-click point. */
-.mdCtxMenu {
-    position: fixed;
-    z-index: 999999;
-    background: #1f2027;
-    border: 1px solid rgba(255,255,255,0.1);
-    border-radius: 4px;
-    box-shadow: 0 8px 20px rgba(0,0,0,0.5);
-    min-width: 14em;
-    padding: .25em 0;
-    font-size: .9em;
-}
-.mdCtxItem {
-    display: flex;
-    align-items: center;
-    gap: .55em;
-    padding: .5em .85em;
-    cursor: pointer;
-    color: #e5e7eb;
-}
-.mdCtxItem:hover,
-.mdCtxItem:focus {
-    background: rgba(255,255,255,0.08);
-    outline: none;
-}
+/* Manual-add / protect context menu — layout.css owns .mdCtxMenu and .mdCtxItem (themed).
+   Only the submenu, arrow, and the protect dialog live here. */
 .mdCtxArrow {
     margin-left: auto;
     font-size: 1.1em;
     opacity: .6;
 }
 .mdCtxSubmenu {
-    border-top: 1px solid rgba(255,255,255,0.08);
-    border-bottom: 1px solid rgba(255,255,255,0.08);
+    border-top: 1px solid var(--md-border-inner);
+    border-bottom: 1px solid var(--md-border-inner);
     padding: .25em 0 .25em 1.5em;
-    background: rgba(255,255,255,0.03);
+    background: var(--md-panel-hover);
 }
 .mdDialog {
     position: fixed;
@@ -228,7 +205,9 @@
     z-index: 999999;
 }
 .mdDialogInner {
-    background: #1f2027;
+    background: var(--md-panel);
+    color: var(--md-ink);
+    border: 1px solid var(--md-border-card);
     border-radius: 6px;
     padding: 1.25em;
     max-width: 32em;
