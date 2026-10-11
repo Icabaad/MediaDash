@@ -4,6 +4,10 @@ Release notes for every published version are on GitHub Releases: https://github
 
 The Jellyfin plugin catalog also shows the changelog for each version — open **Dashboard → Plugins → Catalog** in your Jellyfin server, or read `manifest.json` in this repo.
 
+## 1.0.8.1 (unreleased)
+
+- fixed the Issues tab going completely unresponsive on 1.0.8.0 — `GET /MediaDash/Issues` was throwing `ObjectDisposedException` at `ObjectResult.ExecuteResultAsync` and the UI silently rendered an empty list, so every button that depended on live issue data felt dead. Root cause: the new per-row "last attempt" lookup (`HistoryStore.GetLatestAttemptsByIssueIds`, added in 1.0.8.0) ran a correlated subquery against `history` with no supporting index — on any server with substantial history the request stalled long enough for Jellyfin to tear down the request scope mid-flight, which then crashed MVC's result serializer. Schema v11 adds a covering index on `history(issue_id, dry_run, fixed_at_utc)`. Migration is non-destructive — no rescan, no history loss, no re-queue needed. (#80)
+
 ## 1.0.8.0 (unreleased)
 
 ### New

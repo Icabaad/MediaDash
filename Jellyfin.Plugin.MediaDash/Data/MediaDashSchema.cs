@@ -39,7 +39,13 @@ internal static class MediaDashSchema
     //     "truncated at 0s". Cached verdicts from pre-fix runs survive the upgrade on unchanged
     //     files (cache key is path+size+mtime); purge decode_cache once so corrected detection
     //     doesn't re-use the stale false-positive strings.
-    public const int Version = 10;
+    // v11: issue #80 — HistoryStore.GetLatestAttemptsByIssueIds (new in 1.0.8.0) ran a correlated
+    //     subquery against history with no supporting index; on users with substantial history +
+    //     many open issues it stalled /MediaDash/Issues long enough for the request pipeline to
+    //     dispose the scope mid-request (ObjectDisposedException at ObjectResult.ExecuteResultAsync).
+    //     Covering index on (issue_id, dry_run, fixed_at_utc) serves both the IN-filter and the
+    //     MAX() subquery. Non-destructive — CREATE INDEX IF NOT EXISTS builds from existing rows.
+    public const int Version = 11;
 
     // Sentinel stored in restored_paths.type when the restore came from a manifest-only bin entry
     // (RecycleBin/Items/Restore). We don't know which IssueType triggered the original recycle in
@@ -131,6 +137,7 @@ internal static class MediaDashSchema
                 acknowledged INTEGER NOT NULL DEFAULT 0,
                 saved_bytes INTEGER NOT NULL DEFAULT 0
             );
+            CREATE INDEX IF NOT EXISTS idx_history_issue_id_dry_run ON history(issue_id, dry_run, fixed_at_utc);
 
             CREATE TABLE IF NOT EXISTS diagnostics (
                 source TEXT NOT NULL,
@@ -352,6 +359,17 @@ internal static class MediaDashSchema
             clearQueued.CommandText = "DELETE FROM issues WHERE type = " + (int)IssueType.Playability + " AND status = " + (int)IssueStatus.Queued;
 #pragma warning restore CA2100
             clearQueued.ExecuteNonQuery();
+        }
+
+        if (current < 11)
+        {
+            // Issue #80: covering index for HistoryStore.GetLatestAttemptsByIssueIds, which runs
+            // a correlated subquery (WHERE h2.issue_id = h1.issue_id AND dry_run = 0) that was
+            // table-scanning on every /MediaDash/Issues call. Non-destructive: SQLite builds the
+            // index from existing rows in place. Fresh installs got the index via CreateTables.
+            using var create = connection.CreateCommand();
+            create.CommandText = "CREATE INDEX IF NOT EXISTS idx_history_issue_id_dry_run ON history(issue_id, dry_run, fixed_at_utc)";
+            create.ExecuteNonQuery();
         }
 
         using var setVersion = connection.CreateCommand();
