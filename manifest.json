@@ -9,6 +9,22 @@
     "imageUrl": "https://raw.githubusercontent.com/crackruckles/MediaDash/main/logo.png",
     "versions": [
       {
+        "version": "1.0.8.1",
+        "changelog": "Hotfix for 1.0.8.0 — the Issues tab went blank and unresponsive on servers with substantial history.\n\nRoot cause: the new per-row \"last attempt\" lookup in 1.0.8.0 ran a correlated subquery against the history table with no supporting index. On loaded databases the query stalled long enough that Jellyfin tore down the request scope mid-flight, which crashed MVC\u0027s result serializer with ObjectDisposedException — the Issues tab silently rendered empty and every button that depended on live issue data felt dead.\n\nSchema v11 adds a covering index on history(issue_id, dry_run, fixed_at_utc). Non-destructive migration: SQLite builds the index from existing rows. No rescan, no history loss, no re-queue needed.\n\nMeasured ~450x speed-up on the correlated query (approx 5000ms -\u003e approx 15ms per 500-id chunk on a 48k-row history), and GET /MediaDash/Issues?openOnly=true now returns a steady HTTP 200 instead of timing out and 500ing. 1526 / 1526 tests green.\n\nFixes #80.",
+        "targetAbi": "12.0.0.0",
+        "sourceUrl": "https://github.com/crackruckles/MediaDash/releases/download/v1.0.8.1/mediadash_1.0.8.1.zip",
+        "checksum": "a5aa7e49a1fe2bf7ce248e5c69a31b08",
+        "timestamp": "2026-10-11T23:10:49Z"
+      },
+      {
+        "version": "1.0.8.1",
+        "changelog": "Hotfix for 1.0.8.0 — the Issues tab went blank and unresponsive on servers with substantial history.\n\nRoot cause: the new per-row \"last attempt\" lookup in 1.0.8.0 ran a correlated subquery against the history table with no supporting index. On loaded databases the query stalled long enough that Jellyfin tore down the request scope mid-flight, which crashed MVC\u0027s result serializer with ObjectDisposedException — the Issues tab silently rendered empty and every button that depended on live issue data felt dead.\n\nSchema v11 adds a covering index on history(issue_id, dry_run, fixed_at_utc). Non-destructive migration: SQLite builds the index from existing rows. No rescan, no history loss, no re-queue needed.\n\nMeasured ~450x speed-up on the correlated query (approx 5000ms -\u003e approx 15ms per 500-id chunk on a 48k-row history), and GET /MediaDash/Issues?openOnly=true now returns a steady HTTP 200 instead of timing out and 500ing. 1526 / 1526 tests green.\n\nFixes #80.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/crackruckles/MediaDash/releases/download/v1.0.8.1/mediadash_1.0.8.1.zip",
+        "checksum": "a5aa7e49a1fe2bf7ce248e5c69a31b08",
+        "timestamp": "2026-10-11T23:10:49Z"
+      },
+      {
         "version": "1.0.8.0",
         "changelog": "Protection: right-click (or long-press) in the Files tab to protect any file/folder from scans and fixes, or push one into the issue queue.\n\n\"Original language\" option added to audio/subtitle pickers. (#78)\n\nFormat converters for images, music and video (RMVB → MKV), with a first-run wizard step to enable them.\n\nSMART monitoring is disable-able per server via right-click on the SMART pill. (#60)\n\nPer-fixer disable toggle in Settings → Fix order.\n\nPlayability: catches damaged secondary audio tracks; books and comics refused with a doc-aware message; audio files with cover art no longer false-flagged. (#75, #76)\n\nRepair + conversion safety: source identity captured before encoding, output verified against source duration/stream count, audiobook merges won\u0027t overwrite an existing .m4b. Alternate audio tracks preserved on RMVB → MKV remuxes.\n\nScanning: Photos library now covered; Overview breakdown includes Music/Books/Photos; `.txt` books aren\u0027t flagged as orphans; respects Enabled Libraries setting.\n\nCross-volume moves refuse symlinks/junctions and verify inventory before deleting the source.\n\nMany UI fixes across Issues tab, Settings, Overview and Recycle. \"Reset scan data\" preserves Queued/Dismissed decisions.\n\nLight-mode: Files-tab right-click menu and Protect dialog are now readable under the Light theme.\n\nCalibre: no longer hangs on verbose installers; paths with spaces work; override path changes picked up without restart.",
         "targetAbi": "12.0.0.0",
@@ -411,6 +427,7 @@
     ]
   }
 ]
+
 
 
 
