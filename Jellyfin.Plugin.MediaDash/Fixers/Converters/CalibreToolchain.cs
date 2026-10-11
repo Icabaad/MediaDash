@@ -158,6 +158,15 @@ public sealed class CalibreToolchain
         // The Calibre portable installer accepts the destination as a positional argument
         // when invoked via cmd.exe /C (a console must be attached; without one it opens a GUI picker).
         // Extracted tree: <extractRoot>/Calibre Portable/Calibre/ebook-convert.exe
+        // ponytail: Calibre portable installer is a Windows .exe; on Linux/macOS it can't run,
+        // and the user is expected to install Calibre via their package manager (apt, brew, etc.)
+        // and point us at it with the override path. Short-circuit instead of crashing on cmd.exe.
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            _logger.LogWarning("Calibre portable installer is Windows-only; install Calibre via your package manager and set CalibreOverridePath.");
+            return ConverterAvailability.Unavailable;
+        }
+
         var extractRoot = Path.Combine(_dataDir, "tools", "calibre");
         if (Directory.Exists(extractRoot))
         {

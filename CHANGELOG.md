@@ -27,7 +27,7 @@ The Jellyfin plugin catalog also shows the changelog for each version — open *
 - **Settings**: Save unblocks after hydration; in-flight save won't mark newer edits clean; Quality tolerance of 0 saves correctly; Scan awaits save resolution.
 - **Status polling** recovers from transient failures with 3s / 6s / 12s backoff.
 - **Misc UI**: first-run wizard requires at least one library ticked; History Retry on failed rows explains the row stays Queued; Files tab folder picker disables Accept while loading; recycle bin row messages span full width; "Reset scan data" preserves Queued and Dismissed decisions.
-- **Calibre**: no longer hangs on verbose installers; paths with spaces work; override path changes picked up without restart.
+- **Calibre**: no longer hangs on verbose installers; paths with spaces work; override path changes picked up without restart; on Linux/macOS Jellyfin, now returns a clear "install Calibre and set CalibreOverridePath" message instead of a cryptic `cmd.exe not found` crash.
 - **Light-mode readability**: Files tab right-click menu, Add-to-issues submenu, SMART-disable menu and Protect-this-path dialog were rendering with hardcoded dark colours and became unreadable under Jellyfin's Light theme. Switched to the plugin's theme tokens so they match whichever Jellyfin theme is active.
 
 ### Internal
