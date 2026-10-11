@@ -1,10 +1,10 @@
 # Playability Repair Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Status: shipped in 1.0.8.0 (unreleased at time of writing).** All original tasks executed; scope grew during implementation. This document is preserved as the historical execution record — checkboxes are flipped to reflect what was actually built. Deviations from the original plan are summarised in "Post-plan additions" immediately below.
 
-**Goal:** Extend `PlayabilityFixer` with a four-rung repair ladder that attempts to salvage broken files before falling through to today's delete-to-recycle-bin path. Each rung is gated by its own settings toggle.
+**Goal (as executed):** Extend `PlayabilityFixer` with a **five**-rung repair ladder (rungs 1, 2, 3, 4a, 4) that attempts to salvage broken files before falling through to today's delete-to-recycle-bin path. Each rung is gated by its own settings toggle.
 
-**Architecture:** All logic stays inside `PlayabilityFixer.cs`. Rungs are private methods invoked in fixed order from a new `TryRepairAsync` helper; each writes to a sibling temp file, verifies via ffprobe, and — on success — swaps the original into the recycle bin. Reuses existing services (`FfmpegExecutor`, `OutputVerifier`, `RecycleBin`, `LibraryGuard`, `ILibraryMonitor`) and `TranscodeFixer.SidecarPath` for temp naming. No new abstractions, no new fixer class, no new issue type.
+**Architecture:** All logic stays inside `PlayabilityFixer.cs`. Rungs are private methods invoked in fixed order from a new `TryRepairAsync` helper; each writes to a sibling temp file, verifies via `OutputVerifier.VerifyAsync`, and — on success — uses `SwapRecoveryHelper.TryPromoteBeforeDispose` to move the verified output outside every sweep pattern before disposing the original into the recycle bin. Reuses existing services (`FfmpegExecutor`, `OutputVerifier`, `RecycleBin`, `LibraryGuard`, `ILibraryMonitor`, `SwapRecoveryHelper`) and `TranscodeFixer.SidecarPath` for temp naming. No new fixer class, no new issue type.
 
 **Tech Stack:** C# / .NET 9, xUnit for tests, Jellyfin plugin conventions (embedded `emby-*` UI in `configPage.html`), bundled ffmpeg via `FfmpegExecutor`.
 
@@ -14,18 +14,34 @@
 
 ---
 
+## Post-plan additions (built beyond original scope)
+
+Everything below the "Task 1" heading is the original 10-task plan and remains accurate for what it covers. Additional work landed on top of it during implementation and audit rounds:
+
+- **Rung 4a — audio-only re-encode** (new Task 7a, drafted below). Not in original scope; user-approved into the 1.0.8.0 bundle after a common failure pattern surfaced: single-audio-track broken, video fine — rung 2 refused (dropping the only audio would leave zero audio streams) and rung 4 was the only survivor, spending hours re-encoding video that was fine. Rung 4a copies video, re-encodes audio only, preserves source container so watch history survives. Config prop `RepairAttemptAudioReencode` (default true). Ships as `TryRung4aAsync` between rung 3 and rung 4.
+- **`Api/RepairSummary.cs` DTO + endpoint + Overview UI card** (new Task 11, drafted below). Not in original scope. Closes spec §8's "Repair statistics on the Overview tab" follow-up. DTO exposes 30-day + lifetime repair counts, bytes rescued, and per-rung breakdown; the Overview card renders it. Landed as a schema v9 migration (`history.saved_bytes` column) because the `SavedBytes` field was already present on `FixResult` + `HistoryEntry` but never persisted — the DB layer just needed to catch up. Byte totals count from v1.0.8.0 onwards; earlier repair rows are counted but not sized (footer discloses this).
+- **Expanded test infrastructure**. Original plan called for 4 fixtures + a README. Reality: 10 fixtures (3× rung 1, 2× rung 2, 2× rung 3, 2× rung 4, 1 healthy negative control), a `fixture-manifest.json`, `regenerate.ps1`, `validate-fixtures.ps1`, `validate-outputs.ps1`, `validator-self-tests.ps1`, plus a `torture/` sub-harness with 15+ random-corruption variants (`torture-test.ps1`, `torture-malformed-rows.ps1`). The Task 9 §6.2 fixture step covers the shape; the delta is documented in `tools/repair-test/README.md`.
+- **Post-ship hardening** (not tasks — bug fixes that landed during the 1.0.7.8 → 1.0.8.0 audit rounds and touched the repair paths). Recorded here for maintainer context, not for re-execution:
+  - Rung 1 keeps `.ts`/`.m2ts` containers by dropping mpegts-hostile subtitle codecs (PGS) before `-c copy` — previously fell through to rung 3 unnecessarily, resetting watch history.
+  - Rung 4 (MKV target) drops MP4-native `tx3g`/`mov_text` subs pre-remux — matroska muxer aborted mid-encode otherwise.
+  - `SwapRecoveryHelper.TryPromoteBeforeDispose` invented and adopted by all three fixers (playability repair, transcode, cover-strip) after audit rounds proved the finally-block `TryPreserve` pattern was unsound on process kill between "verified" and "swapped".
+  - Config-load Save race patched so the five `RepairAttempt*` checkboxes can never silently persist as `false` for users who click Save before the async config load completes.
+
+---
+
 ## File structure
 
 **Modified:**
-- `Jellyfin.Plugin.MediaDash/Fixers/PlayabilityFixer.cs` — add `TryRepairAsync`, four `TryRung<N>Async` private methods, `VerifyRepairedAsync`, `SwapRepairedAsync`; add `FfmpegExecutor` + `OutputVerifier` dependencies to the constructor. Insert the repair branch after `IsStillBrokenAsync` and before the delete block.
-- `Jellyfin.Plugin.MediaDash/Configuration/PluginConfiguration.cs` — four new `bool` properties, defaults `true`, set in ctor next to the other `Playability*` config.
-- `Jellyfin.Plugin.MediaDash/Configuration/configPage.html` — new "Repair broken files" card under the existing Playability section.
-- `Jellyfin.Plugin.MediaDash/PluginServiceRegistrator.cs` — no change expected (`FfmpegExecutor` + `OutputVerifier` are already singletons), but re-verify after adding deps.
+- `Jellyfin.Plugin.MediaDash/Fixers/PlayabilityFixer.cs` — added `TryRepairAsync`, five `TryRung<N>Async` private methods (rungs 1, 2, 3, **4a**, 4), verify+promote+swap helpers; added `FfmpegExecutor`, `OutputVerifier`, `SwapRecoveryHelper` dependencies. Repair branch inserted after `IsStillBrokenAsync` and before the delete block.
+- `Jellyfin.Plugin.MediaDash/Configuration/PluginConfiguration.cs` — **five** new `bool` properties (`RepairAttemptRemux`, `RepairAttemptDropStreams`, `RepairAttemptContainerCoerce`, `RepairAttemptAudioReencode`, `RepairAttemptReencode`), defaults `true`, set in ctor next to the other `Playability*` config.
+- `Jellyfin.Plugin.MediaDash/Configuration/configPage.html` + `Configuration/scripts/tabs/settings-tab.js` — new "Repair broken files" card under the existing Playability section, five checkboxes (UI markup ended up split: card in `configPage.html`, hydrate/save wiring in `settings-tab.js`).
+- `Jellyfin.Plugin.MediaDash/PluginServiceRegistrator.cs` — no change (all deps already singletons).
 - `CHANGELOG.md` — bullets per repo format (`feedback_mediadash_changelog_bullets`).
 
 **Created:**
-- `Jellyfin.Plugin.MediaDash.Tests/PlayabilityFixerRepairTests.cs` — 8 unit tests.
-- `tools/repair-test/README.md` + four broken-file fixtures — real-world E2E test infra.
+- `Jellyfin.Plugin.MediaDash/Api/RepairSummary.cs` — Overview-panel payload DTO (30d + lifetime counts, bytes rescued, per-rung breakdown). Not in original plan; added as partial delivery of spec §8 stats follow-up.
+- `Jellyfin.Plugin.MediaDash.Tests/PlayabilityFixerRepairTests.cs` — unit test file.
+- `tools/repair-test/` — real-world E2E harness: `README.md`, `regenerate.ps1`, `validate-fixtures.ps1`, `validate-outputs.ps1`, `validator-self-tests.ps1`, `fixture-manifest.json`, ten broken-file fixtures under `fixtures/`, plus a `torture/` sub-harness with 15+ random-corruption variants (`torture-test.ps1`, `torture-malformed-rows.ps1`).
 
 **Reused (no change):**
 - `TranscodeFixer.SidecarPath(path, marker, ext)` — static public helper for temp path naming.
@@ -40,7 +56,7 @@
 **Files:**
 - Modify: `Jellyfin.Plugin.MediaDash/Configuration/PluginConfiguration.cs`
 
-- [ ] **Step 1: Add the four properties to the constructor initializer**
+- [x] **Step 1: Add the four properties to the constructor initializer**
 
 Insert after the existing `PlayabilityDisposal = DisposalMethod.RecycleBin;` line (roughly line 46):
 
@@ -51,7 +67,7 @@ RepairAttemptContainerCoerce = true;
 RepairAttemptReencode = true;
 ```
 
-- [ ] **Step 2: Add the property declarations**
+- [x] **Step 2: Add the property declarations**
 
 Add near the other `Playability*` properties (search the file for `PlayabilityFixMode` and add the block adjacent to it):
 
@@ -69,7 +85,7 @@ public bool RepairAttemptContainerCoerce { get; set; }
 public bool RepairAttemptReencode { get; set; }
 ```
 
-- [ ] **Step 3: Build to confirm no compile break**
+- [x] **Step 3: Build to confirm no compile break**
 
 Run:
 ```
@@ -77,7 +93,7 @@ dotnet build Jellyfin.Plugin.MediaDash.sln /property:GenerateFullPaths=true /con
 ```
 Expected: build succeeds, no analyzer errors.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```
 git add Jellyfin.Plugin.MediaDash/Configuration/PluginConfiguration.cs
@@ -91,7 +107,7 @@ git commit -m "feat(playability): add RepairAttempt* config toggles (default on)
 **Files:**
 - Modify: `Jellyfin.Plugin.MediaDash/Configuration/configPage.html`
 
-- [ ] **Step 1: Locate the Playability section**
+- [x] **Step 1: Locate the Playability section**
 
 Grep for the existing Playability disposal or fix-mode markup:
 ```
@@ -100,7 +116,7 @@ grep -n "PlayabilityFixMode\|PlayabilityDisposal" Jellyfin.Plugin.MediaDash/Conf
 
 Insert the new card **immediately after** the existing Playability disposal control so users find it next to the "when broken files are found" settings.
 
-- [ ] **Step 2: Add the settings card markup**
+- [x] **Step 2: Add the settings card markup**
 
 ```html
 <div class="verticalSection" data-repair-card>
@@ -145,7 +161,7 @@ Insert the new card **immediately after** the existing Playability disposal cont
 </div>
 ```
 
-- [ ] **Step 3: Wire the four checkboxes into the load/save handlers**
+- [x] **Step 3: Wire the four checkboxes into the load/save handlers**
 
 Search the file for the closest existing checkbox that binds to `PluginConfiguration` (e.g. `SkipHdrContent`). In the same `loadConfig` / `saveConfig` JS blocks, add four lines each — mirror the existing pattern exactly.
 
@@ -165,14 +181,14 @@ config.RepairAttemptContainerCoerce = page.querySelector('#RepairAttemptContaine
 config.RepairAttemptReencode = page.querySelector('#RepairAttemptReencode').checked;
 ```
 
-- [ ] **Step 4: Manual smoke test**
+- [x] **Step 4: Manual smoke test**
 
 Deploy per CLAUDE.md (`bin/Debug/net9.0/publish/*` → `%LOCALAPPDATA%\jellyfin\plugins\MediaDash_X.Y.Z.0\`), restart Jellyfin at `localhost:8099`, open Settings → MediaDash, confirm:
 - All four boxes appear under the Playability section.
 - All four are checked by default on a fresh install.
 - Toggling one, saving, reloading the page preserves the state.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```
 git add Jellyfin.Plugin.MediaDash/Configuration/configPage.html
@@ -189,7 +205,7 @@ Extract the repair ladder scaffolding **before** implementing any rung, so the r
 - Modify: `Jellyfin.Plugin.MediaDash/Fixers/PlayabilityFixer.cs`
 - Create: `Jellyfin.Plugin.MediaDash.Tests/PlayabilityFixerRepairTests.cs`
 
-- [ ] **Step 1: Add `FfmpegExecutor` + `OutputVerifier` deps**
+- [x] **Step 1: Add `FfmpegExecutor` + `OutputVerifier` deps**
 
 Update the field block and the constructor signature:
 
@@ -223,7 +239,7 @@ public PlayabilityFixer(
 
 Update the XML doc for the constructor to describe `ffmpeg` and `verifier`.
 
-- [ ] **Step 2: Add the ladder skeleton, empty (all rungs return null)**
+- [x] **Step 2: Add the ladder skeleton, empty (all rungs return null)**
 
 Insert **before** the `IsStillBrokenAsync` method, after `FixAsync`:
 
@@ -328,7 +344,7 @@ private async Task<FixResult> SwapRepairedAsync(
 }
 ```
 
-- [ ] **Step 3: Wire the ladder into `FixAsync`**
+- [x] **Step 3: Wire the ladder into `FixAsync`**
 
 In `FixAsync`, immediately after the `stillBroken` check and before the `disposal` / `actionText` block, insert:
 
@@ -350,14 +366,14 @@ if (!config.DryRun)
 }
 ```
 
-- [ ] **Step 4: Build to confirm no compile break**
+- [x] **Step 4: Build to confirm no compile break**
 
 ```
 dotnet build Jellyfin.Plugin.MediaDash.sln /property:GenerateFullPaths=true /consoleloggerparameters:NoSummary
 ```
 Expected: build succeeds.
 
-- [ ] **Step 5: Write the regression test (all rungs off = today's behavior)**
+- [x] **Step 5: Write the regression test (all rungs off = today's behavior)**
 
 Create `Jellyfin.Plugin.MediaDash.Tests/PlayabilityFixerRepairTests.cs`. Mirror the setup style of `ArtworkFixerTests.cs`. The core assertion — when all four toggles are `false`, `FixAsync` returns the same delete-to-recycle-bin result as today for the same input.
 
@@ -390,20 +406,20 @@ public class PlayabilityFixerRepairTests
 }
 ```
 
-- [ ] **Step 6: Run the test (expected to fail with the assert-false placeholder)**
+- [x] **Step 6: Run the test (expected to fail with the assert-false placeholder)**
 
 ```
 dotnet test --filter "FullyQualifiedName~PlayabilityFixerRepairTests.AllRungsOff_BehavesLikePreRepairFixer"
 ```
 Expected: FAIL.
 
-- [ ] **Step 7: Fill in the fake wiring and make it pass**
+- [x] **Step 7: Fill in the fake wiring and make it pass**
 
 Reference `ArtworkFixerTests.cs` and `TrackFixerSubtitleGuardTests.cs` for the pattern used elsewhere in the test project (fake `FfprobeService`, real `RecycleBin` pointed at a temp dir, real `LibraryGuard` scoped to the temp library root). Wire so the fake ffprobe returns a "broken" probe for the fixture, `_ffmpeg` is never called (asserted), and the fixture ends up recycled.
 
 Re-run the test — expected: PASS.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```
 git add Jellyfin.Plugin.MediaDash/Fixers/PlayabilityFixer.cs Jellyfin.Plugin.MediaDash.Tests/PlayabilityFixerRepairTests.cs
@@ -418,7 +434,7 @@ git commit -m "feat(playability): add empty repair ladder scaffold + regression 
 - Modify: `Jellyfin.Plugin.MediaDash/Fixers/PlayabilityFixer.cs`
 - Modify: `Jellyfin.Plugin.MediaDash.Tests/PlayabilityFixerRepairTests.cs`
 
-- [ ] **Step 1: Write the failing test — rung 1 recovers a bad-index MKV**
+- [x] **Step 1: Write the failing test — rung 1 recovers a bad-index MKV**
 
 Append to `PlayabilityFixerRepairTests.cs`:
 
@@ -438,13 +454,13 @@ public async Task Rung1_RemuxSucceeds_SwapsFile()
 }
 ```
 
-- [ ] **Step 2: Run — expected FAIL**
+- [x] **Step 2: Run — expected FAIL**
 
 ```
 dotnet test --filter "FullyQualifiedName~PlayabilityFixerRepairTests.Rung1_RemuxSucceeds_SwapsFile"
 ```
 
-- [ ] **Step 3: Implement `TryRung1Async`**
+- [x] **Step 3: Implement `TryRung1Async`**
 
 Replace the stub in `PlayabilityFixer.cs`:
 
@@ -515,13 +531,13 @@ using Jellyfin.Plugin.MediaDash.Fixers; // for TranscodeFixer.SidecarPath (same 
 ```
 (Skip the `using` if `PlayabilityFixer` is already in `Jellyfin.Plugin.MediaDash.Fixers`.)
 
-- [ ] **Step 4: Run — expected PASS**
+- [x] **Step 4: Run — expected PASS**
 
 ```
 dotnet test --filter "FullyQualifiedName~PlayabilityFixerRepairTests.Rung1_RemuxSucceeds_SwapsFile"
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```
 git add Jellyfin.Plugin.MediaDash/Fixers/PlayabilityFixer.cs Jellyfin.Plugin.MediaDash.Tests/PlayabilityFixerRepairTests.cs
@@ -536,7 +552,7 @@ git commit -m "feat(playability): rung 1 — quick remux with error tolerance"
 - Modify: `Jellyfin.Plugin.MediaDash/Fixers/PlayabilityFixer.cs`
 - Modify: `Jellyfin.Plugin.MediaDash.Tests/PlayabilityFixerRepairTests.cs`
 
-- [ ] **Step 1: Write the failing test — rung 2 drops one broken subtitle, keeps video + audio**
+- [x] **Step 1: Write the failing test — rung 2 drops one broken subtitle, keeps video + audio**
 
 ```csharp
 [Fact]
@@ -567,13 +583,13 @@ public async Task Rung2_RefusesToRun_WhenDroppingWouldLeaveZeroAudio()
 }
 ```
 
-- [ ] **Step 2: Run — expected FAIL**
+- [x] **Step 2: Run — expected FAIL**
 
 ```
 dotnet test --filter "FullyQualifiedName~PlayabilityFixerRepairTests.Rung2_"
 ```
 
-- [ ] **Step 3: Implement `TryRung2Async`**
+- [x] **Step 3: Implement `TryRung2Async`**
 
 ```csharp
 // Rung 2: per-stream decode check via ffprobe, drop the streams that error.
@@ -652,7 +668,7 @@ private async Task<string?> TryRung2Async(Issue issue, FfprobeData originalProbe
 
 Also add a `DecodeStreamAsync` helper on `FfprobeService` if it doesn't already exist — this checks a single stream index for decode errors:
 
-- [ ] **Step 4: Verify or add `FfprobeService.DecodeStreamAsync`**
+- [x] **Step 4: Verify or add `FfprobeService.DecodeStreamAsync`**
 
 ```
 grep -n "DecodeStreamAsync\|DecodeCheckAsync" Jellyfin.Plugin.MediaDash/Probing/FfprobeService.cs
@@ -687,13 +703,13 @@ public async Task<string?> DecodeStreamAsync(string path, int streamIndex, Cance
 
 Fill the body by copying `DecodeCheckAsync`'s process-launch pattern verbatim.
 
-- [ ] **Step 5: Run — expected PASS on both tests**
+- [x] **Step 5: Run — expected PASS on both tests**
 
 ```
 dotnet test --filter "FullyQualifiedName~PlayabilityFixerRepairTests.Rung2_"
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```
 git add Jellyfin.Plugin.MediaDash/Fixers/PlayabilityFixer.cs Jellyfin.Plugin.MediaDash/Probing/FfprobeService.cs Jellyfin.Plugin.MediaDash.Tests/PlayabilityFixerRepairTests.cs
@@ -708,7 +724,7 @@ git commit -m "feat(playability): rung 2 — drop broken streams with audio/vide
 - Modify: `Jellyfin.Plugin.MediaDash/Fixers/PlayabilityFixer.cs`
 - Modify: `Jellyfin.Plugin.MediaDash.Tests/PlayabilityFixerRepairTests.cs`
 
-- [ ] **Step 1: Write the failing test — rung 3 coerces HEVC-in-AVI to MKV**
+- [x] **Step 1: Write the failing test — rung 3 coerces HEVC-in-AVI to MKV**
 
 ```csharp
 [Fact]
@@ -725,9 +741,9 @@ public async Task Rung3_CoercesToMkv_ChangesExtension_ResetsWatchHistory()
 }
 ```
 
-- [ ] **Step 2: Run — expected FAIL**
+- [x] **Step 2: Run — expected FAIL**
 
-- [ ] **Step 3: Implement `TryRung3Async`**
+- [x] **Step 3: Implement `TryRung3Async`**
 
 ```csharp
 // Rung 3: repack into MKV (universal container). Changes the file extension —
@@ -769,9 +785,9 @@ private async Task<string?> TryRung3Async(Issue issue, FfprobeData originalProbe
 }
 ```
 
-- [ ] **Step 4: Run — expected PASS**
+- [x] **Step 4: Run — expected PASS**
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```
 git commit -am "feat(playability): rung 3 — container coercion to MKV"
@@ -785,7 +801,7 @@ git commit -am "feat(playability): rung 3 — container coercion to MKV"
 - Modify: `Jellyfin.Plugin.MediaDash/Fixers/PlayabilityFixer.cs`
 - Modify: `Jellyfin.Plugin.MediaDash.Tests/PlayabilityFixerRepairTests.cs`
 
-- [ ] **Step 1: Write the failing test — rung 4 recovers a file that survived none of 1-3**
+- [x] **Step 1: Write the failing test — rung 4 recovers a file that survived none of 1-3**
 
 ```csharp
 [Fact]
@@ -802,9 +818,9 @@ public async Task Rung4_ReencodesVideo_LastResort()
 }
 ```
 
-- [ ] **Step 2: Run — expected FAIL**
+- [x] **Step 2: Run — expected FAIL**
 
-- [ ] **Step 3: Implement `TryRung4Async`**
+- [x] **Step 3: Implement `TryRung4Async`**
 
 ```csharp
 // Rung 4: last-resort full re-encode into MKV. Slow (hours per file for 4K sources)
@@ -859,12 +875,46 @@ private async Task<string?> TryRung4Async(Issue issue, FfprobeData originalProbe
 }
 ```
 
-- [ ] **Step 4: Run — expected PASS (may be slow)**
+- [x] **Step 4: Run — expected PASS (may be slow)**
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```
 git commit -am "feat(playability): rung 4 — full video re-encode fallback"
+```
+
+---
+
+## Task 7a: Rung 4a — Audio-only re-encode (post-plan addition)
+
+Added after the original 10-task plan executed. Fires between rung 3 and rung 4 in the ladder. Motivation: rung 2 refuses when the sole audio track is broken (dropping it leaves zero audio), so a common failure pattern (one bad audio track, video fine) fell all the way through to rung 4's multi-hour video re-encode. Rung 4a copies video, re-encodes only audio, preserves source container so Jellyfin watch history survives.
+
+**Files:**
+- Modify: `Jellyfin.Plugin.MediaDash/Fixers/PlayabilityFixer.cs`
+- Modify: `Jellyfin.Plugin.MediaDash/Configuration/PluginConfiguration.cs`
+- Modify: `Jellyfin.Plugin.MediaDash/Configuration/configPage.html` + `Configuration/scripts/tabs/settings-tab.js`
+- Modify: `Jellyfin.Plugin.MediaDash.Tests/PlayabilityFixerRepairTests.cs`
+
+- [x] **Step 1: Add `RepairAttemptAudioReencode` config property (default true)** — mirror the pattern from Task 1 for the other four toggles.
+
+- [x] **Step 2: Add the settings checkbox** — same shape as the four in Task 2, positioned between "Change container" and "Re-encode video".
+
+- [x] **Step 3: Implement `TryRung4aAsync`**
+
+Uses the shared `PlayabilityFixer` per-stream decode check (already added for rung 2) to identify which audio track is broken. Refuses if the file has more than one audio track (rung 2 would handle multi-audio drops) or if no audio track is broken (rung 4a has nothing to do). ffmpeg args: `-c:v copy -c:a aac -b:a 192k` — keeps source container and file extension.
+
+- [x] **Step 4: Wire into `TryRepairAsync` between the rung 3 and rung 4 branches**
+
+Same shape as the other rung branches; `SwapRepairedAsync(..., "audio re-encoded, video and container preserved", extensionChanged: false, ...)`.
+
+- [x] **Step 5: Test — single-audio-track broken fixture recovered by rung 4a**
+
+Added to `PlayabilityFixerRepairTests.cs`. Assert: original recycled, container unchanged, message contains "audio re-encoded".
+
+- [x] **Step 6: Commit**
+
+```
+git commit -am "feat(playability): rung 4a — audio-only re-encode (preserves container)"
 ```
 
 ---
@@ -874,7 +924,7 @@ git commit -am "feat(playability): rung 4 — full video re-encode fallback"
 **Files:**
 - Modify: `Jellyfin.Plugin.MediaDash.Tests/PlayabilityFixerRepairTests.cs`
 
-- [ ] **Step 1: Add the remaining two tests**
+- [x] **Step 1: Add the remaining two tests**
 
 ```csharp
 [Fact]
@@ -908,9 +958,9 @@ public async Task IndividualToggleOff_SkipsThatRung(bool r1, bool r2, bool r3, b
 }
 ```
 
-- [ ] **Step 2: Run — expected FAIL then PASS as you fill them in**
+- [x] **Step 2: Run — expected FAIL then PASS as you fill them in**
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```
 git commit -am "test(playability): cover all-fail fall-through and per-toggle skip"
@@ -925,7 +975,7 @@ git commit -am "test(playability): cover all-fail fall-through and per-toggle sk
 - Create: `tools/repair-test/regenerate.ps1`
 - Create: `tools/repair-test/fixtures/` (four broken files, generated by the script)
 
-- [ ] **Step 1: Author the regeneration script**
+- [x] **Step 1: Author the regeneration script**
 
 The four fixtures are generated on demand from a known-good source video (bundled or user-supplied path). This keeps the repo lean.
 
@@ -956,7 +1006,7 @@ ffmpeg -y -i $Source -c copy (Join-Path $outDir "fixture-bitstream-damage.mkv")
 # Then damage via a small helper script — see README.
 ```
 
-- [ ] **Step 2: Write the README**
+- [x] **Step 2: Write the README**
 
 ```markdown
 # repair-test — Playability repair ladder E2E fixtures
@@ -999,11 +1049,11 @@ Record wall-clock time per fixture in the CHANGELOG note so users know what
 to expect.
 ```
 
-- [ ] **Step 3: Run the E2E procedure locally**
+- [x] **Step 3: Run the E2E procedure locally**
 
 Follow the README steps end-to-end against `localhost:8099`. Fix any bugs found and re-loop until all four fixtures pass their acceptance line.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```
 git add tools/repair-test
@@ -1020,11 +1070,11 @@ git commit -m "test(playability): real-world repair-ladder fixture harness"
 - Modify: `build.yaml`
 - Modify: `manifest.json` (only via the release script — do NOT hand-edit checksums)
 
-- [ ] **Step 1: Confirm the bundle version**
+- [x] **Step 1: Confirm the bundle version**
 
 Per `project_mediadash_roadmap`, this ships as part of 1.0.8.0 alongside the media organiser, audio-conversion scanner, and Library-tab redesign. Version bump is a bundle-level decision — coordinate with the bundle owner before touching version files here. This plan intentionally does not bump the version on its own.
 
-- [ ] **Step 2: Add CHANGELOG bullets (per repo format rule)**
+- [x] **Step 2: Add CHANGELOG bullets (per repo format rule)**
 
 One bullet per user-visible change, under the 1.0.8.0 heading. Reference the spec if a feature ticket exists.
 
@@ -1033,11 +1083,11 @@ One bullet per user-visible change, under the 1.0.8.0 heading. Reference the spe
 - Broken files: `PlayabilityFixer` now depends on `FfmpegExecutor` and `OutputVerifier`; the repair step reuses the temp-swap safety pattern already in `TrackFixer`/`TranscodeFixer`.
 ```
 
-- [ ] **Step 3: Run the pre-push sweep**
+- [x] **Step 3: Run the pre-push sweep**
 
 Per `feedback_mediadash_prepush_sweep`: full E2E sweep + changelog reconciliation, returning an explicit Safe-to-push / Do-not-push verdict. Do NOT push without this verdict.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```
 git add CHANGELOG.md
@@ -1046,10 +1096,54 @@ git commit -m "docs: changelog for playability repair ladder (1.0.8.0)"
 
 ---
 
+## Task 11: RepairSummary API (post-plan addition)
+
+Added after the original 10-task plan executed. Partial delivery of spec §8 "Repair statistics on the Overview tab" — DTO and endpoint shipped; Overview UI to consume the endpoint remains open.
+
+**Files:**
+- Create: `Jellyfin.Plugin.MediaDash/Api/RepairSummary.cs`
+- Modify: `Jellyfin.Plugin.MediaDash/Api/` — the corresponding controller (existing MediaDash controller gets a new action returning `RepairSummary`).
+
+- [x] **Step 1: Define the `RepairSummary` + `RepairRungTotal` DTOs**
+
+`Count30d`, `SavedBytes30d`, `CountLifetime`, `SavedBytesLifetime`, `Rungs30d` (per-rung breakdown, biggest contributors first).
+
+- [x] **Step 2: Add the endpoint returning the DTO from `HistoryStore` aggregations**
+
+Query `history` for successful `Playability` repair rows in the 30-day window + lifetime; group by rung label parsed from the action message.
+
+- [x] **Step 3: Commit**
+
+```
+git commit -am "feat(playability): RepairSummary DTO + endpoint for Overview panel"
+```
+
+**Update (post-retrospective work):** the "endpoint" originally shipped as a ponytail-stub in `MediaDashDb.GetRepairSummary` — it returned an empty `RepairSummary` and depended on a "v7 schema migration (saved_bytes column)" that was never landed. Closed out with:
+
+- [x] **Step 4: Schema v9 migration** — `ALTER TABLE history ADD COLUMN saved_bytes INTEGER NOT NULL DEFAULT 0`. Added to both fresh-install DDL and the ladder in `MediaDashSchema.cs`. `FixResult.SavedBytes` and `HistoryEntry.SavedBytes` already existed on the models; only the DB persistence was missing.
+
+- [x] **Step 5: Wire persistence** — `HistoryStore.AddHistory` and `MediaDashDb`'s bulk INSERT both gained the `saved_bytes` param. `HistoryRowReader` reads the new column at position 12. `FixResultRecorder` propagates `result.SavedBytes` into the `HistoryEntry` it writes.
+
+- [x] **Step 6: Producer** — `PlayabilityFixer.TrySwapRepairedAsync` now sets `SavedBytes = expectedSourceLength` on the returned `FixResult`. `BytesFreed` stays at 0 (repairs don't free bytes; they prevent deletion) so `HistoryStore.GetLifetimeBytesFreed` — which sums `bytes_freed` across every fix type — is untouched. No regression.
+
+- [x] **Step 7: Real query** — `MediaDashDb.GetRepairSummary` replaced with a `SELECT action, saved_bytes, fixed_at_utc FROM history WHERE type = Playability AND success = 1 AND dry_run = 0 AND action LIKE 'repaired %'`, aggregated in memory into 30d/lifetime counts + per-rung breakdown. Rung label parsed via new `ParseRepairRungLabel` static (substring-match on `" (quick remux"`, `" (dropped"`, `" (container changed"`, `" (audio re-encoded"`, `" (video re-encoded"` — anchoring on ` (` and matching prefixes rather than paren-walking so the nested-paren "container changed to .mkv (Jellyfin watch history reset)" label doesn't degrade to "other"). Unknown labels bucket to "other" — a future rung addition surfaces on the panel until the parser catches up rather than silently dropping.
+
+- [x] **Step 8: RepairRungTotal doc** — `Rung` field key list extended to include `"audio-reencode"` (rung 4a was added after the DTO shipped).
+
+- [x] **Step 9: Overview UI card** — new `#mdRepairSummary` host div in `configPage.html` between `#mdLibraryBreakdown` and `#mdEmpty`. New `renderRepairSummary(s)` function in `overview-tab.js` (near `renderLibraryBreakdown`) reads `status.Repair`, hides the card when `CountLifetime === 0`, renders headline count + bytes-rescued + per-rung chips + lifetime footer + honesty note ("Byte totals count from v1.0.8.0 onwards; earlier repair rows are counted but not sized"). Called from `renderStatus` so it refreshes on every poll like every other status-driven card.
+
+- [x] **Step 10: Tests** — new `RepairSummaryTests.cs` (15 tests): 12 parser theories (five known rungs including partial-repair variants + four unknown-buckets-as-other cases) and 3 aggregation tests against a real SQLite DB (empty history, per-rung sums within/without 30d window, dry-run + failure exclusion). Full suite: 1302/1302 green.
+
+- [x] **Step 11: Changelog** — one bullet added under the 1.0.8.0 heading naming the panel + schema v9 migration + the byte-tracking honesty caveat.
+
+- [x] **Step 12: Commit** — see `git log`.
+
+---
+
 ## Self-review checklist (author, before handoff)
 
-- [ ] Every spec §4 subsection has at least one task implementing it.
-- [ ] Rung numbering, method names, and config property names match between tasks (`RepairAttemptRemux`, `TryRung1Async`, etc.).
-- [ ] No task references a helper (`SidecarPath`, `VerifyAsync`, `MoveToBin`, `DecodeStreamAsync`) that isn't either pre-existing or introduced in a preceding task.
-- [ ] Placeholder scan: search plan for TBD/TODO — none should remain.
-- [ ] Safety invariants #1–#5 from CLAUDE.md are honored by the swap flow and pre-flight (Task 3 Step 2).
+- [x] Every spec §4 subsection has at least one task implementing it.
+- [x] Rung numbering, method names, and config property names match between tasks (`RepairAttemptRemux`, `TryRung1Async`, etc.).
+- [x] No task references a helper (`SidecarPath`, `VerifyAsync`, `MoveToBin`, `DecodeStreamAsync`) that isn't either pre-existing or introduced in a preceding task.
+- [x] Placeholder scan: search plan for TBD/TODO — none should remain.
+- [x] Safety invariants #1–#5 from CLAUDE.md are honored by the swap flow and pre-flight (Task 3 Step 2).

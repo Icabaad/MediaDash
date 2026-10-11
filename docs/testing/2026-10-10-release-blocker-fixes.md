@@ -1,0 +1,28 @@
+# Release blockers — fixes and acceptance
+
+The two code/tooling blockers from the latest review are fixed locally. The source tree remains deliberately uncommitted; no GitHub release, commit, push or production deployment was performed.
+
+## Changes
+
+- `tools/release.ps1` requires a clean committed tree before building. It captures HEAD before publish and rechecks both HEAD and dirty/untracked status before uploading, so ordinary concurrent edits cannot silently create an artifact that differs from its release tag. Staging deletion checks the repository boundary and refuses a linked staging directory. Five self-checks cover clean acceptance and modified, untracked, staged and changed-HEAD refusal; CI runs these checks on Windows and Linux.
+- Full-file seek analysis now consumes packets incrementally. It retains one video timestamp, the maximum offset and seen-audio flags rather than the entire packet list. The existing offset calculator uses the same accumulator. Missing-stream evidence still returns Indeterminate. Sample reads stop at 100,000 packets, kill the probe and return Indeterminate without caching a clean result.
+- Linux execution exposed Windows-only fixture paths in protection, conversion-policy and library-resolution tests. Those fixtures now use native rooted paths; protection case assertions follow the existing Windows/Linux filesystem rules. Windows mixed-separator coverage is retained. Production protection behavior was unchanged.
+
+## Verification
+
+- Windows Release suite: **1,526 passed, zero failed, zero skipped** (`release-blockers-final-20261010.trx`).
+- Linux/WSL Release suite: **1,526 passed, zero failed, zero skipped** (`linux-release-final-20261010.trx`). The initial 13 failures and intermediate one-failure run are retained in `release-gaps/linux-tests*.log`; they exposed fixture portability errors rather than failing native-path behavior.
+- Streaming regression processed **three million packets** with less than 1 KB of additional accumulator allocation. A real child-process probe emitting 100,001 sample packets returned Indeterminate and left the clean cache empty (`sample-limit-tests.log`).
+- Actual production cross-device helpers moved a file from Linux tmpfs to the Windows-mounted filesystem and a nested folder back, preserving contents and removing sources (`protocol-tests.log`). This covers two filesystem providers, not two physical Windows drives or the HTTP move endpoint.
+- Two owned child processes were killed immediately after recycle/permanent source disposal. A fresh process ran the production library orphan sweep; the verified replacement survived by exact content. In the recycle case, the original survived too. This covers the replacement protocol's disposal-to-final-rename crash boundary, not every database/host crash boundary.
+- A 64 KB tmpfs mounted only inside an owned unprivileged namespace caused actual **ENOSPC** during the production cross-device recycle callback. Replacement refused, the source hash stayed intact, verified recovery output survived and partial move staging was removed (`disk-full-tests.log`). It did not fill any shared disk.
+- A separate fresh **Jellyfin 12.0.0 Windows** host on loopback port 8098 loaded the plugin as Active. **35 live assertions passed** for original/unknown retention and seek repair, including full decode, five-minute seek, full HTTP delivery, rescan and exact restore. Another **16 assertions passed** after persisting Japanese original-language metadata through the real host API; conversion retained Japanese plus English audio and original/hearing-impaired subtitles. Both harnesses restored state and removed their temporary libraries. The owned server was stopped afterward.
+- The final build was installed on the existing isolated **Jellyfin 10.11.11** host at `localhost:8099`. **21 live assertions passed** for detect → approve → seek repair → decode/seek → complete HTTP delivery → rescan → exact restore. All 23 fixture hashes were verified, no temporary/recovery sidecars remained, and user configuration, all 11 approvals, library registrations and protection rules matched the original snapshots. The plugin is Active and the server remains running (PID 35288).
+
+The Jellyfin 12 acceptance DLL SHA-256 was `771DBDF2ADA79434338516D8F6038EFCC15354E6407D2184256E31F9BE8CBFD9`. The final localhost DLL is `ED1A596DC8351EE6AC369AC20E73CF6468A90FAF4179ADA00DC99FC30B3A8C5B`; the intervening plugin-source change clarified the protection service's filesystem-case documentation. The final artifact received the additional 10.11 acceptance run. These remain local unstamped builds reporting version `0.0.0.0`; release publishing supplies the version.
+
+Evidence is retained under `C:\dev\ship-review-20261010\release-gaps`, `live-v12-release`, `live-v12-metadata-release` and `live-streaming-v10-final`. Linux source/builds and protocol fixtures are isolated under the WSL user's local share and owned `/tmp/mediadash-*` directories; no shared media was used for fault injection.
+
+## Remaining boundary
+
+Docker-container startup remains unverified: this environment has no Docker engine or the UID/GID mapping helpers required for a supported rootless installation. Linux unit/protocol execution and Windows Jellyfin 12 acceptance are now real passes, but do not substitute for that container check. Physical Android/TV clients, other GPU families, network-share failures and every possible host/database crash boundary remain outside this pass. The release changes must be reviewed and committed before the new publishing guard will allow a release; the script does not automatically commit the dirty tree.

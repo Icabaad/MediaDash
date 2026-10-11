@@ -2,6 +2,44 @@
 
 Single-page kanban for planning MediaDash releases. Not a plugin feature — dev tool.
 
+## Acceptance tests
+
+The [roadmap test matrix](../../docs/testing/ROADMAP-TEST-MATRIX.md) specifies
+acceptance cases for all unfinished cards, including research and superseded
+items. Add test and fresh evidence links to a card's notes before marking it
+complete. The [coverage review](../../docs/testing/REGRESSION-COVERAGE-REVIEW-2026-09-19.md)
+records current harness gaps and shared regression/release gates. Planned tests
+do not count as executed coverage.
+
+## Version format and release order
+
+Use exactly four numeric components: **major release.major feature.bug group.hotfix**.
+
+| Component | When to increment | Example |
+|---|---|---|
+| Major release | A substantial product generation or incompatible change; reset the other components. | `2.0.0.0` |
+| Major feature | A coherent new capability; reset bug group and hotfix. | `1.1.0.0` |
+| Bug group | A planned batch of corrections and regression coverage without new product features; reset hotfix. | `1.1.1.0` |
+| Hotfix | A narrowly scoped urgent correction to a shipped release. | `1.1.1.1` |
+
+Feature releases may contain fixes. Create follow-up bug groups and hotfixes when actual defects justify them, rather than adding empty placeholder releases. No `2.0.0.0` scope is committed yet; the planned additions fit the 1.x generation.
+
+The 2026-09-18 reorganisation preserves shipped numbers and completed cards. The existing pending `1.0.7.8` bundle keeps its assignment as a transition exception because it already mixes implemented fixes and features; its release approval is unchanged. Feature work previously assigned to `1.0.8.0` moves into the feature releases below.
+
+| Planned version | Scope |
+|---|---|
+| `1.0.8.0` | Stabilisation, documentation reconciliation and cross-platform/version release checks. |
+| `1.1.0.0` | Per-library profiles, persistent protection, repair-only actions, previews, before/after history, audio-only repair and minimum encoding savings. |
+| `1.2.0.0` | Bounded retries, plugin-data maintenance, low-space warnings, diagnostic exports, progress and optional digests. |
+| `1.3.0.0` | Audio conversion, original-track preservation, explicit track policies and subtitle extraction. |
+| `1.4.0.0` | Media organiser and carefully gated duplicate automation. |
+| `1.5.0.0` | Library/Overview redesign using the policy, maintenance and history data introduced earlier. |
+| `1.6.0.0` | Leaving soon review list with countdown and Keep action; files remain in their libraries. |
+
+Later fixers depend on the preview, protection and policy support in `1.1.0.0`. These are planned targets, not implementation or release claims. Automatic stale deletion stays in Backlog and requires revising the detect-only scope in `PLAN.md`. Hardware-dependent enhancements and drive-maintenance research remain uncommitted. Superseded cards preserve their notes and point to the canonical card; they are not marked implemented.
+
+The populated board shows pending and planned releases first, then backlog, superseded cards and historical releases. Card completion records implementation status; it does not mean the containing release has shipped.
+
 ## Open it
 
 Double-click `index.html`, or open the file path directly in Chrome/Edge. `file://` works — no server needed.
@@ -10,10 +48,10 @@ Double-click `index.html`, or open the file path directly in Chrome/Edge. `file:
 
 The welcome card gives you two options:
 
-- **New file** — pick a location for `roadmap.json`. The page seeds with the current MediaDash version buckets (Backlog, 1.0.7.5, 1.0.7.6, 1.0.8.0), empty. Every change autosaves to the file you picked.
+- **New file** — pick a location for `roadmap.json`. The page seeds empty buckets for the planned bug group (1.0.8.0), feature releases (1.1.0.0 through 1.6.0.0) and Backlog. Every change autosaves to the file you picked.
 - **Open existing** — load a previously-saved `roadmap.json`.
 
-Recommended path: `C:\dev\mediadash\tools\roadmap\roadmap.json` (already gitignored — see the repo `.gitignore` entry `tools/roadmap/*.json`).
+Open `tools/roadmap/roadmap.json` in your checkout to load the populated plan. If it is already open while an external edit is made, reload it with **Open existing** before editing so stale browser state does not overwrite the file.
 
 ## Using it
 

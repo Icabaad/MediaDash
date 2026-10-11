@@ -9,7 +9,7 @@
 
 ## 1. Goal
 
-Replace the existing MediaGrouper (Ungrouped) and MediaSorter (Misplaced) scanners with a single unified **Media Organiser** that ensures every identified Movie / TV Episode / Anime Episode in the user's enabled Jellyfin libraries sits at its canonical Jellyfin-conventional path (correct folder AND correct filename). Files Jellyfin hasn't identified are surfaced to the Errors tab with an inline manual-rename affordance rather than guessed at.
+Replace the existing MediaGrouper (Ungrouped) and MediaSorter (Misplaced) scanners with a single unified **Media Organiser** that ensures every identified Movie / TV Episode / Anime Movie / Anime Episode in the user's enabled Jellyfin libraries sits at its canonical Jellyfin-conventional path (correct folder AND correct filename). Files Jellyfin hasn't identified are surfaced to the Errors tab with an inline manual-rename affordance rather than guessed at.
 
 ---
 
@@ -17,7 +17,7 @@ Replace the existing MediaGrouper (Ungrouped) and MediaSorter (Misplaced) scanne
 
 ### In scope
 
-- Movies + TV Episodes + Anime Episodes in libraries the user has enabled (`PluginConfiguration.EnabledLibraries`).
+- Movies + TV Episodes + Anime Movies + Anime Episodes in libraries the user has enabled (`PluginConfiguration.EnabledLibraries`). Anime movies and anime episodes are routed independently via optional target-path overrides — see §5.3.
 - Files Jellyfin has confidently identified (has provider IDs / year for movies; series identity + season + episode for TV).
 - Atomic move + rename + folder creation.
 - Sidecar migration (subtitles, `.nfo`, artwork) alongside the primary file.
@@ -28,7 +28,7 @@ Replace the existing MediaGrouper (Ungrouped) and MediaSorter (Misplaced) scanne
 
 - Music, Audiobooks, Books, Comics, Pictures (existing behavior retained).
 - Watching a source / Downloads folder (mediasorter's source→library flow — deliberately never in scope).
-- Direct TMDB / TVDB calls to enrich missing metadata. Jellyfin already tried — we don't second-guess.
+- Direct TMDB / TVDB / AniDB / Shoko HTTP calls from MediaDash to enrich missing metadata. Jellyfin (and its AniDB / Shokofin plugins) already tried — we don't second-guess. Provider IDs those plugins populated on `item.ProviderIds` are fair game to read (§5.3.3); making our own HTTP requests to those services is not.
 - Multi-season merges (e.g. re-numbering a season because a provider changed the ordering) — Jellyfin handles this itself.
 - Deleting files. Organiser only moves + renames; existing OrphanCleanup handles genuine orphans.
 
@@ -51,7 +51,8 @@ Approach A from brainstorming: **new unified `MediaOrganiser` scanner + fixer**,
 ```
 ┌─────────────────────────┐
 │  MediaOrganiserScanner  │  iterates BaseItem[] filtered by EnabledLibraries
-│  (IScanner)             │  emits IssueType.Ungrouped where item.Path != canonical
+│  (IScanner)             │  emits IssueType.Ungrouped where item.Path != canonical,
+│                         │  OR diagnostic-only when rules refuse to guess (§5.2.1 r.3, §4.4)
 └──────────┬──────────────┘
            │ Issue { Path, DetailsJson={target, kind, itemId, providerIds} }
            ▼
@@ -68,11 +69,10 @@ Approach A from brainstorming: **new unified `MediaOrganiser` scanner + fixer**,
 
 Pure functions extracted for exhaustive testing:
 - `CanonicalNaming.SanitiseComponent(string) → string` — filesystem-safe path component
-- `CanonicalNaming.MoviePath(moviesRoot, name, year, ext) → string`
-- `CanonicalNaming.EpisodePath(tvRoot, seriesName, season, episode, endEpisode?, ext) → string`
-- `CanonicalNaming.AnimePath(animeRoot, seriesName, season, episode, endEpisode?, ext) → string`
+- `CanonicalNaming.MoviePath(moviesRoot, name, year, ext) → string` — also used for Anime Movies with the anime root passed in
+- `CanonicalNaming.EpisodePath(tvRoot, seriesName, season, episode, endEpisode?, ext) → string` — also used for Anime Episodes with the anime root passed in
 
-The rest of the code composes these.
+The rest of the code composes these. Anime doesn't get bespoke pure functions — same shape, different root argument (§5.3.2).
 
 ---
 
@@ -82,7 +82,7 @@ The rest of the code composes these.
 
 The scanner receives `IReadOnlyList<BaseItem>` from `ScanTask`. It:
 
-1. Reads target roots from config: `MoviesTargetPath`, `TvTargetPath`, `AnimeTargetPath`. If none configured, emits no issues (idle no-op).
+1. Reads target roots from config: `MoviesTargetPath`, `TvTargetPath`, `AnimeTargetPath`, `AnimeShowsTargetPath`, `AnimeMoviesTargetPath`. If none of the five is configured, emits no issues (idle no-op).
 2. Filters items to `Movie`, `Episode` (with or without Anime genre tag) whose `Path` is inside an enabled library.
 3. For each item, extracts identification fields (Section 4.2), classifies media kind (Section 4.3), computes canonical target (Section 5).
 4. If canonical target ≠ current path AND target path does not already exist AND source is inside a library: emits `Issue { Type=Ungrouped, Path=item.Path, DetailsJson={action, target, mediaKind, itemId, providerIds} }`.
@@ -94,25 +94,34 @@ The scanner receives `IReadOnlyList<BaseItem>` from `ScanTask`. It:
 |---------------|---------------------------------------------------------------------------------|
 | Movie         | `Name`, `ProductionYear`, at least one `ProviderId`                             |
 | Episode       | `SeriesName`, `ParentIndexNumber` (season), `IndexNumber` (episode)             |
-| Anime Episode | Same as Episode + Anime genre tag (`MediaSorterScanner.HasAnimeGenre`)          |
+| Anime Movie   | Same as Movie + is-anime signal (see §5.3.3)                                    |
+| Anime Episode | Same as Episode + is-anime signal (see §5.3.3)                                  |
 
 Anything missing any required field is unidentified.
 
 ### 4.3 Media kind classification
 
-Priority order — first match wins:
+**Anime detection** (used by the routing rules below — see §5.3.3 for detail). An item is anime if any of the following is true, first hit wins:
 
-1. If `AnimeTargetPath` configured AND item has Anime genre → **Anime**.
-2. If item is `Movie` AND `MoviesTargetPath` configured → **Movie**.
-3. If item is `Episode` AND `TvTargetPath` configured → **TV**.
-4. Otherwise → skip (target root not configured for this kind).
+1. `item.ProviderIds` contains any of `AniDb`, `Shoko Series`, `Shoko Episode` (case-insensitive lookup).
+2. Item has the Anime genre (`AnimeDetection.HasAnimeGenre` — helper extracted from the deprecated `MediaSorterScanner` into a shared utility before that class is deleted; see §8.3).
+
+**Routing** (priority order — first match wins):
+
+1. If item is anime AND item is `Movie` AND (`AnimeMoviesTargetPath` or fallback `AnimeTargetPath`) configured → **Anime Movie**.
+2. If item is anime AND item is `Episode` AND (`AnimeShowsTargetPath` or fallback `AnimeTargetPath`) configured → **Anime Episode**.
+3. If item is `Movie` AND `MoviesTargetPath` configured → **Movie**. (Anime movie with no anime destination configured falls through here — deliberate, so users who ignore the anime split still get organised into their general Movies library.)
+4. If item is `Episode` AND `TvTargetPath` configured → **TV**. (Same fallback logic as rule 3.)
+5. Otherwise → skip (no target root configured for this kind).
 
 ### 4.4 Collision handling
 
 Two distinct collision cases — both refuse to emit and log a diagnostic instead of queuing an issue that could never safely succeed:
 
 1. **Physical target collision.** If the computed target already exists on disk (some other file at that path), log `MediaOrganiser.Collision` naming source + target. Fixer can never succeed; better to surface the manual conflict once.
-2. **Cross-source series collision.** If two proposals in the same scan target the same series folder from different source parent-of-parent folders (see 5.2.1), log `MediaOrganiser.RebootCollisionRefused` naming both sources. This is the safety net when reboot disambiguation misses (e.g. two folders both bare "Doctor Who" with no year signal on disk and no `PremiereDate` in Jellyfin).
+2. **Cross-source series collision.** If two proposals in the same scan target the same series folder from different source parent-of-parent folders (see §5.2.1), refuse to emit both. Diagnostic variant depends on the evidence available:
+   - **Anime with differing provider IDs** — when both items' `Series.ProviderIds[AniDb|Shoko Series]` are populated and differ (see §5.3.3), log `MediaOrganiser.AnimeRebootCollisionRefused` and include both IDs in the message. Provably-distinct anime series never merge, even when Jellyfin's TVDb match collapsed their `SeriesName`.
+   - **All other cases** — log `MediaOrganiser.RebootCollisionRefused` naming both sources. Safety net when reboot disambiguation misses (e.g. two folders both bare "Doctor Who" with no year signal on disk and no `PremiereDate` in Jellyfin).
 
 ---
 
@@ -162,19 +171,139 @@ The legacy `MediaGrouperScanner` used `SanitiseComponent(episode.SeriesName)` ve
    - If `episode.Series.PremiereDate` is populated, `SafeSeries = SanitiseComponent(episode.SeriesName) + " (" + Year + ")"`.
    - Matches Jellyfin's own recommended folder-naming convention.
 
-3. **Plain fallback** (last resort — only when neither year signal exists):
-   - `SafeSeries = SanitiseComponent(episode.SeriesName)`.
-   - Log a `MediaOrganiser.UndisambiguatedSeries` diagnostic naming the file, so the user knows they may hit the collapse if they later add a reboot.
+3. **Refuse to guess** (last resort — when neither year signal exists):
+   - Do NOT emit an Issue. Emit a `MediaOrganiser.UndisambiguatedSeries` diagnostic naming the file to the Errors tab (with the standard `Rename` affordance from §6.2).
+   - The organiser never places a file into a bare `Doctor Who/` (or any potentially-collapsed) folder without user confirmation. Costs one Rename click per un-disambiguable series but eliminates the class of bug where a later reboot silently merges into an earlier one.
+   - Fallback-if-unsure principle: whenever the resolver cannot pick a disambiguator with confidence, the file surfaces for user review rather than a silent guess.
 
-**Cross-source collision guard (belt-and-braces):** even after `ResolveSafeSeries`, if two proposals in a single scan would target the same series folder from different source parent folders (measured by canonical `Path.GetFullPath` on the parent-of-parent), refuse to emit both. Emit a `MediaOrganiser.RebootCollisionRefused` diagnostic naming both sources and let the user resolve manually. This is the safety net for edge cases the rule above misses (e.g. two folders on disk that both bare "Doctor Who" with no year signal).
+**Cross-source collision guard (belt-and-braces):** even after `ResolveSafeSeries`, if two proposals in a single scan would target the same series folder from different source parent folders (measured by canonical `Path.GetFullPath` on the parent-of-parent), refuse to emit both. See §4.4 case 2 for the diagnostic variants (plain `RebootCollisionRefused`, or `AnimeRebootCollisionRefused` when anime provider IDs differ).
 
-### 5.3 Anime Episode
+### 5.2.2 Layout examples
 
-Same shape as TV, different root:
+Traces of what the organiser does for the common on-disk arrangements. **In every case where the rules cannot confidently pick a disambiguator, the file is not moved — it surfaces on the Errors tab with a `Rename` affordance (§6) for the user to resolve manually.** Silent guessing is never acceptable when reboots are in play.
+
+**Layout A — Clean, all year-tagged (best case)**
 
 ```
-{AnimeRoot}/{SafeSeries}/Season {NN}/{SafeSeries} S{NN}E{NN}.{ext}
+/tv/Doctor Who (1963)/Season 01/S01E01.mkv
+/tv/Doctor Who (2005)/Season 01/S01E01.mkv
+/tv/Doctor Who (2024)/Season 01/S01E01.mkv
 ```
+
+Rule 1 hits for every file; each parent-of-parent matches `(YYYY)`. Result: three distinct `SafeSeries`, three distinct target folders, files stay in their own year folders — only the filename is rewritten to `Doctor Who (YYYY) S01E01.mkv`. No merge. No user action.
+
+**Layout B — Bare + year-tagged mix (collapse trap)**
+
+```
+/tv/Doctor Who/Season 01/S01E01.mkv
+/tv/Doctor Who (2005)/Season 01/S01E01.mkv
+```
+
+Both files matched by Jellyfin to the same TVDB entry (2005). Rule 1 hits for the year-tagged folder (`"Doctor Who (2005)"`) and misses for the bare folder (falls to rule 2, which — because both matched the same series — also produces `"Doctor Who (2005)"`). Two proposals target the same series folder from different source parents → **cross-source collision guard fires**. Both files stay put; `MediaOrganiser.RebootCollisionRefused` diagnostic naming both sources goes to the Errors tab with `Rename` on each entry. User picks which is which. No silent merge.
+
+**Layout C — Single bare folder, no reboot on disk**
+
+```
+/tv/Doctor Who/Season 01/S01E01.mkv
+/tv/Doctor Who/Season 02/S02E01.mkv
+```
+
+Rule 1 misses (bare parent). Rule 2 hits — Jellyfin has `PremiereDate` on whichever entry it matched (likely the 2005 revival) → `SafeSeries = "Doctor Who (2005)"`. Files move into `Doctor Who (2005)/`. Legitimate action: no other reboot is on disk to collide with. `OrganiserFixMode` defaults to `DetectOnly`, so the proposed rename appears on the Fixes tab for user review before anything moves; if the user actually meant the 1963 series they catch it there.
+
+**Layout D — Reboot years buried at the season level**
+
+```
+/tv/Doctor Who/Season 01 (1963)/S01E01.mkv
+/tv/Doctor Who/Season 01 (2005)/S01E01.mkv
+/tv/Doctor Who/Season 01 (2024)/S01E01.mkv
+```
+
+Parent-of-parent is bare `Doctor Who` for every file. Rule 1 misses. Rule 2 → same `SafeSeries` for every file. Every file's canonical target becomes the same path → **filename collisions**. Physical-target-collision check (§4.4.1) refuses each proposal after the first. Nothing moves; three `MediaOrganiser.Collision` diagnostics on the Errors tab, each with `Rename` for explicit placement.
+
+**Layout E — Flat, no series folder**
+
+```
+/tv/Doctor Who S01E01.mkv
+/tv/Doctor Who (2005) S01E01.mkv
+```
+
+The source's parent IS the library root — no parent-of-parent to inspect. Rule 1 skips. Rule 2 attempts `SafeSeries` from `SeriesName + PremiereDate`. If Jellyfin matched both files to the same entry, cross-source collision fires at the file level (both propose the same target) → both refused. If Jellyfin distinguished them (e.g. the filename year hinted TVDB toward the 2005 entry) each gets a distinct target and moves cleanly.
+
+**Layout F — Neither rule can disambiguate**
+
+```
+/tv/Doctor Who/Season 01/S01E01.mkv     (SeriesName="Doctor Who", PremiereDate unset)
+```
+
+Rule 1 misses (bare parent). Rule 2 misses (no `PremiereDate`). **Rule 3 refuses to emit a proposal.** File surfaces on the Errors tab as `MediaOrganiser.UndisambiguatedSeries` with `Rename` — user supplies series year via the manual-rename modal, canonical target is computed from their input, fix proceeds via the §6.4 endpoint.
+
+Skipped for brevity: anime layouts (same shape as TV, addressed in §5.3) and movie reboots (Movies carry `ProductionYear` on the item itself, not a shared Series entity, so the collapse problem doesn't exist).
+
+### 5.3 Anime
+
+Anime is treated as a first-class category, split into **Anime Movies** and **Anime Shows** with independent destinations. Detection prefers AniDB / Shokofin provider IDs when present (stronger signal than genre tag), and the same reboot-collision protections that apply to live-action TV (§5.2.1) apply to anime series with an AniDB/Shoko-keyed variant on top.
+
+#### 5.3.1 Routing target
+
+For each anime item, target root resolves as:
+
+- **Anime Movie** target root = `AnimeMoviesTargetPath` ?? `AnimeTargetPath`.
+- **Anime Episode** target root = `AnimeShowsTargetPath` ?? `AnimeTargetPath`.
+
+`AnimeTargetPath` (the legacy single-bucket setting) is retained as fallback so existing installations keep working with zero migration. Users opt in to the split by setting either or both of the new fields. If none of the three is set for a given anime kind, routing falls through to §4.3 rule 3/4 (the general Movies/TV library).
+
+#### 5.3.2 Canonical path shapes
+
+**Anime Movie** — same shape as §5.1 Movie:
+
+```
+{AnimeMoviesRoot}/{SafeName} ({Year})/{SafeName} ({Year}).{ext}
+```
+
+**Anime Episode** — same shape as §5.2 TV:
+
+```
+{AnimeShowsRoot}/{SafeSeries}/Season {NN}/{SafeSeries} S{NN}E{NN}.{ext}
+```
+
+Multi-episode range formatting (`S01E01-E02`), specials handling (`Season 00`), and reboot disambiguation via `ResolveSafeSeries` (§5.2.1) all apply identically. Anime does not get a bespoke naming shape — Jellyfin's own conventions cover it.
+
+#### 5.3.3 Anime provider IDs (AniDB / Shokofin)
+
+MediaDash relies on the Jellyfin **AniDB metadata plugin** and/or **Shokofin** (both are Jellyfin plugins that populate `item.ProviderIds` automatically — no external service call from MediaDash) to identify anime. When either plugin is installed and active, an anime item carries one or more of:
+
+- `AniDb` — series/episode ID from the community AniDB plugin.
+- `Shoko Series` — Shokofin series ID.
+- `Shoko Episode` — Shokofin episode ID.
+
+**Key-casing note:** both plugins have shipped multiple casings historically (`AniDb`, `AniDB`, `anidb`). Lookup code must be case-insensitive. Verify actual keys during implementation by inspecting `item.ProviderIds.Keys` on a dev instance with each plugin installed.
+
+The organiser uses these IDs three ways:
+
+**(a) Anime detection (§4.3).** Presence of any anime provider ID is the strongest is-anime signal — stronger than genre tag, because Jellyfin's genre extraction from AniDB metadata is inconsistent. If the ID is present, the item is anime even when the Anime genre tag is missing or reversed.
+
+**(b) Collapse detector for anime series reboots (§4.4 case 3).** Two anime proposals targeting the same series folder from different source parent folders but with differing `Series.ProviderIds[AniDb|Shoko Series]` are provably distinct series — refuse to emit both, log `MediaOrganiser.AnimeRebootCollisionRefused` naming both sources and both IDs. This is the anime-native version of §5.2.1's cross-source guard: Jellyfin's TVDb matcher may collapse a franchise (e.g. the Fate/, Monogatari, or Gundam families) into one `SeriesName`, but AniDB's per-series IDs never do.
+
+**(c) Refuse-to-guess extension for anime.** If an anime item lacks any anime provider ID AND its `SeriesName` is bare (no year, no distinguishing suffix), fall back to §5.2.1 rule 3 (refuse to emit, surface to Errors tab with `Rename`). Extends the fallback-if-unsure principle to anime: without a strong ID and without a distinguishing name, we don't guess.
+
+#### 5.3.4 Opt-in anime ID suffix ("Keep AniDB / Shoko ID in canonical name")
+
+Mirrors §5.6's setting model. When enabled, the canonical anime filename gains a trailing tag:
+
+- **Anime Movie**: `{SafeName} ({Year}) [anidb-{N}].{ext}` (or `[shokoseries-{N}]` if only Shoko ID is present).
+- **Anime Episode**: `{SafeSeries} S{NN}E{NN} [anidb-{N}].{ext}`.
+
+**Source priority for the ID:**
+
+1. Existing `[anidb-N]` / `[shokoseries-N]` / `[shokoepisode-N]` tag in the source filename (users of Shokofin's own file naming).
+2. `item.ProviderIds[AniDb]` if present.
+3. `item.ProviderIds[Shoko Series]` (or `Shoko Episode` for episodes) if AniDB missing.
+
+If none yields an ID, emit the plain canonical name (no dangling `[anidb-]` marker) and log `MediaOrganiser.MissingAnimeProviderId` naming the file.
+
+**Determinism guard** identical to §5.6: adding the tag must keep `ComputeTargetPath` idempotent — running the organiser twice with the setting on must not toggle the tag on and off. Turning the setting off cleanly re-canonicalises the tag away on next run.
+
+**Regression test**: fixture Shokofin-named `.mkv` (`Show S01E01 [anidb-12345].mkv`) survives an organiser rename with the setting on; without the setting, the tag is dropped. Both paths asserted in the Layer 3 corpus.
 
 ### 5.4 Sanitisation rules (`SanitiseComponent`)
 
@@ -201,7 +330,7 @@ Rationale: the canonical target must be deterministic given `(item.Id, config)`.
 
 ### 5.6 Provider ID tag preservation (opt-in)
 
-Files wasting space already exposes the **"Keep TMDB / TVDB ID in the canonical name"** setting (added for the Transcode fixer's canonical rename — see CHANGELOG). When that setting is ticked, the organiser MUST honour it too: the canonical filename gains a trailing `[tmdbid-N]` (movies) or `[tvdbid-N]` (episodes) tag, matching Sonarr / Radarr default naming so those tools don't re-flag the file as unknown after an organiser rename.
+The **Files Wasting Space** fixer already exposes the **"Keep TMDB / TVDB ID in the canonical name"** setting (added for the Transcode fixer's canonical rename — see CHANGELOG). When that setting is ticked, the organiser MUST honour it too: the canonical filename gains a trailing `[tmdbid-N]` (movies) or `[tvdbid-N]` (episodes) tag, matching Sonarr / Radarr default naming so those tools don't re-flag the file as unknown after an organiser rename.
 
 - **Movie**: `{SafeName} ({Year}) [tmdbid-{N}].{ext}` — folder stays `{SafeName} ({Year})/`.
 - **Episode**: `{SafeSeries} S{NN}E{NN} [tvdbid-{N}].{ext}` (or `[tmdbid-{N}]` if that's the provider Jellyfin actually resolved).
@@ -248,14 +377,15 @@ Opens on Rename click. The media kind is passed from server to client via a new 
 | Season number | ✗     | ✓       |
 | Episode number | ✗    | ✓       |
 | Episode-end (multi-episode) | ✗ | optional |
-| Kind toggle (Movie / TV / Anime) | ✓ (defaults per message) |
+| Series year (resolves Layout F / B refusals — builds `SafeSeries = "{Title} ({year})"`) | ✗ | optional |
+| Kind toggle (Movie / TV / Anime Movie / Anime Episode) | ✓ (defaults per message; anime split routes to `AnimeMoviesTargetPath` or `AnimeShowsTargetPath` per §5.3.1) |
 | Preview: computed target path | ✓ | ✓ |
 
 ### 6.4 Manual-rename endpoint
 
 - **Route**: `POST /MediaDash/Organise/ManualRename`
-- **Body**: `{ sourcePath, kind, title, year?, season?, episode?, episodeEnd? }`
-- **Behaviour**: computes canonical target from the user-provided fields (same `CanonicalNaming` functions), applies steps 3–13 of the fixer flow (Section 7). Response: `{ success, target?, error? }`.
+- **Body**: `{ sourcePath, kind, title, year?, season?, episode?, episodeEnd?, seriesYear? }`. `kind` accepts `Movie` / `TV` / `AnimeMovie` / `AnimeEpisode` — the last two route to the anime target paths per §5.3.1.
+- **Behaviour**: computes canonical target from the user-provided fields (same `CanonicalNaming` functions), applies steps 3–13 of the fixer flow (Section 7) plus step 15 (write History entry) so the manual rename is Restorable via §7.2. Step 14 (repoint queued sibling issues) is skipped — manual renames have no queued issue to repoint. Response: `{ success, target?, error? }`.
 - **Auth**: same admin-only bracket as every other MediaDash mutation endpoint.
 
 The manual-rename endpoint is the **only** code path that bypasses the "must be Jellyfin-identified" gate. The user is providing the identification manually, so we honor it. Jellyfin's own identifier can re-match the file post-rename via the canonical folder structure.
@@ -318,14 +448,21 @@ Existing Restore button in the History tab already looks for `RecyclePath` on th
 
 ## 8. Config & migration
 
-### 8.1 New config field
+### 8.1 New config fields
 
 ```csharp
 // PluginConfiguration.cs
 public FixMode OrganiserFixMode { get; set; } = FixMode.DetectOnly;
+
+// Anime split (both optional; fall back to legacy AnimeTargetPath when empty — see §5.3.1)
+public string AnimeShowsTargetPath { get; set; } = string.Empty;
+public string AnimeMoviesTargetPath { get; set; } = string.Empty;
+
+// Opt-in anime provider ID suffix in canonical filename (see §5.3.4)
+public bool KeepAnimeProviderIdInFilename { get; set; } = false;
 ```
 
-Default `DetectOnly` — surfaces issues without moving anything, until the user opts in on the Fixes tab.
+`OrganiserFixMode` defaults to `DetectOnly` — surfaces issues without moving anything until the user opts in on the Fixes tab. The two new anime target paths default empty (legacy `AnimeTargetPath` handles both kinds until the user splits). `KeepAnimeProviderIdInFilename` defaults off, mirroring §5.6's TMDB/TVDB toggle.
 
 ### 8.2 Boot migration
 
@@ -334,6 +471,7 @@ On plugin startup (`Plugin.RegisterServices` or equivalent), one-shot check:
 - If legacy `UngroupedFixMode` OR `MisplacedFixMode` was `Automatic`, set `OrganiserFixMode = DetectOnly`. Do **not** carry over Automatic — the new fixer renames as well as moves, which is more aggressive than either predecessor.
 - If legacy was `DetectOnly` or `Off`, set `OrganiserFixMode` to the same value.
 - If legacy was already migrated (flag `_organiserMigrated = true` in config), no-op.
+- No migration for `AnimeShowsTargetPath` / `AnimeMoviesTargetPath` — both default empty and the §5.3.1 fallback to legacy `AnimeTargetPath` preserves existing behaviour byte-for-byte. Users opt in to the split by editing settings.
 - Save config once, log an INFO line: `"Media organiser: migrated from Ungrouped/Misplaced. Set to DetectOnly by default — enable manually on the Fixes tab after reviewing the plan."`
 
 ### 8.3 Deprecated code paths
@@ -341,14 +479,15 @@ On plugin startup (`Plugin.RegisterServices` or equivalent), one-shot check:
 - `IssueType.Ungrouped` — repurposed for the new organiser (keeps DB rows valid).
 - `IssueType.Misplaced` — deprecated. Existing rows preserved for history; no new emission. Old scanner + fixer classes deleted.
 - `MediaGrouperScanner`, `MediaGrouperFixer` — deleted.
-- `MediaSorterScanner` — deleted.
+- `MediaSorterScanner` — `HasAnimeGenre` extracted to a shared `AnimeDetection` utility class (referenced from §4.3), then scanner class deleted.
 - `MediaSorterFixer` — sidecar-moving helper extracted to shared utility, then class deleted.
 
 ### 8.4 UI changes
 
 - Fixes tab: existing "Ungrouped media" card relabelled to "Media organiser". Description updated.
 - Fixes tab: existing "Misplaced files" card removed. Any users with a saved custom FixMode see the migration line in Diagnostics.
-- Settings → Libraries: existing Movies / TV / Anime target-path fields stay put — same config drives the new scanner.
+- Settings → Libraries: existing Movies / TV / Anime target-path fields stay put — same config drives the new scanner. **Below the existing "Anime library" field, add two optional overrides**: "Anime shows library (optional)" and "Anime movies library (optional)", each with helper text: "Leave blank to keep both kinds in the main Anime library above."
+- Settings → Naming: alongside the existing "Keep TMDB / TVDB ID in the canonical name" checkbox (§5.6), add "Keep AniDB / Shoko ID in canonical anime filenames" (§5.3.4). Same on/off model, anime-scoped.
 
 ---
 
@@ -363,13 +502,19 @@ Pure functions in `CanonicalNaming`:
 - `SanitiseComponent`: table-driven for every reserved char on Windows and POSIX, every reserved DOS name, control chars, unicode, extremely long strings.
 - **Property**: sanitised output never contains any of `< > : " / \ | ? *`, never empty, never ends in `.` or ` `, never matches a reserved DOS name.
 - **Property**: idempotent — `Sanitise(Sanitise(x)) == Sanitise(x)`.
-- `MoviePath` / `EpisodePath` / `AnimePath`: table-driven for representative inputs.
+- `MoviePath` / `EpisodePath`: table-driven for representative inputs, exercised with both live-action and anime roots (same pure functions, per §3 and §5.3.2).
 - **Property**: `ComputeTargetPath(alreadyOrganisedItem)` returns its current path (no drift).
 - Multi-episode range formatting: `S01E01-E02`, `S01E10-E15`, `S00E01-E02` (specials range).
 - **Reboot disambiguation** (GitHub issue #43 regression guard):
   - `ResolveSafeSeries` on three episodes with `SeriesName = "Doctor Who"` and parent-of-parent = `Doctor Who (1963)` / `(2005)` / `(2024)` produces three distinct `SafeSeries` values.
   - Same three episodes with parent-of-parent bare "Doctor Who" (no year on disk) and `PremiereDate.Year = 1963` for all three → `MediaOrganiser.RebootCollisionRefused` diagnostic, no proposals emitted.
   - Standalone reproduction available at `tools/comprehensive-test/simulate-doctor-who/` — run before every ship to prove the property holds.
+- **Anime AniDB/Shoko collapse detector** (§5.3.3, §4.4 case 3):
+  - Two anime episodes both `SeriesName = "Fate"` (bare) from different parent folders (`.../anime/Fate Zero/...` and `.../anime/Fate stay night/...`) with different `Series.ProviderIds[AniDb]` → `MediaOrganiser.AnimeRebootCollisionRefused` naming both sources and both IDs; no proposals emitted.
+  - Same two episodes but with identical `AniDb` IDs (Jellyfin genuinely thinks they're the same series) → cross-source guard from §5.2.1 handles it normally (`RebootCollisionRefused`, non-anime variant).
+  - Case-insensitive ProviderId lookup: `AniDb`, `ANIDB`, `anidb` all resolve to the same ID.
+- **Anime detection cascade** (§4.3): item with `ProviderIds[AniDb]` set but NO Anime genre tag → classified as anime; item with Anime genre but no provider ID → classified as anime; item with neither → not anime.
+- **Anime routing split** (§5.3.1): with `AnimeMoviesTargetPath = "/anime/movies"` and `AnimeShowsTargetPath = "/anime/shows"`, `AnimeTargetPath = "/anime/legacy"` — anime Movie routes to `/anime/movies`, anime Episode routes to `/anime/shows`, legacy path never used. Clear one of the new fields → that kind falls back to legacy. Clear both → legacy handles both.
 
 ### 9.2 Layer 2 — Fuzz tests
 
@@ -384,19 +529,21 @@ xUnit theories with a `Random` generator seeded per-test:
   - Output path is deterministic (same input → same output across N iterations).
   - Output path is always under the provided root (never escapes via `..` or absolute path injection).
 
-Fuzz batch: 10,000 iterations per property, seeded for reproducibility.
+Fuzz batch: 1,000 iterations per property, seeded for reproducibility. `SanitiseComponent` has a bounded alphabet of interesting inputs — 1k converges on the same coverage 10k would give while keeping CI fast. Grow the batch only if a real bug proves the smaller run missed it.
 
 ### 9.3 Layer 3 — Real-world corpus + integration
 
-**Real-world corpus** (assembled by dispatching a research agent to scrape r/jellyfin, r/plex, and Jellyfin GitHub issues for common filename patterns):
+**Real-world corpus**:
 
-- Target: 500+ real filenames with expected canonical output.
+- Starting target: ~100 real filenames covering the pattern *families*, not exhaustive permutations. Grow the corpus only when a real user report proves a gap the smaller set missed.
 - Categories: TV episode naming variants (S01E01, 1x01, 101, S1E1, dotted, spaced), movie naming variants (year in title, year at end, no year, remake year suffix), anime naming variants (fansub group tags, alternative titles), edge cases (extras, specials, multi-episode, samples).
 - Stored in test resources; loaded via `[Theory]` `[MemberData]`. Each entry asserts the transform matches.
 
 **Integration on the running Jellyfin dev server**:
 
-- Fresh fixture library: 20+ real files across Movies (5), TV (10 spanning 2 seasons), Anime (5), plus 3 external subtitle sidecars and 2 `.nfo` files.
+- Fresh fixture library: 25+ real files across Movies (5), TV (10 spanning 2 seasons), Anime shows (5 across 2 series), Anime movies (3, at least one carrying an `AniDb` ProviderId and one carrying only `Shoko Series`), plus 3 external subtitle sidecars and 2 `.nfo` files.
+- **Anime split assertion**: with `AnimeMoviesTargetPath` and `AnimeShowsTargetPath` both configured, anime movies land under the movies root and anime episodes land under the shows root — no cross-contamination. Repeat with only `AnimeTargetPath` configured (legacy fallback): both land under the single legacy root.
+- **Anime provider-ID suffix assertion**: with `KeepAnimeProviderIdInFilename = true`, fixture `Fate stay night S01E01 [anidb-4879].mkv` survives rename with the tag preserved; with the setting off, the tag is stripped.
 - **Reboot corpus:** 3 x `Doctor Who ({year})/Season 01/S01E01.mkv` (`1963`, `2005`, `2024`) — reproduces GitHub #43. Set Jellyfin's TV metadata to default (no per-year separation) so all three collapse to `SeriesName = "Doctor Who"`.
 - Set watched state on 5 items, favorites on 3, ratings on 2 (via Jellyfin API before the run).
 - Run scanner + fixer end-to-end.
@@ -449,6 +596,6 @@ To keep future scope-creep pressure honest:
 
 - **No source→library flow.** Downloads folders are out.
 - **No custom filename templates.** Jellyfin canonical only.
-- **No TMDB/TVDB direct calls.** Jellyfin's identifier is the source of truth.
+- **No TMDB / TVDB / AniDB / Shoko direct HTTP calls.** Jellyfin (and its AniDB / Shokofin plugins) are the source of truth; MediaDash reads the provider IDs those plugins populate on `item.ProviderIds` but never queries the services itself (§2, §5.3.3).
 - **No music / audiobook / book / comic / picture reorganisation** in this ship.
 - **No cross-library moves** (movie flagged as TV — user resolves manually via Errors tab).

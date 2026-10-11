@@ -1,34 +1,69 @@
 {
   "versions": [
     {
-      "id": "backlog",
-      "name": "Backlog",
+      "id": "v-1-0-7-8",
+      "name": "1.0.7.8 - existing pending bundle (transition exception)",
       "order": 0
+    },
+    {
+      "id": "v-1-0-8-0",
+      "name": "1.0.8.0 - bug group: stabilisation and release checks",
+      "order": 1
+    },
+    {
+      "id": "v-1-1-0-0",
+      "name": "1.1.0.0 - major feature: control and safe repair",
+      "order": 2
+    },
+    {
+      "id": "v-1-2-0-0",
+      "name": "1.2.0.0 - major feature: reliable automation",
+      "order": 3
+    },
+    {
+      "id": "v-1-3-0-0",
+      "name": "1.3.0.0 - major feature: audio and subtitles",
+      "order": 4
+    },
+    {
+      "id": "v-1-4-0-0",
+      "name": "1.4.0.0 - major feature: media organiser",
+      "order": 5
+    },
+    {
+      "id": "v-1-5-0-0",
+      "name": "1.5.0.0 - major feature: library dashboard",
+      "order": 6
+    },
+    {
+      "id": "v-1-6-0-0",
+      "name": "1.6.0.0 - major feature: Leaving soon review",
+      "order": 7
+    },
+    {
+      "id": "backlog",
+      "name": "Backlog - research and uncommitted scope",
+      "order": 8
+    },
+    {
+      "id": "superseded",
+      "name": "Superseded - merged cards, not implementation work",
+      "order": 9
     },
     {
       "id": "v-1-0-7-5",
       "name": "1.0.7.5 - bug fix",
-      "order": 1
-    },
-    {
-      "id": "v-1-0-8-0",
-      "name": "1.0.8.0 - feature release",
-      "order": 3
+      "order": 10
     },
     {
       "id": "v-1-0-7-6",
       "name": "1.0.7.6 (released 2026-09-14)",
-      "order": 6
+      "order": 11
     },
     {
       "id": "v-1-0-7-7",
       "name": "1.0.7.7 - hotfix (released 2026-09-14)",
-      "order": 7
-    },
-    {
-      "id": "v-1-0-7-8",
-      "name": "1.0.7.8 - hotfix (awaiting approval)",
-      "order": 8
+      "order": 12
     }
   ],
   "items": [
@@ -135,7 +170,7 @@
     {
       "id": "i-175-11",
       "title": "Overview respects library selection",
-      "notes": "GetLibraryStats filters by EnabledLibraries. Only the filter ships in 1.0.7.5 — the WIP LibraryStat enrichment (HDR/BitDepth/AudioChannels/Kind/languages) and its UI components (sparkbar/chip/seg-pill/waffle/ring) were reverted before ship because they'd been merged from a test library breakdown that wasn't ready for release. Revisit as part of i-180-01 Library tab redesign.",
+      "notes": "GetLibraryStats filters by EnabledLibraries. Only the filter ships in 1.0.7.5 \u2014 the WIP LibraryStat enrichment (HDR/BitDepth/AudioChannels/Kind/languages) and its UI components (sparkbar/chip/seg-pill/waffle/ring) were reverted before ship because they'd been merged from a test library breakdown that wasn't ready for release. Revisit as part of i-180-01 Library tab redesign.",
       "kind": "bug",
       "versionId": "v-1-0-7-5",
       "createdAt": "2026-09-05T13:00:00Z",
@@ -165,7 +200,7 @@
     {
       "id": "i-175-14",
       "title": "Fix scheduled task getting resurrected after users delete it",
-      "notes": "Settings → Save no longer re-registers the trigger. Explicit 'Reset scheduled task' button still works.",
+      "notes": "Settings \u2192 Save no longer re-registers the trigger. Explicit 'Reset scheduled task' button still works.",
       "kind": "bug",
       "versionId": "v-1-0-7-5",
       "createdAt": "2026-09-05T13:00:00Z",
@@ -185,67 +220,67 @@
     {
       "id": "i-180-01",
       "title": "Library tab + Overview redesign",
-      "notes": "Move breakdown cards off Overview onto a new Library tab. Overview gets a compact library strip. Library tab: editorial cards per library (sparkbar, chip strip, ring gauge, seg-pill, waffle grid, backdrop of most-watched item, drill-down modal). Server: extend LibraryStat + MostPlayedItem + new /LibraryItems endpoint.",
+      "notes": "Absorbs obsolete i-bl-09. Build after maintenance and history data are available. Prioritise actionable library summaries, effective policy, blocked work and storage health; support keyboard use, readable contrast and small screens before decorative charts.\n\nEarlier planning notes (retained for context):\nMove breakdown cards off Overview onto a new Library tab. Overview gets a compact library strip. Library tab: editorial cards per library (sparkbar, chip strip, ring gauge, seg-pill, waffle grid, backdrop of most-watched item, drill-down modal). Server: extend LibraryStat + MostPlayedItem + new /LibraryItems endpoint.",
       "kind": "feature",
-      "versionId": "v-1-0-8-0",
+      "versionId": "v-1-5-0-0",
       "createdAt": "2026-09-05T13:00:00Z",
-      "updatedAt": "2026-09-05T13:00:00Z",
+      "updatedAt": "2026-09-18T07:49:16Z",
       "completedAt": null
     },
     {
       "id": "i-180-02",
       "title": "Audio conversion scanner + fixer",
-      "notes": "AudioConversionScanner/Fixer. Four detection triggers (immersive downgrade, channel ceiling, bitrate ceiling, sample-rate ceiling), setup wizard with 5 preset ladders (TV/Soundbar/Surround/Home theatre/Custom), combined-pass integration with Track + Transcode fixers. Full plan in project_mediadash_audio_scanner memory.",
+      "notes": "Depends on 1.1 policy, protection, preview and history support. Add an option to retain original audio and add a compatible track, with explicit storage cost. Preserve original-language, commentary and audio-description tracks unless the selected policy explicitly removes them. Bring the referenced memory-only plan into a repository spec before implementation.\n\nEarlier planning notes (retained for context):\nAudioConversionScanner/Fixer. Four detection triggers (immersive downgrade, channel ceiling, bitrate ceiling, sample-rate ceiling), setup wizard with 5 preset ladders (TV/Soundbar/Surround/Home theatre/Custom), combined-pass integration with Track + Transcode fixers. Full plan in project_mediadash_audio_scanner memory.",
       "kind": "feature",
-      "versionId": "v-1-0-8-0",
+      "versionId": "v-1-3-0-0",
       "createdAt": "2026-09-05T13:00:00Z",
-      "updatedAt": "2026-09-05T13:00:00Z",
+      "updatedAt": "2026-09-18T07:49:16Z",
       "completedAt": null
     },
     {
       "id": "i-180-03",
       "title": "Media organiser (replaces Ungrouped + Misplaced)",
-      "notes": "Draft spec: docs/superpowers/specs/2026-09-01-media-organiser-design.md. §5.2.1 carries the reboot-disambiguation rule (parent-of-parent folder → PremiereDate → plain SeriesName) to prevent GitHub #43 regression. Standalone repro at tools/comprehensive-test/simulate-doctor-who/. Backported to legacy MediaGrouperScanner.ResolveSafeSeriesName in 1.0.7.6 (see MediaGrouperRebootTests, 11 InlineData cases including Doctor Who 1963/2005/2024 + Silo (2023) from @Vaygrim's comment). Organiser MUST reuse the same rule — extract the pure function into CanonicalNaming.ResolveSafeSeries and delegate from both call sites so a fix or edge case discovered in one doesn't drift from the other.",
+      "notes": "Depends on shared preview and persistent protection. Preview destination collisions, companion-file moves and cross-volume space requirements. Verify watch-state and item-identity behaviour across supported Jellyfin hosts; document limits. Preserve timestamps and provide a recoverable operation record.\n\nEarlier planning notes (retained for context):\nDraft spec: docs/superpowers/specs/2026-09-01-media-organiser-design.md. \u00a75.2.1 carries the reboot-disambiguation rule (parent-of-parent folder \u2192 PremiereDate \u2192 plain SeriesName) to prevent GitHub #43 regression. Standalone repro at tools/comprehensive-test/simulate-doctor-who/. Backported to legacy MediaGrouperScanner.ResolveSafeSeriesName in 1.0.7.6 (see MediaGrouperRebootTests, 11 InlineData cases including Doctor Who 1963/2005/2024 + Silo (2023) from @Vaygrim's comment). Organiser MUST reuse the same rule \u2014 extract the pure function into CanonicalNaming.ResolveSafeSeries and delegate from both call sites so a fix or edge case discovered in one doesn't drift from the other.",
       "kind": "feature",
-      "versionId": "v-1-0-8-0",
+      "versionId": "v-1-4-0-0",
       "createdAt": "2026-09-05T13:00:00Z",
-      "updatedAt": "2026-09-10T00:00:00Z",
+      "updatedAt": "2026-09-18T07:49:16Z",
       "completedAt": null
     },
     {
       "id": "i-180-04",
       "title": "Playability repair ladder",
-      "notes": "Four-rung repair in PlayabilityFixer before delete: quick remux → drop broken streams → change container to MKV → re-encode. Each rung has its own toggle in a Repair broken files settings card, all default on. Spec: docs/superpowers/specs/2026-09-05-playability-repair-design.md. Plan: docs/superpowers/plans/2026-09-05-playability-repair.md.",
+      "notes": "Four-rung repair in PlayabilityFixer before delete: quick remux \u2192 drop broken streams \u2192 change container to MKV \u2192 re-encode. Each rung has its own toggle in a Repair broken files settings card, all default on. Spec: docs/superpowers/specs/2026-09-05-playability-repair-design.md. Plan: docs/superpowers/plans/2026-09-05-playability-repair.md.",
       "kind": "feature",
       "versionId": "v-1-0-7-6",
       "createdAt": "2026-09-05T13:00:00Z",
-      "updatedAt": "2026-09-08T14:52:17.460Z",
+      "updatedAt": "2026-09-08T14:52:17.46Z",
       "completedAt": "2026-09-08T15:30:00Z"
     },
     {
       "id": "i-180-05",
       "title": "Subtitle extract to sidecar files",
-      "notes": "New SubtitleExtractScanner/Fixer with combined-pass integration (2/3-companion cases in TrackFixer.FixCombinedAsync, companion-aware TranscodeFixer.BuildArgs). Extracts text subs (subrip/srt/ass/ssa/webvtt/mov_text) matching AllowedSubtitleLanguages to Jellyfin-named sidecars, removes from container. Image subs stay in container. Spec: docs/superpowers/specs/2026-09-05-subtitle-extract-design.md. Plan: docs/superpowers/plans/2026-09-05-subtitle-extract.md.",
+      "notes": "Depends on shared preview, protection and change-history support. Preserve forced/SDH naming and styling resources required by extracted subtitles. Verify extraction before removing embedded tracks; handle sidecar collisions and restore the container plus sidecars consistently.\n\nEarlier planning notes (retained for context):\nNew SubtitleExtractScanner/Fixer with combined-pass integration (2/3-companion cases in TrackFixer.FixCombinedAsync, companion-aware TranscodeFixer.BuildArgs). Extracts text subs (subrip/srt/ass/ssa/webvtt/mov_text) matching AllowedSubtitleLanguages to Jellyfin-named sidecars, removes from container. Image subs stay in container. Spec: docs/superpowers/specs/2026-09-05-subtitle-extract-design.md. Plan: docs/superpowers/plans/2026-09-05-subtitle-extract.md.",
       "kind": "feature",
-      "versionId": "v-1-0-8-0",
+      "versionId": "v-1-3-0-0",
       "createdAt": "2026-09-05T13:00:00Z",
-      "updatedAt": "2026-09-05T13:00:00Z",
+      "updatedAt": "2026-09-18T07:49:16Z",
       "completedAt": null
     },
     {
       "id": "i-bl-02",
       "title": "Extend HW-decode whitelist for legacy codecs (mpeg2, vc1)",
-      "notes": "Deferred from HW-decode fix. Legacy codecs are rare in oversized library files (they're already small). Add if a user's library has legacy content that would benefit.",
+      "notes": "Shipped in 1.0.8.0 (unreleased). TranscodeFixer.HwDecodeCodecs now includes mpeg2video + vc1; regression pinned via new Nvenc_Mpeg2Input_UsesHwDecode + Nvenc_Vc1Input_UsesHwDecode tests. mpeg4 (DivX/XviD) stays off because ffmpeg's mpeg4 HW decoder is spotty across GPU families; the fallback assertion moved to Nvenc_Mpeg4Input_SkipsHwDecode_KeepsHwEncode.\n\nEarlier planning notes (retained for context):\nDeferred from HW-decode fix. Legacy codecs are rare in oversized library files (they're already small). Add if a user's library has legacy content that would benefit.",
       "kind": "feature",
-      "versionId": "backlog",
+      "versionId": "v-1-0-8-0",
       "createdAt": "2026-09-05T13:00:00Z",
-      "updatedAt": "2026-09-14T12:39:07.732Z",
-      "completedAt": null
+      "updatedAt": "2026-09-25T13:30:00Z",
+      "completedAt": "2026-09-25T13:30:00Z"
     },
     {
       "id": "i-bl-03",
       "title": "AMF + VideoToolbox HW decode when GPU-resident scale filters land",
-      "notes": "Deferred from HW-decode fix. Revisit when ffmpeg ships stable scale_d3d11 / scale_vt. Bench showed d3d11va decode is currently a net loss on downscale workloads because of the extra GPU↔CPU copy.",
+      "notes": "Deferred from HW-decode fix. Revisit when ffmpeg ships stable scale_d3d11 / scale_vt. Bench showed d3d11va decode is currently a net loss on downscale workloads because of the extra GPU\u2194CPU copy.",
       "kind": "feature",
       "versionId": "backlog",
       "createdAt": "2026-09-05T13:00:00Z",
@@ -255,7 +290,7 @@
     {
       "id": "i-bl-05",
       "title": "Configurable rung-4 encoder target in repair ladder",
-      "notes": "Deferred from repair spec §8. Currently hardcoded to h264/aac in MKV. Add a knob only if a user files a specific preference.",
+      "notes": "Deferred from repair spec \u00a78. Currently hardcoded to h264/aac in MKV. Add a knob only if a user files a specific preference.",
       "kind": "feature",
       "versionId": "backlog",
       "createdAt": "2026-09-05T13:00:00Z",
@@ -264,18 +299,18 @@
     },
     {
       "id": "i-bl-06",
-      "title": "Repair-ladder rung 5: audio re-encode",
-      "notes": "Deferred from repair spec §8. Belongs to the audio-conversion scanner's territory. If that scanner ships in the same bundle, wire the two so repair can hand off audio-only damage.",
+      "title": "Merged: audio-only repair (see i-bl-12-rung4a-audio-reencode)",
+      "notes": "Planning duplicate only; not implemented by this reorganisation. Canonical scope and release assignment are on i-bl-12-rung4a-audio-reencode.\n\nEarlier planning notes (retained for context):\nDeferred from repair spec \u00a78. Belongs to the audio-conversion scanner's territory. If that scanner ships in the same bundle, wire the two so repair can hand off audio-only damage.",
       "kind": "feature",
-      "versionId": "backlog",
+      "versionId": "superseded",
       "createdAt": "2026-09-05T13:00:00Z",
-      "updatedAt": "2026-09-05T13:00:00Z",
+      "updatedAt": "2026-09-18T07:49:16Z",
       "completedAt": null
     },
     {
       "id": "i-bl-07",
       "title": "Repair statistics on Overview tab",
-      "notes": "Shipped 2026-09-08 in 1.0.7.6 (unreleased): 'Broken files repaired' footer on the Overview 'Reclaimed since install' panel — reads MediaDashDb.GetRepairSuccessCount (action LIKE 'repaired%' over the last 30 days + lifetime). Themed to match binFooterHtml pattern (same margin/border/mono-number style). 'X GB saved from deletion' deliberately deferred — repair FixResult sets BytesFreed=0 so summing yields 0; a reliable GB figure needs a new HistoryEntry.SavedBytes column (schema migration follow-up).",
+      "notes": "Shipped 2026-09-08 in 1.0.7.6 (unreleased): 'Broken files repaired' footer on the Overview 'Reclaimed since install' panel \u2014 reads MediaDashDb.GetRepairSuccessCount (action LIKE 'repaired%' over the last 30 days + lifetime). Themed to match binFooterHtml pattern (same margin/border/mono-number style). 'X GB saved from deletion' deliberately deferred \u2014 repair FixResult sets BytesFreed=0 so summing yields 0; a reliable GB figure needs a new HistoryEntry.SavedBytes column (schema migration follow-up).",
       "kind": "feature",
       "versionId": "v-1-0-7-6",
       "createdAt": "2026-09-05T13:00:00Z",
@@ -285,7 +320,7 @@
     {
       "id": "i-bl-08",
       "title": "Reconcile bullet 9 (retry loop on name collision) or drop it",
-      "notes": "Done 2026-09-06. Bullet kept, not dropped — see i-175-09 for the attribution (MediaGrouperScanner.cs targetExists guards at :170 and :262). CHANGELOG rewrite names the scanner + user report so the mapping is greppable.",
+      "notes": "Done 2026-09-06. Bullet kept, not dropped \u2014 see i-175-09 for the attribution (MediaGrouperScanner.cs targetExists guards at :170 and :262). CHANGELOG rewrite names the scanner + user report so the mapping is greppable.",
       "kind": "bug",
       "versionId": "v-1-0-7-5",
       "createdAt": "2026-09-05T13:00:00Z",
@@ -294,22 +329,22 @@
     },
     {
       "id": "i-bl-09",
-      "title": "Second bullet for richer LibraryStat breakdowns",
-      "notes": "Obsolete 2026-09-06. Enrichment reverted from 1.0.7.5 before ship (see i-175-11) because the WIP breakdown had been merged from a test library that wasn't release-ready. Revisit as part of i-180-01 Library tab redesign if those breakdowns want to reappear.",
+      "title": "Merged: richer library breakdowns (see i-180-01)",
+      "notes": "Obsolete planning card retained for traceability; not implemented. Future work belongs to i-180-01 in 1.5.0.0.\n\nEarlier planning notes (retained for context):\nObsolete 2026-09-06. Enrichment reverted from 1.0.7.5 before ship (see i-175-11) because the WIP breakdown had been merged from a test library that wasn't release-ready. Revisit as part of i-180-01 Library tab redesign if those breakdowns want to reappear.",
       "kind": "feature",
-      "versionId": "backlog",
+      "versionId": "superseded",
       "createdAt": "2026-09-05T13:00:00Z",
-      "updatedAt": "2026-09-06T05:00:00Z",
+      "updatedAt": "2026-09-18T07:49:16Z",
       "completedAt": null
     },
     {
       "id": "2d2e24da-197a-4485-9045-68ce3152da85",
-      "title": "Seperate Re-encode resolutions for Different libraries\r\n #30",
-      "notes": "",
+      "title": "Per-library policy profiles (expands resolution request #30)",
+      "notes": "Allow each library to inherit global defaults or override resolution, bitrate, codec, audio/subtitle languages and fix modes. Display the effective policy before approval. Revalidate queued work when its policy changes; require renewed approval if its destructive scope increases. Preserve existing behaviour on migration.\n\nEarlier planning notes (retained for context):\n",
       "kind": "feature",
-      "versionId": "backlog",
+      "versionId": "v-1-1-0-0",
       "createdAt": "2026-09-05T12:52:45.214Z",
-      "updatedAt": "2026-09-14T12:39:21.181Z",
+      "updatedAt": "2026-09-18T07:49:16Z",
       "completedAt": null
     },
     {
@@ -324,22 +359,22 @@
     },
     {
       "id": "bb59c42f-6e70-4d9e-8ef2-7d49fda0bbda",
-      "title": "User Setting, Purge all audio tracks except the main on and then remove all subtitles except the selected language.",
-      "notes": "",
+      "title": "Explicit main-audio and subtitle retention policies",
+      "notes": "Define main audio using language, default disposition and user preference rather than stream order. Preview removals and protect commentary, audio description, original-language audio, forced subtitles and accessibility tracks by default. Never remove the last audio track. Integrate with per-library profiles and combined passes.\n\nEarlier planning notes (retained for context):\n",
       "kind": "feature",
-      "versionId": "backlog",
+      "versionId": "v-1-3-0-0",
       "createdAt": "2026-09-05T13:38:19.622Z",
-      "updatedAt": "2026-09-14T12:39:22.813Z",
+      "updatedAt": "2026-09-18T07:49:16Z",
       "completedAt": null
     },
     {
       "id": "d58754bb-ad8b-4e49-b99f-11869b6ae6fb",
-      "title": "Re enable auto mode for duplicate file finder - may need rework and extensive testing.",
-      "notes": "",
+      "title": "Reintroduce duplicate auto-fix with confidence and protection gates",
+      "notes": "Start with exact byte-identical duplicates, respect editions and protected items, show keeper reasoning, and require an explicit opt-in. Broader automatic matching depends on fixture evidence for remakes, editions and multi-episode files. Recheck both keeper and losing copy before disposal.\n\nEarlier planning notes (retained for context):\n",
       "kind": "feature",
-      "versionId": "backlog",
+      "versionId": "v-1-4-0-0",
       "createdAt": "2026-09-05T13:39:06.896Z",
-      "updatedAt": "2026-09-14T12:39:09.382Z",
+      "updatedAt": "2026-09-18T07:49:16Z",
       "completedAt": null
     },
     {
@@ -355,7 +390,7 @@
     {
       "id": "i-175-17",
       "title": "Show ignored toggle on Issues tab + per-row + bulk Unignore",
-      "notes": "Adds a pill toggle in the Issues filter row (amber active tint). When on, loadIssues fetches ?status=Dismissed. Per-row Unignore reuses the existing /Issues/{id}/Revert endpoint via undoRowAction. Bulk 'Unignore all N shown' turns green (mdRevertMode) and posts /Issues/Bulk with a new Action=\"Revert\" branch backed by MediaDashDb.BulkRevertDismissedIssues (Dismissed → Detected, guarded by source status). Row-button CSS added for .mdUnignore and .mdUndoAction so both match the plugin's row pill vocabulary; mdBinDelete pill on Recycle bin tab also brought into line with mdBinRestore. Issue badge count skipped while viewing Dismissed so the badge still tracks open work.",
+      "notes": "Adds a pill toggle in the Issues filter row (amber active tint). When on, loadIssues fetches ?status=Dismissed. Per-row Unignore reuses the existing /Issues/{id}/Revert endpoint via undoRowAction. Bulk 'Unignore all N shown' turns green (mdRevertMode) and posts /Issues/Bulk with a new Action=\"Revert\" branch backed by MediaDashDb.BulkRevertDismissedIssues (Dismissed \u2192 Detected, guarded by source status). Row-button CSS added for .mdUnignore and .mdUndoAction so both match the plugin's row pill vocabulary; mdBinDelete pill on Recycle bin tab also brought into line with mdBinRestore. Issue badge count skipped while viewing Dismissed so the badge still tracks open work.",
       "kind": "feature",
       "versionId": "v-1-0-7-5",
       "createdAt": "2026-09-06T05:00:00Z",
@@ -375,7 +410,7 @@
     {
       "id": "i-175-19",
       "title": "Scheduled scan default trigger moved from 02:00 to midnight",
-      "notes": "ScanTask.GetDefaultTriggers TimeOfDayTicks changed from FromHours(2) to Zero. Fresh installs only — existing installs keep whatever time users have set. Rationale: a daily rescan only needs to catch a day's changes since the last sweep, so overnight is enough. Idle-check still defers if a viewer arrives at 00:00, and manual Scan now bypasses everything.",
+      "notes": "ScanTask.GetDefaultTriggers TimeOfDayTicks changed from FromHours(2) to Zero. Fresh installs only \u2014 existing installs keep whatever time users have set. Rationale: a daily rescan only needs to catch a day's changes since the last sweep, so overnight is enough. Idle-check still defers if a viewer arrives at 00:00, and manual Scan now bypasses everything.",
       "kind": "bug",
       "versionId": "v-1-0-7-5",
       "createdAt": "2026-09-06T05:00:00Z",
@@ -385,7 +420,7 @@
     {
       "id": "i-175-20",
       "title": "Fix task silently skips when there's nothing to fix",
-      "notes": "Added explicit early-exit in FixTask.ExecuteAsync after the auto-queue phase: if queue.Count == 0, log at Debug and return before touching Plugin.LastFixRun. Kills the Info-log spam every 30 min on idle libraries and stops the client's fix-run alert from firing on empty runs (LastFixRun.FinishedAtUtc no longer advances on a no-op). Verified live: manual Fix with empty queue returns 204 but FinishedAtUtc doesn't advance. 30-min interval trigger kept — user opted to keep the existing schedule shape, just gate real work on 'scanner produced something'.",
+      "notes": "Added explicit early-exit in FixTask.ExecuteAsync after the auto-queue phase: if queue.Count == 0, log at Debug and return before touching Plugin.LastFixRun. Kills the Info-log spam every 30 min on idle libraries and stops the client's fix-run alert from firing on empty runs (LastFixRun.FinishedAtUtc no longer advances on a no-op). Verified live: manual Fix with empty queue returns 204 but FinishedAtUtc doesn't advance. 30-min interval trigger kept \u2014 user opted to keep the existing schedule shape, just gate real work on 'scanner produced something'.",
       "kind": "bug",
       "versionId": "v-1-0-7-5",
       "createdAt": "2026-09-06T05:00:00Z",
@@ -394,12 +429,12 @@
     },
     {
       "id": "d04791b1-2625-4da9-bba7-dfa816ae71f5",
-      "title": "Auto delete feature for stale content",
-      "notes": "Big user warnings",
+      "title": "Leaving soon review list with countdown and Keep action",
+      "notes": "First release is review-only: keep files in their current libraries, show a countdown and Keep action, and exclude protected items, favourites and in-progress viewing. Recheck activity across users. Do not automatically move or delete media. The original automatic-deletion proposal is retained below as context and tracked separately in backlog.\n\nEarlier planning notes (retained for context):\nBig user warnings\n\nauto makes a mixed media library called leaving soon.\n\nMoves all content to a new folder called leaving soon.\n\nAdds all content from leaving soon folder to leaving soon library.\n\nScans the content in the leaving soon library that still hasnt been played for more than x days then deletes it.\n\nSettings for where the user wants the leaving soon library, how many days in the leaving soon library, if they want it to match tv seasons or all episodes in a tv show (ask me more about this when you get to it).",
       "kind": "feature",
-      "versionId": "backlog",
+      "versionId": "v-1-6-0-0",
       "createdAt": "2026-09-06T07:12:14.617Z",
-      "updatedAt": "2026-09-14T12:39:24.999Z",
+      "updatedAt": "2026-09-18T07:49:16Z",
       "completedAt": null
     },
     {
@@ -414,78 +449,78 @@
     },
     {
       "id": "i-176-pre-release-sweep",
-      "title": "Pre-release sweep: refine repair function + full local/GitHub cleanup",
-      "notes": "Before cutting 1.0.7.6, do: (1) refine the Playability repair ladder — tune fixture strictness so scanner/validate disagreements shrink, tighten rung 4 fallback messaging, review verify decode-cache interaction; (2) full local repo cleanup — flip stale CHANGELOG '1.0.7.5 (unreleased)' header (it shipped 2026-09-06 per manifest.json), sweep uncommitted plan/spec docs under docs/superpowers/, review roadmap.json for done-but-open items, run tests suite green (currently 643/643); (3) GitHub cleanup — triage open issues for anything already fixed on main, close/label duplicates, check CI branch is green, ensure release notes template is ready. Nothing gets pushed until this is done.\n\nProgress 2026-09-08: CHANGELOG 1.0.7.5 header flipped to '(released 2026-09-06)'. Test suite green at 654/654 (up from 643 baseline in note, delta = 4 new PlayabilityFixerDetailReasonTests + other adds). Roadmap done-item sweep in progress via new tick feature. Still outstanding: (1) repair ladder refinement audit, (2) uncommitted plan/spec doc sweep under docs/superpowers/, (3) GitHub open-issue triage.",
+      "title": "Stabilisation sweep and release/documentation reconciliation",
+      "notes": "Carry forward only the unfinished repair audit, regression fixes, spec reconciliation and issue triage from the old 1.0.7.6 checklist. Reconcile current code, changelog, README and PLAN (including the 30-minute schedule and repair behaviour). Verify against the current test baseline; historical test counts below are not current results. This bug group adds no new product features.\n\nEarlier planning notes (retained for context):\nBefore cutting 1.0.7.6, do: (1) refine the Playability repair ladder \u2014 tune fixture strictness so scanner/validate disagreements shrink, tighten rung 4 fallback messaging, review verify decode-cache interaction; (2) full local repo cleanup \u2014 flip stale CHANGELOG '1.0.7.5 (unreleased)' header (it shipped 2026-09-06 per manifest.json), sweep uncommitted plan/spec docs under docs/superpowers/, review roadmap.json for done-but-open items, run tests suite green (currently 643/643); (3) GitHub cleanup \u2014 triage open issues for anything already fixed on main, close/label duplicates, check CI branch is green, ensure release notes template is ready. Nothing gets pushed until this is done.\n\nProgress 2026-09-08: CHANGELOG 1.0.7.5 header flipped to '(released 2026-09-06)'. Test suite green at 654/654 (up from 643 baseline in note, delta = 4 new PlayabilityFixerDetailReasonTests + other adds). Roadmap done-item sweep in progress via new tick feature. Still outstanding: (1) repair ladder refinement audit, (2) uncommitted plan/spec doc sweep under docs/superpowers/, (3) GitHub open-issue triage.\n\nProgress 2026-09-25: (1) ladder refinement audit \u2014 10-round audit landed across 1.0.7.7 + 1.0.7.8 hotfix bundles (R01\u2013R10 covering swap safety, fix-time re-verification, codec parity, timestamp preservation, keeper viability). Complete. (2) Spec sweep \u2014 playability-repair + media-organiser specs match shipped features; subtitle-extract spec remains under docs/superpowers/ but is intentionally deferred to 1.3.0.0 (still tagged v-1-3-0-0 in this file). (3) GitHub triage \u2014 carries over to the pre-push sweep required by [[feedback-mediadash-prepush-sweep]] before the 1.0.8.0 release is cut. Test suite green: 1269/1269 as of 2026-09-25.",
       "kind": "bug",
-      "versionId": "v-1-0-7-6",
+      "versionId": "v-1-0-8-0",
       "createdAt": "2026-09-08T02:35:00Z",
-      "updatedAt": "2026-09-08T15:45:00Z",
-      "completedAt": null
+      "updatedAt": "2026-09-25T13:00:00Z",
+      "completedAt": "2026-09-25T13:00:00Z"
     },
     {
       "id": "i-bl-12-rung4a-audio-reencode",
       "title": "Repair ladder rung 4a: audio-only re-encode (before full video re-encode)",
-      "notes": "Insert a cheaper rung between rung 3 (container coerce) and rung 4 (full video re-encode). When per-stream decode (already used by rung 2's DecodeStreamAsync) shows video streams pass decode but audio fails, re-encode ONLY the audio: `-c:v copy -c:a aac -b:a 192k`. Minutes instead of hours for audio-only damage — many real-world 'unplayable' files are just one broken audio track.\n\nGate: only fires if rung 2 (drop broken streams) refused because dropping audio would leave zero audio streams (i.e. the ONE audio track is broken and can't be dropped). New config toggle RepairAttemptAudioReencode, default on.\n\nVerify uses the existing VerifyRepairedAsync (structural + decode-check), same as every other rung. Reuse SwapRepairedAsync so timestamp preservation (i-175-08) applies automatically.",
+      "notes": "Canonical audio-only repair card; absorbs i-bl-06. Repair damaged audio while copying healthy video before attempting a full video encode. This repair capability can ship independently of the later audio policy feature.\n\nEarlier planning notes (retained for context):\nInsert a cheaper rung between rung 3 (container coerce) and rung 4 (full video re-encode). When per-stream decode (already used by rung 2's DecodeStreamAsync) shows video streams pass decode but audio fails, re-encode ONLY the audio: `-c:v copy -c:a aac -b:a 192k`. Minutes instead of hours for audio-only damage \u2014 many real-world 'unplayable' files are just one broken audio track.\n\nGate: only fires if rung 2 (drop broken streams) refused because dropping audio would leave zero audio streams (i.e. the ONE audio track is broken and can't be dropped). New config toggle RepairAttemptAudioReencode, default on.\n\nVerify uses the existing VerifyRepairedAsync (structural + decode-check), same as every other rung. Reuse SwapRepairedAsync so timestamp preservation (i-175-08) applies automatically.",
       "kind": "feature",
-      "versionId": "v-1-0-7-6",
+      "versionId": "v-1-0-8-0",
       "createdAt": "2026-09-08T03:20:00Z",
-      "updatedAt": "2026-09-08T14:57:02.036Z",
+      "updatedAt": "2026-09-25T08:58:48.699Z",
       "completedAt": null
     },
     {
       "id": "i-bl-13-repair-only-row-action",
       "title": "Split 'Repair / Remove file' into two row actions",
-      "notes": "Users want per-file control: sometimes 'try to repair, but if it fails DON'T delete — leave the file so I can inspect it myself'. Current button collapses both into one path (repair fallback → delete). Split into:\n\n(a) Repair — tries the enabled rungs; on all-fail, does NOT recycle. Row stays as Detected with a 'repair attempted, no rung succeeded' hint. Non-destructive.\n(b) Remove file — legacy delete-only path, bypasses the ladder entirely.\n\nBulk buttons mirror the split: 'Repair all N shown' and 'Remove all N shown'. Confirm modal wording adjusted per action so users can't accidentally delete via a button they thought was safe.\n\nImplementation: DuplicateFixer's-style branching in PlayabilityFixer.FixAsync gated by a new query param or issue-level intent flag. Row-action JS in configPage.html adds the second button.",
+      "notes": "Priority: provide separate Repair and Remove actions before expanding automatic transformations. Failed Repair must leave the source in place; persist the chosen intent in queued work and mirror it in bulk actions.\n\nEarlier planning notes (retained for context):\nUsers want per-file control: sometimes 'try to repair, but if it fails DON'T delete \u2014 leave the file so I can inspect it myself'. Current button collapses both into one path (repair fallback \u2192 delete). Split into:\n\n(a) Repair \u2014 tries the enabled rungs; on all-fail, does NOT recycle. Row stays as Detected with a 'repair attempted, no rung succeeded' hint. Non-destructive.\n(b) Remove file \u2014 legacy delete-only path, bypasses the ladder entirely.\n\nBulk buttons mirror the split: 'Repair all N shown' and 'Remove all N shown'. Confirm modal wording adjusted per action so users can't accidentally delete via a button they thought was safe.\n\nImplementation: DuplicateFixer's-style branching in PlayabilityFixer.FixAsync gated by a new query param or issue-level intent flag. Row-action JS in configPage.html adds the second button.",
       "kind": "feature",
-      "versionId": "v-1-0-7-6",
+      "versionId": "v-1-1-0-0",
       "createdAt": "2026-09-08T03:20:00Z",
-      "updatedAt": "2026-09-08T14:54:06.923Z",
+      "updatedAt": "2026-09-18T07:49:16Z",
       "completedAt": null
     },
     {
       "id": "i-bl-14-repair-preview",
-      "title": "Repair preview / dry-run: which rung would fire, without touching the file",
-      "notes": "User-facing tool for building confidence before enabling auto-repair. Adds a 'Preview repair' row action on Playability issues that runs every enabled rung's PROBE + BUILD-ARGS pass but stops short of executing ffmpeg. Reports:\n\n* which rungs would attempt for this file (based on config toggles + rung-specific pre-checks like 'rung 3 skips .mkv sources')\n* rough estimate of runtime per rung (rung 1/2/3: seconds; rung 4: minutes to hours per source duration)\n* rung 4 encoder target (h264 / aac / MKV) so users know what the recoded output would look like\n* if all rungs would fail their pre-checks, warn 'no rung would run — file would fall through to delete'\n\nImplementation: extract the pre-check + arg-build logic from each TryRungN into a public PreviewRungN method. TryRungN calls PreviewRungN + then executes. Preview endpoint at /MediaDash/Issues/{id}/PreviewRepair returns a JSON summary. Zero filesystem writes, safe to click anytime.\n\nComplements Dry-run mode (which is global) with a per-file probe.",
+      "title": "Preview proposed changes for every fixer, starting with repair",
+      "notes": "Expand the repair preview into a shared preview for every current fixer: source/destination, streams retained or removed, output format, estimated savings, disposal and recovery options. Combined fixes show one consolidated plan. Repair previews describe eligible attempts, not a promise of success. Revalidate source and policy before execution. New fixers must implement preview when introduced.\n\nEarlier planning notes (retained for context):\nUser-facing tool for building confidence before enabling auto-repair. Adds a 'Preview repair' row action on Playability issues that runs every enabled rung's PROBE + BUILD-ARGS pass but stops short of executing ffmpeg. Reports:\n\n* which rungs would attempt for this file (based on config toggles + rung-specific pre-checks like 'rung 3 skips .mkv sources')\n* rough estimate of runtime per rung (rung 1/2/3: seconds; rung 4: minutes to hours per source duration)\n* rung 4 encoder target (h264 / aac / MKV) so users know what the recoded output would look like\n* if all rungs would fail their pre-checks, warn 'no rung would run \u2014 file would fall through to delete'\n\nImplementation: extract the pre-check + arg-build logic from each TryRungN into a public PreviewRungN method. TryRungN calls PreviewRungN + then executes. Preview endpoint at /MediaDash/Issues/{id}/PreviewRepair returns a JSON summary. Zero filesystem writes, safe to click anytime.\n\nComplements Dry-run mode (which is global) with a per-file probe.",
       "kind": "feature",
-      "versionId": "v-1-0-7-6",
+      "versionId": "v-1-1-0-0",
       "createdAt": "2026-09-08T03:20:00Z",
-      "updatedAt": "2026-09-08T14:54:02.097Z",
+      "updatedAt": "2026-09-18T07:49:16Z",
       "completedAt": null
     },
     {
       "id": "i-bl-15-salvage-report",
-      "title": "Salvage report: show the before/after diff of a successful repair",
-      "notes": "After a real repair completes, expose a per-file diff so users understand the trade they just made. Currently the FixResult.Message names the rung ('repaired X (dropped broken streams)') but not what actually differs between the pre-repair source (in the recycle bin) and the repaired file that's now in the library.\n\nReport fields:\n* streams: which stream indexes were dropped (rung 2) — codec + language + channel count for each dropped stream so users can decide if they want to source a replacement\n* container: source ext → output ext (rung 3 rename) with the watch-history reset warning restated\n* duration: pre vs post seconds; flag if delta > 2s (repair salvaged less than the whole runtime)\n* size: pre vs post bytes; flag when re-encode inflates size (rare but happens on hopeless HEVC → h264 fallbacks)\n* codec: source video/audio codec → output codec (rung 4 always h264/aac; user should know)\n* verify: which VerifyRepairedAsync checks passed (structural + decode-check) and by what margin\n\nWhere to render: expand the History row inline on the History tab (already the audit-trail surface). Also add to the toast/alert that fires when a repair completes so users see it in real time.\n\nImplementation: HistoryEntry needs a new nullable SalvageReport JSON column. SwapRepairedAsync captures pre-repair FfprobeData + FileInfo before recycling the source, computes the diff after the temp is verified, serialises into the History write. Migration: existing rows get null (rendered as 'no salvage report — repair pre-dates this feature').",
+      "title": "Before/after repair report and reusable change history",
+      "notes": "Start with successful repair: stream changes, codecs, container, duration, size and verification outcome. Use a reusable history format so audio conversion, subtitle extraction and organisation can supply comparable results in their own releases. Keep estimates distinct from measured results and preserve restore links.\n\nEarlier planning notes (retained for context):\nAfter a real repair completes, expose a per-file diff so users understand the trade they just made. Currently the FixResult.Message names the rung ('repaired X (dropped broken streams)') but not what actually differs between the pre-repair source (in the recycle bin) and the repaired file that's now in the library.\n\nReport fields:\n* streams: which stream indexes were dropped (rung 2) \u2014 codec + language + channel count for each dropped stream so users can decide if they want to source a replacement\n* container: source ext \u2192 output ext (rung 3 rename) with the watch-history reset warning restated\n* duration: pre vs post seconds; flag if delta > 2s (repair salvaged less than the whole runtime)\n* size: pre vs post bytes; flag when re-encode inflates size (rare but happens on hopeless HEVC \u2192 h264 fallbacks)\n* codec: source video/audio codec \u2192 output codec (rung 4 always h264/aac; user should know)\n* verify: which VerifyRepairedAsync checks passed (structural + decode-check) and by what margin\n\nWhere to render: expand the History row inline on the History tab (already the audit-trail surface). Also add to the toast/alert that fires when a repair completes so users see it in real time.\n\nImplementation: HistoryEntry needs a new nullable SalvageReport JSON column. SwapRepairedAsync captures pre-repair FfprobeData + FileInfo before recycling the source, computes the diff after the temp is verified, serialises into the History write. Migration: existing rows get null (rendered as 'no salvage report \u2014 repair pre-dates this feature').",
       "kind": "feature",
-      "versionId": "backlog",
+      "versionId": "v-1-1-0-0",
       "createdAt": "2026-09-08T03:35:00Z",
-      "updatedAt": "2026-09-08T03:35:00Z",
+      "updatedAt": "2026-09-18T07:49:16Z",
       "completedAt": null
     },
     {
       "id": "i-bl-11-space-cliff-warning",
-      "title": "Space-cliff warning: banner when a library drive approaches its performance cliff",
-      "notes": "Early-warning banner (Overview + Maintenance) when a library drive crosses its filesystem-specific performance cliff. Users usually don't notice until fixes start failing with ENOSPC or playback stutters. Complements the existing recycle-bin cap (which only pauses fixes) with a proactive read that fires BEFORE anything breaks.\n\nThresholds:\n(a) NTFS: warn at 90% used. Free space fragmentation on NTFS gets sharply worse past ~90%, and Windows' MFT reservation can starve at ~95%.\n(b) ext4 / XFS: warn at 90%. Ext4 reserves 5% for root by default; past ~90% used the remaining free extents fragment fast.\n(c) ZFS / btrfs: warn at 85%. CoW allocators need copious free extents to avoid write amplification; performance degrades sharply beyond 80–85%.\n(d) exFAT / FAT32 (rare in library folders): warn at 90%. No reserved area, but write throughput collapses when free extents shrink.\n\nDetect filesystem via DriveInfo.DriveFormat + Linux /proc/mounts. Reuse RecycleBin.FindDriveForPath as the drive resolver so it lines up with the recycle-bin pause math. One banner per drive per threshold crossing; dismissible for 7 days per drive so it doesn't nag while a user is intentionally close to the cap. Never block fixes; the recycle-bin cap already owns the hard stop.",
+      "title": "Configurable low-space warnings for library and plugin-data volumes",
+      "notes": "Shipped in 1.0.8.0 (unreleased). PluginConfiguration gains LibraryDriveLowSpaceWarningEnabled + LibraryDriveWarnThresholdPercent (default 90). StatusQueryService.ComputeLowSpaceWarning runs per library / recycle / plugin-data drive; ZFS + Btrfs auto-tighten by 5 %. Plugin-data drive is force-added to the drive list (same as recycle drive) so Docker/btrfs setups can never lose it. Overview renders one dismissible banner per drive (client-side 7-day dismissal keyed by drive root). Advisory only \u2014 never blocks fixes; the recycle-bin cap still owns the hard stop. Setting lives in Settings \u2192 Recycle bin as a 0\u201399 % slider; 0 disables. Unit coverage in LowSpaceWarningTests (7 cases, threshold + FS + zero-total-bytes guards).\n\nEarlier planning notes (retained for context):\nEarly-warning banner (Overview + Maintenance) when a library drive crosses its filesystem-specific performance cliff. Users usually don't notice until fixes start failing with ENOSPC or playback stutters. Complements the existing recycle-bin cap (which only pauses fixes) with a proactive read that fires BEFORE anything breaks.\n\nThresholds:\n(a) NTFS: warn at 90% used. Free space fragmentation on NTFS gets sharply worse past ~90%, and Windows' MFT reservation can starve at ~95%.\n(b) ext4 / XFS: warn at 90%. Ext4 reserves 5% for root by default; past ~90% used the remaining free extents fragment fast.\n(c) ZFS / btrfs: warn at 85%. CoW allocators need copious free extents to avoid write amplification; performance degrades sharply beyond 80\u201385%.\n(d) exFAT / FAT32 (rare in library folders): warn at 90%. No reserved area, but write throughput collapses when free extents shrink.\n\nDetect filesystem via DriveInfo.DriveFormat + Linux /proc/mounts. Reuse RecycleBin.FindDriveForPath as the drive resolver so it lines up with the recycle-bin pause math. One banner per drive per threshold crossing; dismissible for 7 days per drive so it doesn't nag while a user is intentionally close to the cap. Never block fixes; the recycle-bin cap already owns the hard stop.",
       "kind": "feature",
-      "versionId": "backlog",
+      "versionId": "v-1-0-8-0",
       "createdAt": "2026-09-08T03:05:00Z",
-      "updatedAt": "2026-09-14T12:39:13.219Z",
-      "completedAt": null
+      "updatedAt": "2026-09-25T13:30:00Z",
+      "completedAt": "2026-09-25T13:30:00Z"
     },
     {
       "id": "i-bl-16-plugin-data-growth-controls",
       "title": "Plugin-data volume protection: history retention, cache TTLs, VACUUM, and free-space floor for the DB drive",
-      "notes": "Long-term operational health for users whose Jellyfin data volume is small (Docker containers with 32 GB mounts, home installs on the C: system SSD, cheap VPS deployments). Right now MediaDash protects the recycle-bin volume with a 3 GB free-space floor (FixTask.BinVolumeMinFreeBytes) and auto-purges the bin after RecycleBinRetentionDays. It does NOT protect the plugin-data volume — which is where mediadash.db + all the caches live — and several DB tables grow unbounded. Real-world worst case: 200 K-item library + 3 years of usage → ~1 GB DB, plus orphan rows for every file ever renamed/moved/deleted. On a small drive this contributes to Jellyfin OOM-style failures when the volume fills.\n\nCurrent state (checked against MediaDashDb.cs on main):\n(a) `history` — one row per fix action, ~265 bytes/row, NO pruning anywhere. Users running weekly fixes on a big library accumulate hundreds of K rows over years.\n(b) `probe_cache` + `format_probe_cache` — one row per file scanned, ~4.4 KB/row (full ffprobe JSON). Cleared only by the manual 'Reset scan state' button. Orphan rows accumulate every time a user renames/moves/deletes a library file.\n(c) `decode_cache` — one row per file that ran thorough playability. ~1 KB/row. Same orphan problem.\n(d) `file_hashes` — one row per file with a hash computed. Same orphan problem.\n(e) `restored_paths` — grows only on manual restore, tiny in practice.\n(f) `diagnostics` — ALREADY trimmed to maxRows on every insert (MediaDashDb.cs:1494). Reference implementation to mirror.\n(g) No `VACUUM` anywhere in the codebase. SQLite doesn't reclaim space on `DELETE` — even if pruning existed, the .db file wouldn't shrink.\n\nScope:\n\n(1) history retention. New config `HistoryRetentionDays` (default 90) + `HistoryMaxRows` (default 10 000, whichever cap hits first). Prune runs in FixTask's post-run maintenance pass alongside `_recycleBin.Purge`. Deleted rows dereference recycle-bin entries — must NOT delete a history row that still points at a bin entry that hasn't been purged (otherwise the bin listing shows 'no history' and Restore breaks). Order matters: bin purge first (drops files + history rows for expired retention), then history prune (drops rows older than HistoryRetentionDays where restore is impossible), then VACUUM.\n\n(2) probe / format-probe / decode / file-hash cache orphan sweep. During the FixTask post-run maintenance pass, for each cache table run `DELETE FROM <table> WHERE path NOT IN (SELECT path FROM issues) AND NOT EXISTS (a quick File.Exists check via a batched IN clause)`. Rationale: File.Exists is per-row expensive; better to enumerate all cache paths, batch-check existence in C#, and issue one `DELETE ... WHERE path IN (...)` with the missing paths. Cap the sweep at N ms per maintenance run so it stays bounded on huge caches.\n\n(3) Cache TTL. Even for files that still exist, probe cache rows > 6 months old are near-worthless (metadata refresh happens naturally on the next probe when size/mtime changes). New config `ProbeCacheRetentionDays` (default 180, 0 = disabled). Also pruned in the post-run maintenance pass.\n\n(4) Periodic VACUUM. Run once per maintenance pass if the DB has grown > 2× since last VACUUM, tracked via a new `plugin_state` row (`last_vacuum_at_utc`, `last_vacuum_size_bytes`). VACUUM holds a write lock and can take seconds on a large DB — must run inside the same fix-window + IdleCheck gates that the fixers use so it can't stall a busy server. Guard with an explicit timeout so a corrupt DB doesn't hang the maintenance pass forever.\n\n(5) Plugin-data volume free-space floor. Mirror `IsBinVolumeCriticallyFull` but for the DB's drive. Same 3 GB threshold, applied to `_db.DataPath`'s drive. When it trips: pause scans + fixes with the same PauseReason machinery. This is the direct answer to 'can the DB crash Jellyfin' — even if history + caches grew unboundedly, the floor catches it before Jellyfin runs out of headroom.\n\n(6) Overview surface. Extend the existing Overview 'Recycle bin' + 'Storage' cards to show the plugin-data-volume free space, the DB file size, and last-VACUUM info. Users on small drives get one glance instead of digging into `%LOCALAPPDATA%\\jellyfin\\data\\mediadash\\`. When the retention prune or orphan sweep runs, surface a single-line 'Maintenance: pruned N history rows, N orphan cache rows, VACUUM reclaimed N MB' on the Overview activity ticker so users see it's working (silent maintenance is invisible until it isn't).\n\nMigration:\n- No schema changes for existing tables (all writes use `IF NOT EXISTS` on the columns being added — none here since pruning uses existing columns).\n- Add `plugin_state` rows for the retention/VACUUM bookkeeping. Empty on upgrade — first maintenance pass populates.\n- First run after upgrade WILL prune years of accumulated history / orphan rows on affected installs. Emit a single info-level log + a one-shot Overview toast so users understand why their DB just dropped from 1 GB to 100 MB.\n\nTests:\n- Unit: history prune preserves rows still linked to bin entries; orphan sweep drops only non-existent paths; VACUUM triggers on 2× growth; free-space floor pauses scans + fixes when tripped.\n- Integration: full 200 K-row synthetic DB, run the maintenance pass, assert final row counts + DB size are within expected bounds.\n- Real-world: run once on a real user's several-years-old DB (once someone volunteers) — measure before/after size + startup time.\n\nNon-goals (kept out on purpose):\n- No user-facing 'delete all history' button beyond the retention setting. Users who want a hard reset can hit 'Reset scan state' (already exists) or delete `mediadash.db` while the plugin is stopped.\n- No per-item history archival to a separate file — nice for auditors, over-engineered for the primary use case.\n- Don't prune diagnostics further — the existing maxRows trim already handles it.",
+      "notes": "Prioritise ahead of the dashboard redesign. Bound maintenance work, preserve history linked to recoverable files, and distinguish unavailable library mounts from genuinely deleted files during cache cleanup. Disk maintenance must account for SQLite temporary-space requirements and respect active operations.\n\nEarlier planning notes (retained for context):\nLong-term operational health for users whose Jellyfin data volume is small (Docker containers with 32 GB mounts, home installs on the C: system SSD, cheap VPS deployments). Right now MediaDash protects the recycle-bin volume with a 3 GB free-space floor (FixTask.BinVolumeMinFreeBytes) and auto-purges the bin after RecycleBinRetentionDays. It does NOT protect the plugin-data volume \u2014 which is where mediadash.db + all the caches live \u2014 and several DB tables grow unbounded. Real-world worst case: 200 K-item library + 3 years of usage \u2192 ~1 GB DB, plus orphan rows for every file ever renamed/moved/deleted. On a small drive this contributes to Jellyfin OOM-style failures when the volume fills.\n\nCurrent state (checked against MediaDashDb.cs on main):\n(a) `history` \u2014 one row per fix action, ~265 bytes/row, NO pruning anywhere. Users running weekly fixes on a big library accumulate hundreds of K rows over years.\n(b) `probe_cache` + `format_probe_cache` \u2014 one row per file scanned, ~4.4 KB/row (full ffprobe JSON). Cleared only by the manual 'Reset scan state' button. Orphan rows accumulate every time a user renames/moves/deletes a library file.\n(c) `decode_cache` \u2014 one row per file that ran thorough playability. ~1 KB/row. Same orphan problem.\n(d) `file_hashes` \u2014 one row per file with a hash computed. Same orphan problem.\n(e) `restored_paths` \u2014 grows only on manual restore, tiny in practice.\n(f) `diagnostics` \u2014 ALREADY trimmed to maxRows on every insert (MediaDashDb.cs:1494). Reference implementation to mirror.\n(g) No `VACUUM` anywhere in the codebase. SQLite doesn't reclaim space on `DELETE` \u2014 even if pruning existed, the .db file wouldn't shrink.\n\nScope:\n\n(1) history retention. New config `HistoryRetentionDays` (default 90) + `HistoryMaxRows` (default 10 000, whichever cap hits first). Prune runs in FixTask's post-run maintenance pass alongside `_recycleBin.Purge`. Deleted rows dereference recycle-bin entries \u2014 must NOT delete a history row that still points at a bin entry that hasn't been purged (otherwise the bin listing shows 'no history' and Restore breaks). Order matters: bin purge first (drops files + history rows for expired retention), then history prune (drops rows older than HistoryRetentionDays where restore is impossible), then VACUUM.\n\n(2) probe / format-probe / decode / file-hash cache orphan sweep. During the FixTask post-run maintenance pass, for each cache table run `DELETE FROM <table> WHERE path NOT IN (SELECT path FROM issues) AND NOT EXISTS (a quick File.Exists check via a batched IN clause)`. Rationale: File.Exists is per-row expensive; better to enumerate all cache paths, batch-check existence in C#, and issue one `DELETE ... WHERE path IN (...)` with the missing paths. Cap the sweep at N ms per maintenance run so it stays bounded on huge caches.\n\n(3) Cache TTL. Even for files that still exist, probe cache rows > 6 months old are near-worthless (metadata refresh happens naturally on the next probe when size/mtime changes). New config `ProbeCacheRetentionDays` (default 180, 0 = disabled). Also pruned in the post-run maintenance pass.\n\n(4) Periodic VACUUM. Run once per maintenance pass if the DB has grown > 2\u00d7 since last VACUUM, tracked via a new `plugin_state` row (`last_vacuum_at_utc`, `last_vacuum_size_bytes`). VACUUM holds a write lock and can take seconds on a large DB \u2014 must run inside the same fix-window + IdleCheck gates that the fixers use so it can't stall a busy server. Guard with an explicit timeout so a corrupt DB doesn't hang the maintenance pass forever.\n\n(5) Plugin-data volume free-space floor. Mirror `IsBinVolumeCriticallyFull` but for the DB's drive. Same 3 GB threshold, applied to `_db.DataPath`'s drive. When it trips: pause scans + fixes with the same PauseReason machinery. This is the direct answer to 'can the DB crash Jellyfin' \u2014 even if history + caches grew unboundedly, the floor catches it before Jellyfin runs out of headroom.\n\n(6) Overview surface. Extend the existing Overview 'Recycle bin' + 'Storage' cards to show the plugin-data-volume free space, the DB file size, and last-VACUUM info. Users on small drives get one glance instead of digging into `%LOCALAPPDATA%\\jellyfin\\data\\mediadash\\`. When the retention prune or orphan sweep runs, surface a single-line 'Maintenance: pruned N history rows, N orphan cache rows, VACUUM reclaimed N MB' on the Overview activity ticker so users see it's working (silent maintenance is invisible until it isn't).\n\nMigration:\n- No schema changes for existing tables (all writes use `IF NOT EXISTS` on the columns being added \u2014 none here since pruning uses existing columns).\n- Add `plugin_state` rows for the retention/VACUUM bookkeeping. Empty on upgrade \u2014 first maintenance pass populates.\n- First run after upgrade WILL prune years of accumulated history / orphan rows on affected installs. Emit a single info-level log + a one-shot Overview toast so users understand why their DB just dropped from 1 GB to 100 MB.\n\nTests:\n- Unit: history prune preserves rows still linked to bin entries; orphan sweep drops only non-existent paths; VACUUM triggers on 2\u00d7 growth; free-space floor pauses scans + fixes when tripped.\n- Integration: full 200 K-row synthetic DB, run the maintenance pass, assert final row counts + DB size are within expected bounds.\n- Real-world: run once on a real user's several-years-old DB (once someone volunteers) \u2014 measure before/after size + startup time.\n\nNon-goals (kept out on purpose):\n- No user-facing 'delete all history' button beyond the retention setting. Users who want a hard reset can hit 'Reset scan state' (already exists) or delete `mediadash.db` while the plugin is stopped.\n- No per-item history archival to a separate file \u2014 nice for auditors, over-engineered for the primary use case.\n- Don't prune diagnostics further \u2014 the existing maxRows trim already handles it.",
       "kind": "feature",
-      "versionId": "backlog",
+      "versionId": "v-1-2-0-0",
       "createdAt": "2026-09-11T02:35:00Z",
-      "updatedAt": "2026-09-14T12:39:11.624Z",
+      "updatedAt": "2026-09-18T07:49:16Z",
       "completedAt": null
     },
     {
       "id": "i-bl-10-monthly-defrag",
       "title": "Explore: monthly drive-health maintenance for library drives",
-      "notes": "Explore idea. Scheduled monthly maintenance pass on each library drive to prevent long-term slowdown / bit-rot. Not just defrag — a bundle of preventive actions picked per drive type:\n\n(1) HDD defrag — Windows defrag.exe / Optimize-Volume, Linux ext4 e4defrag (marginal on modern filesystems; XFS/btrfs handle themselves).\n(2) SSD TRIM — Optimize-Volume on Windows, fstrim on Linux. This is what SSDs actually need; defrag on SSD is HARMFUL.\n(3) Stale-content refresh — force-rewrite files untouched for N months (default 12+) to refresh flash cells (SSD bit-rot mitigation) / spinning-disk sectors before they degrade. Read into RAM, verify hash, rewrite in place. Skip if a cached hash already matches this month's read.\n(4) SMART preemptive scan — reuse the existing SmartHealth reader to flag drives approaching reallocated-sector / pending-sector thresholds BEFORE they fail. Surface as a Maintenance card banner.\n(5) Read-verify sweep (optional, slow) — sequentially read every library file, log any files where read errors surface (bad sectors that reallocation hasn't caught yet). Complements the hash cache used elsewhere in the plugin.\n(6) NTFS-specific: chkdsk /scan (read-only, no lock) once a year to surface metadata corruption early.\n\nPrerequisites to scope before building:\n(a) Detect drive type (SSD vs HDD) — drive.MediaType / smartctl / MSFT_PhysicalDisk. Wrong action on wrong drive = harm.\n(b) MUST respect fix window + Low system impact mode + IdleCheck. Every action is disk-bound for hours.\n(c) Cancellable and resumable; a fix run must never block on maintenance.\n(d) Opt-in ONLY, per-drive toggle, per-action toggle. Never touch a drive silently.\n(e) Report last-run + estimated benefit per action, like the trickplay optimizer does.\n(f) Stale-rewrite has data-safety risk — must write to sibling temp + verify + atomic rename, same pattern as TranscodeFixer's swap. A bad rewrite that overwrites in place would irreversibly damage the file.\n(g) Stale-rewrite MUST preserve every piece of metadata on the file: CreationTimeUtc + LastWriteTimeUtc (same fix as i-175-08 — Jellyfin's Recently Added reads mtime, so a refreshed file inheriting Now() would surface as brand-new and pollute the user's home page), POSIX permissions + owner/group on Linux, NTFS ACLs on Windows, and any xattrs (macOS Finder tags, Linux extended attrs used by some tagging tools). Otherwise a benign maintenance pass silently mutates the library's metadata surface.\n\nOpen questions: is defrag ever worth it on a library of mostly-sequential large files? SSD bit-rot on write-once media libraries — is 12 months the right cadence, or is that data already fresh enough from monthly SMART scrubs on the ZFS/btrfs side? Real signal probably needs a fragmentation-delta + stale-file-age measurement on real user drives before committing to build the whole thing.",
+      "notes": "Explore idea. Scheduled monthly maintenance pass on each library drive to prevent long-term slowdown / bit-rot. Not just defrag \u2014 a bundle of preventive actions picked per drive type:\n\n(1) HDD defrag \u2014 Windows defrag.exe / Optimize-Volume, Linux ext4 e4defrag (marginal on modern filesystems; XFS/btrfs handle themselves).\n(2) SSD TRIM \u2014 Optimize-Volume on Windows, fstrim on Linux. This is what SSDs actually need; defrag on SSD is HARMFUL.\n(3) Stale-content refresh \u2014 force-rewrite files untouched for N months (default 12+) to refresh flash cells (SSD bit-rot mitigation) / spinning-disk sectors before they degrade. Read into RAM, verify hash, rewrite in place. Skip if a cached hash already matches this month's read.\n(4) SMART preemptive scan \u2014 reuse the existing SmartHealth reader to flag drives approaching reallocated-sector / pending-sector thresholds BEFORE they fail. Surface as a Maintenance card banner.\n(5) Read-verify sweep (optional, slow) \u2014 sequentially read every library file, log any files where read errors surface (bad sectors that reallocation hasn't caught yet). Complements the hash cache used elsewhere in the plugin.\n(6) NTFS-specific: chkdsk /scan (read-only, no lock) once a year to surface metadata corruption early.\n\nPrerequisites to scope before building:\n(a) Detect drive type (SSD vs HDD) \u2014 drive.MediaType / smartctl / MSFT_PhysicalDisk. Wrong action on wrong drive = harm.\n(b) MUST respect fix window + Low system impact mode + IdleCheck. Every action is disk-bound for hours.\n(c) Cancellable and resumable; a fix run must never block on maintenance.\n(d) Opt-in ONLY, per-drive toggle, per-action toggle. Never touch a drive silently.\n(e) Report last-run + estimated benefit per action, like the trickplay optimizer does.\n(f) Stale-rewrite has data-safety risk \u2014 must write to sibling temp + verify + atomic rename, same pattern as TranscodeFixer's swap. A bad rewrite that overwrites in place would irreversibly damage the file.\n(g) Stale-rewrite MUST preserve every piece of metadata on the file: CreationTimeUtc + LastWriteTimeUtc (same fix as i-175-08 \u2014 Jellyfin's Recently Added reads mtime, so a refreshed file inheriting Now() would surface as brand-new and pollute the user's home page), POSIX permissions + owner/group on Linux, NTFS ACLs on Windows, and any xattrs (macOS Finder tags, Linux extended attrs used by some tagging tools). Otherwise a benign maintenance pass silently mutates the library's metadata surface.\n\nOpen questions: is defrag ever worth it on a library of mostly-sequential large files? SSD bit-rot on write-once media libraries \u2014 is 12 months the right cadence, or is that data already fresh enough from monthly SMART scrubs on the ZFS/btrfs side? Real signal probably needs a fragmentation-delta + stale-file-age measurement on real user drives before committing to build the whole thing.",
       "kind": "feature",
       "versionId": "backlog",
       "createdAt": "2026-09-08T02:45:00Z",
@@ -514,18 +549,18 @@
     },
     {
       "id": "3f821f32-bb56-4708-9ba9-fbb7e6906c35",
-      "title": "progress bar 'per task' in fixer mode",
-      "notes": "",
+      "title": "Per-task fix progress and clear waiting reasons",
+      "notes": "Shipped in 1.0.8.0 (unreleased). RunSnapshot gains CurrentOperationProgress (0..1); RunState.SetCurrentOperationProgress clamps + no-ops when idle so a late report can't resurrect the dashboard bar after Complete; UpdateProgress clears it when advancing files so a stale bar can't bleed into the next file's first tick. FixTask.cs:561 wraps the per-item SynchronousProgress so the ffmpeg -progress fraction routes to both the queue-wide progress AND RunState. StatusResponse.CurrentOperationProgress surfaces to Overview, which appends ' \u00b7 this file 45 %' next to the existing 'N of M items left'. Only fixers with real per-file signal (TranscodeFixer / Playability repair via ffmpeg's -progress pipe) call the setter; light fixers stay silent instead of faking a bar. Waiting reasons (playback, bin full, fix window, disk space) already covered by FixPauseReason and were not modified. Retry_at intentionally NOT surfaced \u2014 no retry infrastructure exists yet (i-120-retry-policy for 1.2.0.0) and the card says avoid unsupported estimates. Unit coverage added in RunStateTests.CurrentOperationProgress_FillsWhenRunning_ClearsAcrossFilesAndOnComplete.\n\nEarlier planning notes (retained for context):\nShow progress within the current operation alongside overall queue progress. Display waiting for playback, fix window, disk space or retry time explicitly; avoid unsupported time estimates.",
       "kind": "feature",
-      "versionId": "backlog",
+      "versionId": "v-1-0-8-0",
       "createdAt": "2026-09-14T05:51:31.819Z",
-      "updatedAt": "2026-09-14T05:51:31.819Z",
-      "completedAt": null
+      "updatedAt": "2026-09-25T13:30:00Z",
+      "completedAt": "2026-09-25T13:30:00Z"
     },
     {
       "id": "7a56b13a-16c1-485a-b57e-88b943516c85",
       "title": "if no music library disable cover art by default",
-      "notes": "Shipped as part of i-178-content-aware-defaults in 1.0.7.8 (awaiting approval) — expanded to the full content-type mapping (audio → EmbeddedCoverArt; video → Quality, SubtitleLanguage, AudioLanguage, MissingSubtitles, SubtitleFonts, LargeTrickplay, HeavyTranscode, FailedTranscode, Ungrouped) rather than just cover art.",
+      "notes": "Shipped as part of i-178-content-aware-defaults in 1.0.7.8 (awaiting approval) \u2014 expanded to the full content-type mapping (audio \u2192 EmbeddedCoverArt; video \u2192 Quality, SubtitleLanguage, AudioLanguage, MissingSubtitles, SubtitleFonts, LargeTrickplay, HeavyTranscode, FailedTranscode, Ungrouped) rather than just cover art.",
       "kind": "feature",
       "versionId": "v-1-0-7-8",
       "createdAt": "2026-09-14T06:06:20.003Z",
@@ -545,7 +580,7 @@
     {
       "id": "i-176-errors-tab-bucketing",
       "title": "Errors tab bucketing: FixTask.NoRunnable / SomeSkipped / MediaDashDb.MalformedItemId no longer render as 'Fix run failed'",
-      "notes": "Pre-push sweep for 1.0.7.6 caught the ERROR_META catch-all at configPage.html:8889 swallowing informational FixTask.SomeSkipped (\"7 approved issue(s) will not run because their type is set to 'Off'\") and FixTask.NoRunnable diagnostics and labelling them as 'Fix run failed — the fix pipeline threw an unexpected error' with a Report-an-issue prompt. Added specific ERROR_META entries before the FixTask catch-all + a MediaDashDb.MalformedItemId bucket that was previously rendering as a bare source code. CHANGELOG:24 bullet had already promised this fix for the pause cases; this commit completes what shipped. Commit 9c44c25.",
+      "notes": "Pre-push sweep for 1.0.7.6 caught the ERROR_META catch-all at configPage.html:8889 swallowing informational FixTask.SomeSkipped (\"7 approved issue(s) will not run because their type is set to 'Off'\") and FixTask.NoRunnable diagnostics and labelling them as 'Fix run failed \u2014 the fix pipeline threw an unexpected error' with a Report-an-issue prompt. Added specific ERROR_META entries before the FixTask catch-all + a MediaDashDb.MalformedItemId bucket that was previously rendering as a bare source code. CHANGELOG:24 bullet had already promised this fix for the pause cases; this commit completes what shipped. Commit 9c44c25.",
       "kind": "bug",
       "versionId": "v-1-0-7-6",
       "createdAt": "2026-09-14T13:30:00Z",
@@ -554,8 +589,8 @@
     },
     {
       "id": "i-176-manifest-version-crash",
-      "title": "manifest.json versions[].version must be 4-part max — 5-part crashes Jellyfin's catalog",
-      "notes": "1.0.7.6 was released with manifest.json entries using '1.0.7.6.0' (5-part). Jellyfin's plugin catalog parses versions[].version via System.Version which accepts at most 4 parts (major.minor.build.revision); a 5-part string throws FormatException and the whole catalog page fails to render. Fixed in commit e685200 by changing to '1.0.7.6' (4-part) matching the DLL's AssemblyVersion. Memory note added at feedback_mediadash_manifest_version_format.md so this doesn't recur — mimic prior entries (1.0.7.5, 1.0.7.4, ...) instead of interpreting the release-recipe wording.",
+      "title": "manifest.json versions[].version must be 4-part max \u2014 5-part crashes Jellyfin's catalog",
+      "notes": "1.0.7.6 was released with manifest.json entries using '1.0.7.6.0' (5-part). Jellyfin's plugin catalog parses versions[].version via System.Version which accepts at most 4 parts (major.minor.build.revision); a 5-part string throws FormatException and the whole catalog page fails to render. Fixed in commit e685200 by changing to '1.0.7.6' (4-part) matching the DLL's AssemblyVersion. Memory note added at feedback_mediadash_manifest_version_format.md so this doesn't recur \u2014 mimic prior entries (1.0.7.5, 1.0.7.4, ...) instead of interpreting the release-recipe wording.",
       "kind": "bug",
       "versionId": "v-1-0-7-6",
       "createdAt": "2026-09-14T14:00:00Z",
@@ -565,7 +600,7 @@
     {
       "id": "i-177-size-truncated-removal",
       "title": "Playability scanner removed the bitrate-vs-size pre-filter that false-flagged efficient x264 rips",
-      "notes": "User's library had 22 unplayable-flagged files that played fine — Rage / Severance / Landman / Outlander rips at 400 MB – 2.4 GB. Root cause: PlayabilityScanner.EvaluateAsync's bitrate-vs-size pre-filter compared Format.BitRate × duration / 8 against actual file size and flagged anything under 60% of expected as size-truncated. Efficient x264 encodes have real content bitrates 2×+ under the container-declared bitrate — they're not truncated, just efficient — and were being mis-flagged. Removed the branch entirely; the decode-check that runs next already catches genuine tail-truncation via its decoded-time shortfall heuristic (all 15 torture-test variants still pass, including the three MP4 tail-truncated ones the removed branch used to catch first). Commit aecfaf0.",
+      "notes": "User's library had 22 unplayable-flagged files that played fine \u2014 Rage / Severance / Landman / Outlander rips at 400 MB \u2013 2.4 GB. Root cause: PlayabilityScanner.EvaluateAsync's bitrate-vs-size pre-filter compared Format.BitRate \u00d7 duration / 8 against actual file size and flagged anything under 60% of expected as size-truncated. Efficient x264 encodes have real content bitrates 2\u00d7+ under the container-declared bitrate \u2014 they're not truncated, just efficient \u2014 and were being mis-flagged. Removed the branch entirely; the decode-check that runs next already catches genuine tail-truncation via its decoded-time shortfall heuristic (all 15 torture-test variants still pass, including the three MP4 tail-truncated ones the removed branch used to catch first). Commit aecfaf0.",
       "kind": "bug",
       "versionId": "v-1-0-7-7",
       "createdAt": "2026-09-14T14:10:00Z",
@@ -575,7 +610,7 @@
     {
       "id": "i-177-drm-skip",
       "title": "Playability scanner skips DRM-protected files instead of mis-flagging + attempting repair",
-      "notes": "No DRM detection existed in the plugin. Encrypted MP4 / M4V / M4A / MOV (iTunes Fairplay, Widevine, PlayReady) tripped the decode-error branch and the new 1.0.7.6 repair ladder tried every rung (all failed) then recycled the file. Now checks each stream's codec_tag_string for 'encv' (encrypted video) or 'enca' (encrypted audio) — ISO base media file format markers for encrypted sample entries — and returns null (skip) if any match. Added CodecTagString field to FfprobeStreamInfo. Commit aecfaf0.",
+      "notes": "No DRM detection existed in the plugin. Encrypted MP4 / M4V / M4A / MOV (iTunes Fairplay, Widevine, PlayReady) tripped the decode-error branch and the new 1.0.7.6 repair ladder tried every rung (all failed) then recycled the file. Now checks each stream's codec_tag_string for 'encv' (encrypted video) or 'enca' (encrypted audio) \u2014 ISO base media file format markers for encrypted sample entries \u2014 and returns null (skip) if any match. Added CodecTagString field to FfprobeStreamInfo. Commit aecfaf0.",
       "kind": "bug",
       "versionId": "v-1-0-7-7",
       "createdAt": "2026-09-14T14:10:00Z",
@@ -585,7 +620,7 @@
     {
       "id": "i-177-folder-based-items",
       "title": "Playability scanner no longer reports folder-based library items (BDMV / VIDEO_TS / mounted-ISO) as missing files",
-      "notes": "Blu-ray 'BDRemux' folder layouts (Indiana Jones example: /mnt/media/Complete/Movies/Indiana...HDTracker with no file extension — Jellyfin's Path pointed at a directory) tripped !File.Exists and produced 'The file is gone but Jellyfin still lists it. Run a Jellyfin library scan to remove the dead entry' on every scan. The file exists (Jellyfin plays it, or in the DRM case, correctly refuses to). Now falls back to Directory.Exists — if the path is a directory, skip playability checks entirely rather than emit a false missing-file flag. Commit aecfaf0.",
+      "notes": "Blu-ray 'BDRemux' folder layouts (Indiana Jones example: /mnt/media/Complete/Movies/Indiana...HDTracker with no file extension \u2014 Jellyfin's Path pointed at a directory) tripped !File.Exists and produced 'The file is gone but Jellyfin still lists it. Run a Jellyfin library scan to remove the dead entry' on every scan. The file exists (Jellyfin plays it, or in the DRM case, correctly refuses to). Now falls back to Directory.Exists \u2014 if the path is a directory, skip playability checks entirely rather than emit a false missing-file flag. Commit aecfaf0.",
       "kind": "bug",
       "versionId": "v-1-0-7-7",
       "createdAt": "2026-09-14T14:10:00Z",
@@ -595,7 +630,7 @@
     {
       "id": "i-178-content-aware-defaults",
       "title": "One-time content-aware defaults sweep: silence scanners whose content type isn't present",
-      "notes": "Quick-win pair (asks 7a56b13a + expanded scope). ScanTask first run computes hasAudio / hasVideo from the item list; for each scanner whose FixMode is still the untouched DetectOnly AND whose content isn't present, sets FixMode = Off. Mapping: no audio → EmbeddedCoverArt; no video → Quality, SubtitleLanguage, AudioLanguage, MissingSubtitles, SubtitleFonts, LargeTrickplay, HeavyTranscode, FailedTranscode, Ungrouped. Gate stored in plugin_state (ContentAwareDefaultsChecked) so it only fires once per install/upgrade. Users who add new content later can re-enable in Settings. Verified live against localhost:8099 — Test Music present so EmbeddedCoverArt stayed on, gate key set, torture-test 15/15 unaffected. Awaiting user approval for 1.0.7.8.",
+      "notes": "Quick-win pair (asks 7a56b13a + expanded scope). ScanTask first run computes hasAudio / hasVideo from the item list; for each scanner whose FixMode is still the untouched DetectOnly AND whose content isn't present, sets FixMode = Off. Mapping: no audio \u2192 EmbeddedCoverArt; no video \u2192 Quality, SubtitleLanguage, AudioLanguage, MissingSubtitles, SubtitleFonts, LargeTrickplay, HeavyTranscode, FailedTranscode, Ungrouped. Gate stored in plugin_state (ContentAwareDefaultsChecked) so it only fires once per install/upgrade. Users who add new content later can re-enable in Settings. Verified live against localhost:8099 \u2014 Test Music present so EmbeddedCoverArt stayed on, gate key set, torture-test 15/15 unaffected. Awaiting user approval for 1.0.7.8.",
       "kind": "feature",
       "versionId": "v-1-0-7-8",
       "createdAt": "2026-09-14T17:45:00Z",
@@ -605,7 +640,7 @@
     {
       "id": "i-178-library-overlap-warning",
       "title": "Warn when Jellyfin libraries contain overlapping folders",
-      "notes": "Quick-win (ask 05cd2490). ScanTask.ExecuteAsync now walks ILibraryManager.GetVirtualFolders() and records LibraryOverlap.Detected diagnostics per overlapping pair (path A is under path B). Dedup'd via the existing FNV-1a hash so repeat scans don't inflate the count. ERROR_META bucket added to configPage.html so the Errors tab renders with a clear 'Overlapping library folders' title + actionable hint pointing at Dashboard → Libraries. Verified live: 5 real overlap pairs found in the dev library set (Fixtures + Test Music/Comics/Books/Audiobooks/TV Scratch all under C:\\dev\\mediadash-fixtures\\). Awaiting user approval for 1.0.7.8.",
+      "notes": "Quick-win (ask 05cd2490). ScanTask.ExecuteAsync now walks ILibraryManager.GetVirtualFolders() and records LibraryOverlap.Detected diagnostics per overlapping pair (path A is under path B). Dedup'd via the existing FNV-1a hash so repeat scans don't inflate the count. ERROR_META bucket added to configPage.html so the Errors tab renders with a clear 'Overlapping library folders' title + actionable hint pointing at Dashboard \u2192 Libraries. Verified live: 5 real overlap pairs found in the dev library set (Fixtures + Test Music/Comics/Books/Audiobooks/TV Scratch all under C:\\dev\\mediadash-fixtures\\). Awaiting user approval for 1.0.7.8.",
       "kind": "feature",
       "versionId": "v-1-0-7-8",
       "createdAt": "2026-09-14T17:20:00Z",
@@ -615,7 +650,7 @@
     {
       "id": "i-178-ebook-comic-quirks-audit-p1s",
       "title": "Ebook/comic quirks audit: 6 P1 fixes (Adobe DRM EPUB, encrypted PDF, encrypted CBZ/CBR/CB7, extension mismatch, TEXtREAd MOBI, DjVu probe)",
-      "notes": "Second proactive audit, this time for book/comic surface. Report: docs/ebook-comic-quirks-audit.md (~600 lines). Six P1s, no P0s (book/comic surface has no destructive fixer — no repair ladder that can silently drop data).\n\nSilent-OK-on-unreadable (probe was passing but no reader can open):\n- Q4 Adobe DRM in EPUB (META-INF/encryption.xml with non-font CipherReference)\n- Q5 Encrypted PDF (/Encrypt token in trailer)\n- Q19 Password-protected CBZ (detected via first-image read throwing InvalidDataException)\n- Q20 Password-protected CBR/CB7 (detected via SharpCompress IsEncrypted flag)\n\nFalse-positive-broken (probe was rejecting valid files):\n- Q7 Pre-KF8 .azw files with TEXtREAd magic\n- Q22 .cbz that's actually RAR / .cbr that's actually 7z / .cb7 that's actually ZIP (magic-sniff)\n- Q37 .djvu had no probe branch — universal false positive\n\nAll six route through PlayabilityScanner reason-prefix convention:\n  drm:<message>          -> informational Issue (mirror encv/enca DRM shape)\n  mismatch:<ext>:<msg>   -> rename Issue (mirror F-213 shape)\n  else                    -> book-or-comic-corrupt (unchanged)\n\n10 new unit tests: BookProbeServiceTests +6 (TEXtREAd, PDF /Encrypt, EPUB Adobe DRM, EPUB Calibre-font-obfuscation control, DjVu DJVU/DJVM/bad-magic), ComicProbeServiceTests +4 (mismatch: CBZ-is-RAR, CBR-is-7z, CB7-is-ZIP).\n\nVerified: 785/785 unit tests. Torture 15/15. Awaiting user approval before ship in 1.0.7.8.",
+      "notes": "Second proactive audit, this time for book/comic surface. Report: docs/ebook-comic-quirks-audit.md (~600 lines). Six P1s, no P0s (book/comic surface has no destructive fixer \u2014 no repair ladder that can silently drop data).\n\nSilent-OK-on-unreadable (probe was passing but no reader can open):\n- Q4 Adobe DRM in EPUB (META-INF/encryption.xml with non-font CipherReference)\n- Q5 Encrypted PDF (/Encrypt token in trailer)\n- Q19 Password-protected CBZ (detected via first-image read throwing InvalidDataException)\n- Q20 Password-protected CBR/CB7 (detected via SharpCompress IsEncrypted flag)\n\nFalse-positive-broken (probe was rejecting valid files):\n- Q7 Pre-KF8 .azw files with TEXtREAd magic\n- Q22 .cbz that's actually RAR / .cbr that's actually 7z / .cb7 that's actually ZIP (magic-sniff)\n- Q37 .djvu had no probe branch \u2014 universal false positive\n\nAll six route through PlayabilityScanner reason-prefix convention:\n  drm:<message>          -> informational Issue (mirror encv/enca DRM shape)\n  mismatch:<ext>:<msg>   -> rename Issue (mirror F-213 shape)\n  else                    -> book-or-comic-corrupt (unchanged)\n\n10 new unit tests: BookProbeServiceTests +6 (TEXtREAd, PDF /Encrypt, EPUB Adobe DRM, EPUB Calibre-font-obfuscation control, DjVu DJVU/DJVM/bad-magic), ComicProbeServiceTests +4 (mismatch: CBZ-is-RAR, CBR-is-7z, CB7-is-ZIP).\n\nVerified: 785/785 unit tests. Torture 15/15. Awaiting user approval before ship in 1.0.7.8.",
       "kind": "bug",
       "versionId": "v-1-0-7-8",
       "createdAt": "2026-09-15T06:00:00Z",
@@ -625,7 +660,7 @@
     {
       "id": "i-178-encoder-quirks-audit-p1s",
       "title": "Encoder-quirks audit: 3 P1 silent-data-loss fixes (DoVi P7 dual-hevc, yt-dlp attached_pic, Resolve tmcd data track)",
-      "notes": "Preemptive audit after the #56 retry taught us that exact-string classifiers rot. Research pass (docs/encoder-quirks-audit.md, ~1850 words) surveyed HandBrake / MakeMKV / MKVToolNix / FFmpeg direct / Radarr/Sonarr / yt-dlp / DaVinci Resolve / DVDFab / iTunes / fre:ac / dBpoweramp / EAC / Foobar2000 / Whisper for 27 encoder-specific quirks. Three P1 silent-data-loss classes were still open and are fixed here:\n\n(Q13) Dolby Vision Profile 7 files carry TWO codec_type=video codec_name=hevc streams (base + enhancement layer, from MakeMKV / DVDFab / any DoVi-preserving ripper). Any transcode that isn't DoVi-aware silently drops the EL and downgrades the file. QualityScanner now Count()s the hevc video streams and returns null when >= 2, until we have a DoVi-aware re-encode path.\n\n(Q14) yt-dlp --embed-thumbnail muxes an MJPEG attached_pic stream that can land as stream 0 in .mkv. FirstOrDefault(codec_type=video) in QualityScanner.cs:89 and TranscodeFixer.cs:112 picked the thumbnail; the transcoder would then re-encode a single JPEG as the 'movie'. Both call sites now exclude attached-pic streams via a new FfprobeStreamInfo.IsAttachedPicture helper (mirrors the existing IsHearingImpaired shape; 5 unit tests in FfprobeStreamDispositionTests pin the semantics).\n\n(Q16) DaVinci Resolve MP4/MOV exports carry a codec_type=data codec_tag=tmcd timecode track. Under -map 0 -c copy some ipod/mp4 muxer combos abort with 'Could not find tag for codec bin_data'. TrackFixer's remux now adds -map -0:d when the target extension is in Mp4FamilyExtensions. MKV / MPEG-TS targets keep the data stream (both accept bin_data) so intentional-timecode users on those containers aren't affected.\n\nP0 findings all already applied (whitelist subtitle codec check, -avoid_negative_ts on remux, three-layer OutputVerifier) — kept in the audit doc as anti-regression notes.\n\nVerified: 775/775 unit tests (up from 770 after +5 disposition tests). Torture test 15/15. Awaiting user approval before ship in 1.0.7.8.",
+      "notes": "Preemptive audit after the #56 retry taught us that exact-string classifiers rot. Research pass (docs/encoder-quirks-audit.md, ~1850 words) surveyed HandBrake / MakeMKV / MKVToolNix / FFmpeg direct / Radarr/Sonarr / yt-dlp / DaVinci Resolve / DVDFab / iTunes / fre:ac / dBpoweramp / EAC / Foobar2000 / Whisper for 27 encoder-specific quirks. Three P1 silent-data-loss classes were still open and are fixed here:\n\n(Q13) Dolby Vision Profile 7 files carry TWO codec_type=video codec_name=hevc streams (base + enhancement layer, from MakeMKV / DVDFab / any DoVi-preserving ripper). Any transcode that isn't DoVi-aware silently drops the EL and downgrades the file. QualityScanner now Count()s the hevc video streams and returns null when >= 2, until we have a DoVi-aware re-encode path.\n\n(Q14) yt-dlp --embed-thumbnail muxes an MJPEG attached_pic stream that can land as stream 0 in .mkv. FirstOrDefault(codec_type=video) in QualityScanner.cs:89 and TranscodeFixer.cs:112 picked the thumbnail; the transcoder would then re-encode a single JPEG as the 'movie'. Both call sites now exclude attached-pic streams via a new FfprobeStreamInfo.IsAttachedPicture helper (mirrors the existing IsHearingImpaired shape; 5 unit tests in FfprobeStreamDispositionTests pin the semantics).\n\n(Q16) DaVinci Resolve MP4/MOV exports carry a codec_type=data codec_tag=tmcd timecode track. Under -map 0 -c copy some ipod/mp4 muxer combos abort with 'Could not find tag for codec bin_data'. TrackFixer's remux now adds -map -0:d when the target extension is in Mp4FamilyExtensions. MKV / MPEG-TS targets keep the data stream (both accept bin_data) so intentional-timecode users on those containers aren't affected.\n\nP0 findings all already applied (whitelist subtitle codec check, -avoid_negative_ts on remux, three-layer OutputVerifier) \u2014 kept in the audit doc as anti-regression notes.\n\nVerified: 775/775 unit tests (up from 770 after +5 disposition tests). Torture test 15/15. Awaiting user approval before ship in 1.0.7.8.",
       "kind": "bug",
       "versionId": "v-1-0-7-8",
       "createdAt": "2026-09-15T05:00:00Z",
@@ -635,7 +670,7 @@
     {
       "id": "i-178-handbrake-mp4-vobsub-whitelist",
       "title": "Fix GitHub #56 (fadern retry): mp4/ipod subtitle classifier flipped from blacklist to whitelist, catches HandBrake + all encoder aliases",
-      "notes": "GitHub #56 fadern retry on 1.0.7.7 still failed with `[ipod @ ...] Tag text incompatible with output codec id '98314'`. The 1.0.7.6 fold-in in TrackFixer.ComputeMuxerIncompatibleSubtitleStreams used an exact-string HashSet blacklist of `dvd_subtitle`, `hdmv_pgs_subtitle`, `dvb_subtitle` — which missed ffprobe's older aliases (`dvdsub`, `pgssub`, `dvbsub`), missed HandBrake-produced .m4v files whose sub stream reports an empty codec_name and an all-zero codec_tag_string (from the error output: `([0][0][0][0])`), and would keep missing every future encoder alias we don't yet know about.\n\nRoot cause: the exact-string blacklist is fragile. Sample-shape variance across ffmpeg versions and encoder outputs means we cannot enumerate every incompatible codec_name — the miss will always favour data loss (user's remux errors out).\n\nFix: flipped to a whitelist of the three subtitle codecs the mp4/ipod muxer accepts under -c copy (mov_text, tx3g, webvtt). Everything else — including empty and null codec_name, every alias, and any codec we've never seen — folds into the negative-map list at remux time. Ipod muxer never sees a subtitle codec it can't tag.\n\nCovers HandBrake (VobSub-in-.m4v the reported bug), MakeMKV (PGS-in-.m4v edge case), Radarr/Sonarr Blu-ray remuxers copying subs into .m4v containers, yt-dlp .m4a outputs with embedded subs (rare but valid), and any future encoder we haven't tested.\n\n12 new [Theory] test cases pin every variant. Also added positive assertions that mov_text / tx3g / webvtt stay kept and MKV outputs never drop any subtitle regardless of codec_name.\n\nAwaiting user approval before ship in 1.0.7.8.",
+      "notes": "GitHub #56 fadern retry on 1.0.7.7 still failed with `[ipod @ ...] Tag text incompatible with output codec id '98314'`. The 1.0.7.6 fold-in in TrackFixer.ComputeMuxerIncompatibleSubtitleStreams used an exact-string HashSet blacklist of `dvd_subtitle`, `hdmv_pgs_subtitle`, `dvb_subtitle` \u2014 which missed ffprobe's older aliases (`dvdsub`, `pgssub`, `dvbsub`), missed HandBrake-produced .m4v files whose sub stream reports an empty codec_name and an all-zero codec_tag_string (from the error output: `([0][0][0][0])`), and would keep missing every future encoder alias we don't yet know about.\n\nRoot cause: the exact-string blacklist is fragile. Sample-shape variance across ffmpeg versions and encoder outputs means we cannot enumerate every incompatible codec_name \u2014 the miss will always favour data loss (user's remux errors out).\n\nFix: flipped to a whitelist of the three subtitle codecs the mp4/ipod muxer accepts under -c copy (mov_text, tx3g, webvtt). Everything else \u2014 including empty and null codec_name, every alias, and any codec we've never seen \u2014 folds into the negative-map list at remux time. Ipod muxer never sees a subtitle codec it can't tag.\n\nCovers HandBrake (VobSub-in-.m4v the reported bug), MakeMKV (PGS-in-.m4v edge case), Radarr/Sonarr Blu-ray remuxers copying subs into .m4v containers, yt-dlp .m4a outputs with embedded subs (rare but valid), and any future encoder we haven't tested.\n\n12 new [Theory] test cases pin every variant. Also added positive assertions that mov_text / tx3g / webvtt stay kept and MKV outputs never drop any subtitle regardless of codec_name.\n\nAwaiting user approval before ship in 1.0.7.8.",
       "kind": "bug",
       "versionId": "v-1-0-7-8",
       "createdAt": "2026-09-15T04:30:00Z",
@@ -645,17 +680,17 @@
     {
       "id": "i-bl-17-expanded-error-reporting",
       "title": "Expanded error reporting: attach full ffprobe reproduction bundle to every file-scoped diagnostic",
-      "notes": "Motivating incident (2026-09-15): GitHub #56 fadern retry on 1.0.7.7 still fails with 'Tag text incompatible with output codec id 98314' (dvd_subtitle in an ipod-muxed .m4v). The 1.0.7.6 fold-in (commit 4da24b9) missed his file because TrackFixer.Mp4IncompatibleSubtitleCodecs is an exact-string HashSet ({dvd_subtitle, hdmv_pgs_subtitle, dvb_subtitle}) and his HandBrake .m4v's sub stream is likely reported by ffprobe with an alias (dvdsub, pgssub, or with an empty codec_tag_string). We can't confirm the exact shape without asking fadern to run ffprobe manually — and we can't build a synthetic torture-test fixture that would have caught this class of bug in advance. Every future bug report on a specific file has the same wall: ask the user for their file OR guess.\n\nFeature: whenever the plugin emits a file-scoped diagnostic (Errors tab row) or a FixResult.Fail for a specific file, automatically capture and persist a full reproduction bundle from ffprobe so support triage can build a synthetic reproducer without ever needing the original file. Include the bundle in Report-an-issue by default (with a Copy button so users can paste into GitHub).\n\nBundle contents (structured JSON, one snapshot per file):\n(a) full ffprobe -show_format -show_streams -show_chapters output (the canonical dump)\n(b) codec_tag as BOTH the raw four-byte value and the FourCC string, per stream — the case that misled 1.0.7.6 fold-in (ffprobe emits codec_tag_string but not the numeric codec_id, and codec_tag can be empty even when codec_id is set)\n(c) per-stream disposition map (default, forced, hearing_impaired, dub, ...) — needed to reproduce audio/subtitle-language edge cases\n(d) container-level format_tags (encoder identity: HandBrake / MakeMKV / Sonarr-remux, encoder_version, ISO base media brand — HandBrake .m4v's `mp4s-E0` VobSub-in-STSD quirk is deterministic per encoder)\n(e) chapter markers (Menu track in fadern's MediaInfo — chapter offsets matter for some remux edge cases)\n(f) HasTruncationMarker probe outcome, DecodeCheckAsync exit code + first-30s decoded-time (reproduce Playability false-positives without re-scanning)\n(g) the exact ffmpeg command line that failed + stderr tail (already captured in FixResult; move into the bundle as a first-class field)\n(h) file identity: SHA256 of the first 4 KB + last 4 KB (unique fingerprint that isn't the whole file — same-encoder-pass produces identical head/tail, enough to identify 'same file class' without shipping the media)\n(i) filesystem shape: extension, size, mtime, drive filesystem (NTFS/ext4/SMB/NFS — matters for i-175-08 timestamp bugs and #59 utimensat failures)\n\nPrivacy (opt-in-by-default per install):\n- Path & filename redaction: replace with `<library-root>/<hash>/<hash>.<ext>` on capture. Users who WANT to include paths tick a Settings toggle. Default: redact.\n- Content: no sample frames, no keyframes, no audio samples ever captured. Metadata only.\n- One-shot 'clear all reproduction bundles' button in Settings for users who want to purge before a support export.\n\nStorage:\n- New `reproduction_bundles` table keyed by (source, path_hash). Each row = one JSON snapshot. Cap: 500 rows LRU-evicted; per-bundle size cap 32 KB (ffprobe JSON is typically 4-8 KB even for weird files).\n- Cleared when the source diagnostic is cleared, so the two lifecycles match.\n- Same VACUUM / prune infrastructure as i-bl-16 (plugin data volume protection) — plumb through when that lands.\n\nSurface points:\n(1) Errors tab row: add a 'Copy reproduction data' button next to the Technical detail expander when a bundle exists. Puts pretty-printed JSON on the clipboard, opens a template GitHub issue with it pasted into a ```json``` fence.\n(2) Report an issue button: automatically include ALL bundles for the last 24h of errors. User can uncheck individual entries before send.\n(3) New Errors-tab filter chip 'has reproduction data' so triage can jump to reproducible errors first.\n\nImplementation notes:\n- FfprobeService already runs -show_format -show_streams via ProbeAsync. Add a ProbeReproductionBundleAsync that also passes -show_chapters -show_program_version -show_format_tags and adds codec_tag as an integer to the emitted JSON via -analyzeduration/-probesize hints.\n- Diagnostics.Record and FixResult.Fail become async and take an optional path parameter. When path is present, kick off a background probe + bundle-write (fire-and-forget, no user-facing latency).\n- Rollback story: bundle capture is a NO-OP addon to existing error paths. If ffprobe is missing / slow / cancelled, log at Debug and continue; the diagnostic still writes without the bundle.\n\nTests:\n- Unit: bundle serializer covers every ffprobe field we care about; a torture-fixture file produces a bundle that a) round-trips through the JSON, b) is small enough (<32 KB), c) redacts the path when the toggle is off.\n- Integration: run a failing fix in dry-run, assert a bundle row lands in reproduction_bundles with the file's codec_tag + disposition captured.\n- Real-world: on the next fadern-style report, copy the JSON bundle from the issue reply, feed to `tools/repair-test/reproduce-from-bundle.ps1` (also new — reads bundle, builds a synthetic file with matching codec_tags, runs the fix), and confirm it reproduces the failure before shipping any patch.\n\nBackward compatibility:\n- Existing installs: reproduction_bundles table created on first upgrade. No migration of existing errors — bundles only capture on NEW diagnostics from that point forward.\n- 'Report an issue' template: fall back to today's flat text when no bundles exist.",
+      "notes": "Use explicit opt-in for additional diagnostic capture; sharing remains user initiated. Redact paths, command arguments and identifying metadata throughout the bundle, offer an export preview, and bound capture time/storage. Metadata can guide synthetic reproducers but cannot guarantee reproducing media corruption. Earlier opt-in-by-default wording is superseded.\n\nEarlier planning notes (retained for context):\nMotivating incident (2026-09-15): GitHub #56 fadern retry on 1.0.7.7 still fails with 'Tag text incompatible with output codec id 98314' (dvd_subtitle in an ipod-muxed .m4v). The 1.0.7.6 fold-in (commit 4da24b9) missed his file because TrackFixer.Mp4IncompatibleSubtitleCodecs is an exact-string HashSet ({dvd_subtitle, hdmv_pgs_subtitle, dvb_subtitle}) and his HandBrake .m4v's sub stream is likely reported by ffprobe with an alias (dvdsub, pgssub, or with an empty codec_tag_string). We can't confirm the exact shape without asking fadern to run ffprobe manually \u2014 and we can't build a synthetic torture-test fixture that would have caught this class of bug in advance. Every future bug report on a specific file has the same wall: ask the user for their file OR guess.\n\nFeature: whenever the plugin emits a file-scoped diagnostic (Errors tab row) or a FixResult.Fail for a specific file, automatically capture and persist a full reproduction bundle from ffprobe so support triage can build a synthetic reproducer without ever needing the original file. Include the bundle in Report-an-issue by default (with a Copy button so users can paste into GitHub).\n\nBundle contents (structured JSON, one snapshot per file):\n(a) full ffprobe -show_format -show_streams -show_chapters output (the canonical dump)\n(b) codec_tag as BOTH the raw four-byte value and the FourCC string, per stream \u2014 the case that misled 1.0.7.6 fold-in (ffprobe emits codec_tag_string but not the numeric codec_id, and codec_tag can be empty even when codec_id is set)\n(c) per-stream disposition map (default, forced, hearing_impaired, dub, ...) \u2014 needed to reproduce audio/subtitle-language edge cases\n(d) container-level format_tags (encoder identity: HandBrake / MakeMKV / Sonarr-remux, encoder_version, ISO base media brand \u2014 HandBrake .m4v's `mp4s-E0` VobSub-in-STSD quirk is deterministic per encoder)\n(e) chapter markers (Menu track in fadern's MediaInfo \u2014 chapter offsets matter for some remux edge cases)\n(f) HasTruncationMarker probe outcome, DecodeCheckAsync exit code + first-30s decoded-time (reproduce Playability false-positives without re-scanning)\n(g) the exact ffmpeg command line that failed + stderr tail (already captured in FixResult; move into the bundle as a first-class field)\n(h) file identity: SHA256 of the first 4 KB + last 4 KB (unique fingerprint that isn't the whole file \u2014 same-encoder-pass produces identical head/tail, enough to identify 'same file class' without shipping the media)\n(i) filesystem shape: extension, size, mtime, drive filesystem (NTFS/ext4/SMB/NFS \u2014 matters for i-175-08 timestamp bugs and #59 utimensat failures)\n\nPrivacy (opt-in-by-default per install):\n- Path & filename redaction: replace with `<library-root>/<hash>/<hash>.<ext>` on capture. Users who WANT to include paths tick a Settings toggle. Default: redact.\n- Content: no sample frames, no keyframes, no audio samples ever captured. Metadata only.\n- One-shot 'clear all reproduction bundles' button in Settings for users who want to purge before a support export.\n\nStorage:\n- New `reproduction_bundles` table keyed by (source, path_hash). Each row = one JSON snapshot. Cap: 500 rows LRU-evicted; per-bundle size cap 32 KB (ffprobe JSON is typically 4-8 KB even for weird files).\n- Cleared when the source diagnostic is cleared, so the two lifecycles match.\n- Same VACUUM / prune infrastructure as i-bl-16 (plugin data volume protection) \u2014 plumb through when that lands.\n\nSurface points:\n(1) Errors tab row: add a 'Copy reproduction data' button next to the Technical detail expander when a bundle exists. Puts pretty-printed JSON on the clipboard, opens a template GitHub issue with it pasted into a ```json``` fence.\n(2) Report an issue button: automatically include ALL bundles for the last 24h of errors. User can uncheck individual entries before send.\n(3) New Errors-tab filter chip 'has reproduction data' so triage can jump to reproducible errors first.\n\nImplementation notes:\n- FfprobeService already runs -show_format -show_streams via ProbeAsync. Add a ProbeReproductionBundleAsync that also passes -show_chapters -show_program_version -show_format_tags and adds codec_tag as an integer to the emitted JSON via -analyzeduration/-probesize hints.\n- Diagnostics.Record and FixResult.Fail become async and take an optional path parameter. When path is present, kick off a background probe + bundle-write (fire-and-forget, no user-facing latency).\n- Rollback story: bundle capture is a NO-OP addon to existing error paths. If ffprobe is missing / slow / cancelled, log at Debug and continue; the diagnostic still writes without the bundle.\n\nTests:\n- Unit: bundle serializer covers every ffprobe field we care about; a torture-fixture file produces a bundle that a) round-trips through the JSON, b) is small enough (<32 KB), c) redacts the path when the toggle is off.\n- Integration: run a failing fix in dry-run, assert a bundle row lands in reproduction_bundles with the file's codec_tag + disposition captured.\n- Real-world: on the next fadern-style report, copy the JSON bundle from the issue reply, feed to `tools/repair-test/reproduce-from-bundle.ps1` (also new \u2014 reads bundle, builds a synthetic file with matching codec_tags, runs the fix), and confirm it reproduces the failure before shipping any patch.\n\nBackward compatibility:\n- Existing installs: reproduction_bundles table created on first upgrade. No migration of existing errors \u2014 bundles only capture on NEW diagnostics from that point forward.\n- 'Report an issue' template: fall back to today's flat text when no bundles exist.",
       "kind": "feature",
-      "versionId": "backlog",
+      "versionId": "v-1-2-0-0",
       "createdAt": "2026-09-15T04:00:00Z",
-      "updatedAt": "2026-09-15T04:00:00Z",
+      "updatedAt": "2026-09-18T07:49:16Z",
       "completedAt": null
     },
     {
       "id": "i-178-drm-notification",
       "title": "DRM detection: informational-only Issue entry (no repair, no delete, no silent skip)",
-      "notes": "1.0.7.7's DRM handling was `return null` — no Issue created, no notification. User has a DRM file, Jellyfin refuses to play it, MediaDash silently ignores it. Reworked so codec_tag_string=encv/enca now emits an informational Issue with reason=drm-protected and a dedicated SuggestedFix message ('This file is DRM-protected — MediaDash cannot repair it. Ignore this to hide the notification, or remove the file manually.'). PlayabilityFixer refuses cleanly on Approve (returns FixResult.Fail with the same message, no ffmpeg, no filesystem touch) and the DRM branch is hoisted above IsStillBrokenAsync so the default probe-check doesn't preempt it. User sees the DRM finding, can Ignore or manually remove, cannot accidentally trigger a recycle. Awaiting user approval before ship in 1.0.7.8.",
+      "notes": "1.0.7.7's DRM handling was `return null` \u2014 no Issue created, no notification. User has a DRM file, Jellyfin refuses to play it, MediaDash silently ignores it. Reworked so codec_tag_string=encv/enca now emits an informational Issue with reason=drm-protected and a dedicated SuggestedFix message ('This file is DRM-protected \u2014 MediaDash cannot repair it. Ignore this to hide the notification, or remove the file manually.'). PlayabilityFixer refuses cleanly on Approve (returns FixResult.Fail with the same message, no ffmpeg, no filesystem touch) and the DRM branch is hoisted above IsStillBrokenAsync so the default probe-check doesn't preempt it. User sees the DRM finding, can Ignore or manually remove, cannot accidentally trigger a recycle. Awaiting user approval before ship in 1.0.7.8.",
       "kind": "feature",
       "versionId": "v-1-0-7-8",
       "createdAt": "2026-09-14T17:35:00Z",
@@ -665,12 +700,128 @@
     {
       "id": "i-178-mismatch-rename",
       "title": "Container-extension mismatch fires with a rename-fix action instead of the repair-or-delete ladder",
-      "notes": "Third false-positive class after 1.0.7.7 shipped. Release-scene rips named .mp4 that are actually MKV inside (Rage (2014) 1080p BRRip x264 -YTS.mp4 → HEVC in matroska,webm container) tripped the F-213 container-extension mismatch check, got labelled 'This file can't be played', and the 1.0.7.6 repair ladder tried to salvage or recycle them. User asked for a different treatment: tell the user the extension is wrong and offer to rename. Now: (1) IsContainerExtensionMismatch computes canonical target extension (matroska→mkv, mp4-family→mp4, avi→avi, mpegts→ts, etc.) and stashes rename_to_ext in DetailsJson; (2) SuggestedFix text switches to 'The file plays but its extension doesn't match its container. Approve to rename it to a matching extension — the file is not moved and is not deleted.'; (3) PlayabilityFixer short-circuits before the repair ladder when reason=container-extension-mismatch and does an atomic File.Move — refuses on collision, notifies Jellyfin's library monitor, logs a history row. Verified end-to-end on the user's actual Rage file: scanned, flagged with the new message, approved, renamed to .mkv, byte-identical MD5, ffprobe/ffmpeg -xerror both pass on the renamed file. Torture-test 15/15 (variant 11-wrong-ext.mkv now correctly renamed to 11-wrong-ext.mp4). Commits ccf9759 (superseded narrowing) + 05327d2 (final rename-fix). Local only — awaiting explicit user approval before push + 1.0.7.8 release.",
+      "notes": "Third false-positive class after 1.0.7.7 shipped. Release-scene rips named .mp4 that are actually MKV inside (Rage (2014) 1080p BRRip x264 -YTS.mp4 \u2192 HEVC in matroska,webm container) tripped the F-213 container-extension mismatch check, got labelled 'This file can't be played', and the 1.0.7.6 repair ladder tried to salvage or recycle them. User asked for a different treatment: tell the user the extension is wrong and offer to rename. Now: (1) IsContainerExtensionMismatch computes canonical target extension (matroska\u2192mkv, mp4-family\u2192mp4, avi\u2192avi, mpegts\u2192ts, etc.) and stashes rename_to_ext in DetailsJson; (2) SuggestedFix text switches to 'The file plays but its extension doesn't match its container. Approve to rename it to a matching extension \u2014 the file is not moved and is not deleted.'; (3) PlayabilityFixer short-circuits before the repair ladder when reason=container-extension-mismatch and does an atomic File.Move \u2014 refuses on collision, notifies Jellyfin's library monitor, logs a history row. Verified end-to-end on the user's actual Rage file: scanned, flagged with the new message, approved, renamed to .mkv, byte-identical MD5, ffprobe/ffmpeg -xerror both pass on the renamed file. Torture-test 15/15 (variant 11-wrong-ext.mkv now correctly renamed to 11-wrong-ext.mp4). Commits ccf9759 (superseded narrowing) + 05327d2 (final rename-fix). Local only \u2014 awaiting explicit user approval before push + 1.0.7.8 release.",
       "kind": "feature",
       "versionId": "v-1-0-7-8",
       "createdAt": "2026-09-14T15:00:00Z",
       "updatedAt": "2026-09-14T17:15:00Z",
       "completedAt": "2026-09-14T17:15:00Z"
+    },
+    {
+      "id": "i-110-protected-media",
+      "title": "Persistent Never modify protection for titles, folders and collections the user defines",
+      "notes": "Apply explicit protection across automatic fixers, including future detections. Distinguish protection from ignoring one issue. Show why an item is protected, recheck at execution, and require deliberate removal of protection before modifying it. Define stable identity handling across library refreshes and moves.",
+      "kind": "feature",
+      "versionId": "v-1-0-8-0",
+      "createdAt": "2026-09-18T07:49:16Z",
+      "updatedAt": "2026-09-25T13:01:10.677Z",
+      "completedAt": "2026-09-25T13:01:10.677Z"
+    },
+    {
+      "id": "i-110-minimum-savings",
+      "title": "Minimum worthwhile savings for quality re-encodes",
+      "notes": "Configure minimum percentage and/or byte savings for Quality fixes. Check actual output before replacement and retain the original if the threshold is missed. Existing larger-output rejection remains. Repair and compatibility conversions use their own acceptance rules; report insufficient savings as a skipped outcome rather than an endless retry.",
+      "kind": "feature",
+      "versionId": "v-1-0-8-0",
+      "createdAt": "2026-09-18T07:49:16Z",
+      "updatedAt": "2026-09-25T13:01:08.622Z",
+      "completedAt": "2026-09-25T13:01:08.622Z"
+    },
+    {
+      "id": "i-120-retry-policy",
+      "title": "Bounded retries and a Needs attention queue state",
+      "notes": "Classify transient versus permanent failures. Persist attempt count and next retry time, use increasing delays and a retry ceiling, and provide Retry now after the cause is resolved. Preserve special handling for subtitle quotas and file locks. Do not count scheduling deferrals as failures. Show a plain-language reason and prevent one failing item from monopolising the queue.",
+      "kind": "feature",
+      "versionId": "v-1-2-0-0",
+      "createdAt": "2026-09-18T07:49:16Z",
+      "updatedAt": "2026-09-18T07:49:16Z",
+      "completedAt": null
+    },
+    {
+      "id": "i-120-digest-alerts",
+      "title": "Optional activity digests and actionable alerts",
+      "notes": "Opt-in daily/weekly summaries of repairs, reclaimed space, blocked work and upcoming recycle-bin expiry. Start with dashboard summaries and an optional user-configured notification destination. Deduplicate alerts, redact sensitive paths by default and make delivery failures independent of fix execution.",
+      "kind": "feature",
+      "versionId": "v-1-2-0-0",
+      "createdAt": "2026-09-18T07:49:16Z",
+      "updatedAt": "2026-09-18T07:49:16Z",
+      "completedAt": null
+    },
+    {
+      "id": "i-108-cross-platform-verification",
+      "title": "Expand cross-platform and Jellyfin-version release verification",
+      "notes": "Partial in 1.0.8.0 (unreleased). New .github/workflows/smoke.yaml builds the plugin, launches a real Jellyfin container against the two supported host lines (matrix over jellyfin/jellyfin:10.11 and :12), waits for /health = Healthy, and asserts (a) the plugin's assembly name appears in the log, and (b) no load-time exception mentioning MediaDash surfaces. Covers the biggest install-time regression class: ABI mismatch and missing sidecar DLLs. Existing ci.yaml already runs build+test on both Ubuntu and Windows; this adds the runtime dimension.\n\nStill outstanding (deferred): interrupted-swap coverage, recycle-bin restore chain in CI, Windows-side runtime smoke, and destructive workflows against media fixtures. Those require library-fixture provisioning in CI (make-fixtures.sh generates real MP4s via ffmpeg) which is heavier than a smoke gate; leave to a follow-up card if user asks.\n\nEarlier planning notes (retained for context):\nAdd Windows alongside Ubuntu CI and runtime smoke tests for both supported Jellyfin host lines. Cover install, upgrade, path/case behaviour, interrupted swaps and recycle-bin restore. Use media fixtures for destructive workflows. Distinguish automated coverage from manual macOS/Docker verification in release notes.",
+      "kind": "bug",
+      "versionId": "v-1-0-8-0",
+      "createdAt": "2026-09-18T07:49:16Z",
+      "updatedAt": "2026-09-25T13:30:00Z",
+      "completedAt": "2026-09-25T13:30:00Z"
+    },
+    {
+      "id": "i-future-stale-auto-delete",
+      "title": "Explore opt-in stale-content deletion after Leaving soon review",
+      "notes": "Depends on 1.6 review-list experience and an explicit revision of PLAN.md, which currently makes stale-content cleanup detect-only. Resolve per-user keep/veto, series/season grouping, final activity rechecks, recycle retention and recovery before scheduling implementation. Original proposal is preserved on d04791b1-2625-4da9-bba7-dfa816ae71f5.",
+      "kind": "feature",
+      "versionId": "backlog",
+      "createdAt": "2026-09-18T07:49:16Z",
+      "updatedAt": "2026-09-18T07:49:16Z",
+      "completedAt": null
+    },
+    {
+      "id": "92eb7e39-7989-4e21-a443-009471746760",
+      "title": "remove all non essential / old files",
+      "notes": "",
+      "kind": "bug",
+      "versionId": "v-1-0-8-0",
+      "createdAt": "2026-09-19T11:59:53.157Z",
+      "updatedAt": "2026-09-25T02:36:24.225Z",
+      "completedAt": "2026-09-25T02:36:24.225Z"
+    },
+    {
+      "id": "a376bd69-6fac-4069-9099-2742dcbdecd3",
+      "title": "Issues Sorting by size",
+      "notes": "users want a way to sort the issues tab by size of space saved i.e the files that could save them the most are at the top or bottom.",
+      "kind": "feature",
+      "versionId": "v-1-0-8-0",
+      "createdAt": "2026-09-26T04:56:21.107Z",
+      "updatedAt": "2026-09-26T04:57:07.095Z"
+    },
+    {
+      "id": "f8d5fb5f-544b-4f84-8dd0-4f2924a8d7fe",
+      "title": "untagged audio and subtitle tracks manual review option",
+      "notes": "Users would like a manual review option for untagged audio and subtitles instead of always automatic removal.",
+      "kind": "feature",
+      "versionId": "v-1-0-8-0",
+      "createdAt": "2026-09-26T05:39:36.706Z",
+      "updatedAt": "2026-09-26T05:40:16.180Z"
+    },
+    {
+      "id": "03be8f7e-74cd-448c-a52e-70d8ff4f5431",
+      "title": "mdIssueLangFilter light mode visual error",
+      "notes": "in light mode mdIssueLangFilter drop down box on the issues tab is visually wrong.",
+      "kind": "feature",
+      "versionId": "v-1-0-8-0",
+      "createdAt": "2026-09-26T14:50:25.666Z",
+      "updatedAt": "2026-09-27T11:28:30.379Z"
+    },
+    {
+      "id": "1103b66a-9c53-4e10-88e6-e78c081455b1",
+      "title": "unsupported media converter",
+      "notes": "books movies audiobooks etc.",
+      "kind": "feature",
+      "versionId": "backlog",
+      "createdAt": "2026-09-26T15:41:26.591Z",
+      "updatedAt": "2026-09-26T15:41:44.219Z"
+    },
+    {
+      "id": "i-108-interleave-seek-fix",
+      "title": "Detect and repair mis-interleaved files that stall after seeking",
+      "notes": "Shipped in 1.0.8.0 (unreleased), adapted from community PR #74. Problem: some remuxes store sound and picture far apart inside the container. Jellyfin plays them fine from the start but after a seek the on-the-fly transcode lands on video with no matching audio and the client stalls or goes silent; ffmpeg still exits successfully, so the existing decode check never flagged these files.\n\nDetection: PlayabilityScanner now runs InterleaveAnalyzer on videos \u2265 10 min when Thorough playability is on; nine evenly-spread sample positions \u2192 ffprobe packet walk \u2192 full-file measurement only when a sample holds video without matching audio. Threshold: audio stored more than 10 s from its video. Repair: ffmpeg -map 0 -c copy -max_interleave_delta 0 (pure muxer rebuild, no re-encode); original recycled on success, left untouched on any failure \u2014 files flagged for this reason never reach the disposal path. Results cached in a new interleave_cache SQLite table keyed by path+size+mtime so re-scans are cheap.\n\nProduction hardening on top of the PR: InterleaveCheckAsync now returns a tri-state InterleaveResult (Clean / Broken / Indeterminate) instead of double?, so the post-repair verification can refuse the swap when the layout check on the rewritten file can't complete (missing ffprobe, timeout, process crash) instead of silently accepting an indeterminate result as success.\n\nNot yet exercised live on real Jellyfin \u2014 end-to-end dev-server test with bad.mkv fixture + Android playback + recycle-bin swap are the remaining release gates. The nine-sample detector can still miss shorter displaced stretches; -max_interleave_delta 0 can buffer substantial RAM on large displaced regions (not capped).",
+      "kind": "feature",
+      "versionId": "v-1-0-8-0",
+      "createdAt": "2026-10-04T12:00:00Z",
+      "updatedAt": "2026-10-04T12:00:00Z",
+      "completedAt": "2026-10-04T12:00:00Z"
     }
   ]
 }
