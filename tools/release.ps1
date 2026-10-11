@@ -167,7 +167,14 @@ Set-Content manifest.json $updated -Encoding utf8
 # release.ps1 (per the "hand-editing manifest.json is banned" rule).
 $buildYaml = Get-Content build.yaml -Raw
 $buildYamlUpdated = [regex]::Replace($buildYaml, '(?m)^(version:\s*)"[^"]*"', "`$1`"$Version`"", 1)
-if ($buildYamlUpdated -eq $buildYaml) { throw "Could not locate version: line in build.yaml" }
+# Idempotent: if the regex returns the file unchanged, that's either (a) already at $Version
+# — fine, nothing to do — or (b) the version: line is genuinely missing. Distinguish by
+# checking whether the target string is present. The pre-fix line threw on both cases, failing
+# a release whose only "problem" was that build.yaml was pre-stamped (common when release.ps1
+# runs after a dev build already bumped it).
+if ($buildYamlUpdated -eq $buildYaml -and $buildYaml -notmatch "(?m)^version:\s*`"$([regex]::Escape($Version))`"\s*$") {
+    throw "Could not locate version: line in build.yaml"
+}
 Set-Content build.yaml $buildYamlUpdated -Encoding utf8
 
 Write-Host ""
