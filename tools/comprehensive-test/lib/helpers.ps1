@@ -87,14 +87,7 @@ function Get-JellyfinLibraries {
 
 function Wait-ForJellyfinScan {
     param([int]$TimeoutSec = 300)
-    $tasks = Invoke-JfApi -Method GET -Path "/ScheduledTasks"
-    $scan = $tasks | Where-Object Key -eq "RefreshLibrary" | Select-Object -First 1
-    if (-not $scan) { throw "RefreshLibrary task not found" }
-    Invoke-JfApi -Method POST -Path "/ScheduledTasks/Running/$($scan.Id)" | Out-Null
-    Wait-For -TimeoutSec $TimeoutSec -Description "Jellyfin RefreshLibrary to finish" -Predicate {
-        $t = Invoke-JfApi -Method GET -Path "/ScheduledTasks/$($scan.Id)"
-        return ($t.State -eq "Idle")
-    } | Out-Null
+    Start-MediaDashTask -Key 'RefreshLibrary' -Route '/Library/Refresh' -Wait -TimeoutSec $TimeoutSec
 }
 
 function Get-JellyfinItemCount {

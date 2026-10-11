@@ -63,7 +63,8 @@ function Invoke-Phase-Preflight {
     }
 
     Invoke-Test "MediaDash DB file is writable" {
-        $dbPath = "$env:LOCALAPPDATA\jellyfin\data\mediadash\mediadash.db"
+        $hostInfo = Invoke-JfApi -Method GET -Path '/System/Info'
+        $dbPath = Join-Path $hostInfo.ProgramDataPath 'data/mediadash/mediadash.db'
         # DB is created on first plugin use — may not exist yet on a fresh install
         $dbDir = Split-Path -Parent $dbPath
         Assert-True (Test-Path -LiteralPath $dbDir) "plugin data dir should exist"

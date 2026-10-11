@@ -21,10 +21,34 @@ function Invoke-Phase-Teardown {
                 $_.OriginalPath -like "*_test-scratch*"
             })
             if ($testEntries.Count -gt 0) {
+                # External audit P2 #10: /MediaDash/RecycleBin/Items/Delete expects BinDeleteRequest
+                # with a `BinPath` string (see Api/BinDeleteRequest.cs). The previous payload sent
+                # `HistoryIds` which the controller discards; the endpoint responded 400, -IgnoreErrors
+                # hid the failure, and teardown reported entries cleared while the bin still held them.
+                $cleared = 0
+                $failed = 0
                 foreach ($e in $testEntries) {
-                    Invoke-JfApi -Method POST -Path "/MediaDash/RecycleBin/Items/Delete" -Body @{ HistoryIds = @($e.HistoryId) } -IgnoreErrors | Out-Null
+                    $binPath = $e.BinPath
+                    if (-not $binPath) {
+                        $failed++
+                        continue
+                    }
+
+                    $resp = Invoke-JfApi -Method POST -Path "/MediaDash/RecycleBin/Items/Delete" -Body @{ BinPath = $binPath } -IgnoreErrors
+                    if ($null -ne $resp) {
+                        $cleared++
+                    } else {
+                        $failed++
+                    }
                 }
-                Write-Log "    cleared $($testEntries.Count) test recycle-bin entries"
+
+                # Verify by re-listing: anything we targeted that still shows up is a real failure.
+                $remaining = @((Get-MediaDashRecycleBinItems) | Where-Object { $_.OriginalPath -like "*mediadash-fixtures*" -or $_.OriginalPath -like "*_test-scratch*" })
+                if ($remaining.Count -eq 0) {
+                    Write-Log "    cleared $cleared test recycle-bin entries"
+                } else {
+                    Write-Log "    warn: $($remaining.Count) test entries still in bin after delete (sent=$($testEntries.Count), accepted=$cleared, rejected=$failed) — pollutes later runs"
+                }
             }
         } catch {
             Write-Log "    warn: recycle bin cleanup failed — $($_.Exception.Message)"

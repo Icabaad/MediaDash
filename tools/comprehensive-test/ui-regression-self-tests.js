@@ -19,6 +19,91 @@ function element() {
         fire(name, ev) { for (const fn of handlers.get(name) || []) fn(ev); }
     };
 }
+
+function filesMenuEnvironment() {
+    const nodes = new Map(), requests = [], alerts = [], cleanups = [], timers = new Map();
+    let timerId = 0;
+    const node = selector => {
+        if (!nodes.has(selector)) nodes.set(selector, Object.assign(element(), {
+            style: { display: 'none' }, offsetWidth: 230, offsetHeight: 80, textContent: '', value: '',
+            focus() {}, contains: () => false, querySelector: node, querySelectorAll: () => [],
+            click() { this.fire('click', { stopPropagation() {} }); }
+        }));
+        return nodes.get(selector);
+    };
+    const ctx = { window: { MediaDash: {}, innerWidth: 200, innerHeight: 150, alert: m => alerts.push(m) },
+        document: element(), ApiClient: { getUrl: p => p },
+        setTimeout(fn) { timers.set(++timerId, fn); return timerId; }, clearTimeout(id) { timers.delete(id); } };
+    vm.runInNewContext(source('tabs/files-tab.js').replace('get currentFilePath()',
+        'bindCtxMenu: bindCtxMenu, openCtxMenu: openCtxMenu, submitManualIssue: submitManualIssue, extractErrorMessage: extractErrorMessage, setListing: function(d) { currentFileListing = d; }, get currentFilePath()'), ctx);
+    const api = () => new Promise(() => {});
+    api.ajax = options => { requests.push(JSON.parse(options.data)); return Promise.resolve({ Id: 1 }); };
+    const files = ctx.window.MediaDash.createFilesTab({ api, view: { querySelector: node },
+        lifetime: { own: fn => cleanups.push(fn) }, ownGlobal(target, type, fn) {
+            target.addEventListener(type, fn); cleanups.push(() => target.removeEventListener(type, fn));
+        } });
+    files.currentFilePath = 'C:\\A'; files.setListing({}); files.bindCtxMenu();
+    return { files, node, ctx, requests, alerts, cleanups, timers };
+}
+
+test('Files menu captures the clicked path for manual add and protection', async () => {
+    const e = filesMenuEnvironment();
+    e.files.openCtxMenu(190, 140, 'one.mkv', false);
+    assert.equal(e.node('#mdFileCtxMenu').style.left, '0px');
+    e.files.currentFilePath = 'C:\\B'; e.files.submitManualIssue('Quality');
+    assert.equal(e.requests[0].Path, 'C:\\A\\one.mkv');
+    e.files.currentFilePath = 'C:\\A'; e.files.openCtxMenu(0, 0, 'folder', true);
+    e.files.currentFilePath = 'C:\\B'; e.node('[data-ctx="protect"]').click();
+    e.node('#mdProtectAccept').click(); e.node('#mdProtectAccept').click();
+    assert.equal(e.requests.length, 2);
+    assert.equal(e.requests[1].Target, 'C:\\A\\folder');
+    assert.equal(e.requests[1].ScannersMask, '*'); assert.equal(e.requests[1].FixersMask, '*');
+    await Promise.resolve(); assert.equal(e.node('#mdProtectAccept').disabled, false);
+});
+
+test('Files menu handles keyboard actions, touch clicks and page lifecycle', () => {
+    const e = filesMenuEnvironment(), menu = e.node('#mdFileCtxMenu'), list = e.node('#mdFileList');
+    let activated = 0;
+    menu.fire('keydown', { key: 'Enter', target: { closest: () => ({ click() { activated++; } }) }, preventDefault() {} });
+    assert.equal(activated, 1);
+    const row = { getAttribute: key => key === 'data-name' ? 'one.mkv' : '0' };
+    list.fire('touchstart', { target: { closest: () => row }, touches: [{ clientX: 1, clientY: 1 }] });
+    for (const fn of e.timers.values()) fn();
+    let prevented = false;
+    list.fire('click', { preventDefault() { prevented = true; }, stopImmediatePropagation() {} });
+    assert.equal(prevented, true);
+    e.node('[data-ctx="protect"]').click();
+    e.ctx.document.fire('keydown', { key: 'Escape' });
+    assert.equal(e.node('#mdProtectDialog').style.display, 'none');
+    e.files.openCtxMenu(0, 0, 'one.mkv', false);
+    e.cleanups.splice(0).forEach(fn => fn());
+    assert.equal(menu.style.display, 'none'); assert.equal(e.timers.size, 0);
+    assert.equal(e.ctx.document.handlers.get('click').size, 0);
+    e.files.activateFiles(); assert.equal(e.ctx.document.handlers.get('click').size, 1);
+});
+
+test('Files menu decodes fetch and XHR error messages', async () => {
+    const { files } = filesMenuEnvironment();
+    assert.equal(await files.extractErrorMessage({ text: () => Promise.resolve('{"Error":"Outside library"}') }), 'Outside library');
+    assert.equal(await files.extractErrorMessage({ responseText: '"Run a Jellyfin scan first."' }), 'Run a Jellyfin scan first.');
+    assert.equal(await files.extractErrorMessage({ text: () => Promise.reject(new Error()) }, 'Failed'), 'Failed');
+});
+
+test('Protect dialog keeps keyboard focus inside and restores the opener', () => {
+    const e = filesMenuEnvironment();
+    const opener = { focus() { e.ctx.document.activeElement = this; } };
+    e.ctx.document.activeElement = opener;
+    for (const id of ['#mdProtectNote', '#mdProtectCancel', '#mdProtectAccept']) {
+        e.node(id).focus = function () { e.ctx.document.activeElement = this; };
+    }
+    e.files.openCtxMenu(0, 0, 'one.mkv', false);
+    e.node('[data-ctx="protect"]').click();
+    assert.equal(e.ctx.document.activeElement, e.node('#mdProtectNote'));
+    e.node('#mdProtectDialog').fire('keydown', { key: 'Tab', shiftKey: true, preventDefault() {} });
+    assert.equal(e.ctx.document.activeElement, e.node('#mdProtectAccept'));
+    e.node('#mdProtectCancel').click();
+    assert.equal(e.ctx.document.activeElement, opener);
+});
 function environment() {
     const system = element(), drives = element(), timers = new Map();
     let menus = 0, timerId = 0;
@@ -39,6 +124,92 @@ function environment() {
     return { ctx, system, drives, timers, menus: () => menus };
 }
 const event = { target: { closest: () => ({}) }, preventDefault() {}, clientX: 1, clientY: 1, touches: [{ clientX: 1, clientY: 1 }] };
+
+function languagePicker(locale = 'sv-SE') {
+    const ctx = { window: {} };
+    vm.createContext(ctx);
+    vm.runInContext(source('dom-helpers.js'), ctx);
+    vm.runInContext(source('tabs/settings-tab.js'), ctx);
+    const tab = ctx.window.MediaDash.createSettingsTab({
+        STR: ctx.window.MediaDash.STR, view: { querySelector: () => null },
+        esc: s => s, currentLocale: () => locale
+    });
+    tab.populateLanguageDatalist();
+    const hidden = { value: 'eng' }, input = Object.assign(element(), { value: '' });
+    const render = { innerHTML: '', querySelectorAll: () => [] };
+    const chip = Object.assign(element(), {
+        querySelector: s => s === 'input[type=hidden]' ? hidden : s === '.mdChipInputRender' ? render : input
+    });
+    tab.wireChipInput(chip);
+    return { tab, hidden, input };
+}
+
+test('language picker saves Swedish as swe for names and real ISO codes', () => {
+    for (const selected of ['Swedish', 'swe', 'sv']) {
+        const { hidden, input } = languagePicker();
+        input.value = selected; input.fire('input');
+        assert.equal(hidden.value, 'eng, swe', selected);
+    }
+});
+
+test('typing Swedish does not commit Swahili at the sw prefix', () => {
+    const { hidden, input } = languagePicker();
+    for (const partial of ['S', 'Sw']) {
+        input.value = partial; input.fire('input');
+        assert.equal(hidden.value, 'eng', partial);
+    }
+    input.value = 'Swedish'; input.fire('input');
+    assert.equal(hidden.value, 'eng, swe');
+});
+
+test('language names save canonical codes and do not duplicate existing English', () => {
+    for (const [selected, expected] of [['English', 'eng'], ['Spanish', 'eng, spa'], ['Filipino', 'eng, fil']]) {
+        const { hidden, input } = languagePicker();
+        input.value = selected; input.fire('change');
+        assert.equal(hidden.value, expected);
+    }
+});
+
+test('Original selection accepts its code and displayed name alongside English', () => {
+    for (const value of ['orig', 'Original language']) {
+        const { hidden, input } = languagePicker();
+        input.value = value; input.fire('change');
+        assert.equal(hidden.value, 'eng, orig');
+        input.value = value; input.fire('blur');
+        assert.equal(hidden.value, 'eng, orig');
+    }
+});
+
+test('wizard locale mapping uses real language codes', () => {
+    for (const [locale, expected] of [['sv-SE', 'swe'], ['es-ES', 'spa'], ['ja-JP', 'jpn'], ['sw', 'eng'], ['nb-NO', 'nor'], ['nn-NO', 'nor'], ['fil-PH', 'fil']]) {
+        assert.equal(languagePicker(locale).tab.localeToIso3(), expected);
+    }
+});
+
+test('typing complete language names and codes waits for confirmation', () => {
+    for (const [text, code] of [['Filipino', 'fil'], ['fil', 'fil'], ['Slovak', 'slk'], ['slk', 'slk'], ['Swedish', 'swe']]) {
+        const { hidden, input } = languagePicker();
+        for (const char of text) {
+            input.value += char;
+            input.fire('input', { inputType: 'insertText' });
+            assert.equal(hidden.value, 'eng', text);
+        }
+        input.fire('keydown', { key: 'Enter', preventDefault() {} });
+        assert.equal(hidden.value, 'eng, ' + code, text);
+        assert.equal(input.value, '');
+    }
+});
+
+test('language picker supports dropdown replacement and blur without committing composition', () => {
+    const { hidden, input } = languagePicker();
+    input.value = 'fi'; input.fire('input', { inputType: 'insertCompositionText', isComposing: true });
+    assert.equal(hidden.value, 'eng');
+    input.value = 'fil'; input.fire('input', { inputType: 'insertReplacementText' });
+    assert.equal(hidden.value, 'eng, fil');
+    input.value = 'slk'; input.fire('blur');
+    assert.equal(hidden.value, 'eng, fil, slk');
+});
+
 function bindMenus(ctx) {
     const code = source('tabs/overview-tab.js');
     const start = code.indexOf("var sysEl = ");

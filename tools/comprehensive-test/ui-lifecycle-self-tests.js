@@ -68,7 +68,8 @@ if (typeof md.STR.tagline !== 'string' ||
     typeof md.STR.types !== 'object' ||
     md.STR.types.Duplicate.title !== 'Duplicate copies' ||
     !Array.isArray(md.STR.languages) ||
-    md.STR.languages.length !== 46) {
+    md.STR.languages.length !== 47 ||
+    !md.STR.languages.some(function (language) { return language[0] === 'orig' && language[1] === 'Original language'; })) {
     console.error('FATAL: window.MediaDash.STR shape unexpected — did dom-helpers.js get truncated?');
     process.exit(2);
 }
