@@ -1,0 +1,147 @@
+name: Smoke (plugin loads under real Jellyfin)
+
+# i-108: sanity-check that a freshly built plugin zip loads in an actual Jellyfin
+# container without crashing. Matrix over the two supported host lines (10.11.x
+# and 12.x). Runs the built DLLs alone; does NOT exercise scan/fix flows (those
+# need library fixtures and admin auth, which lives in tools/comprehensive-test
+# and stays a manual pre-push gate). Failure here means either the built ABI
+# mismatches, a sidecar DLL is missing from the publish output, or the plugin's
+# service registration throws on startup.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**/*.md']
+  pull_request:
+    branches: [main]
+    paths-ignore: ['**/*.md']
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        # ponytail: pin to the minor-line tag so patch releases don't break the smoke overnight.
+        # 12.x tag may not resolve while 12 is in RC — the job fails loudly rather than silently
+        # skipping so we know when to bump.
+        include:
+          - jellyfin-image: jellyfin/jellyfin:10.11
+            abi: '10.11.0.0'
+          - jellyfin-image: jellyfin/jellyfin:12
+            abi: '12.0.0.0'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Publish plugin
+        run: dotnet publish Jellyfin.Plugin.MediaDash/Jellyfin.Plugin.MediaDash.csproj --configuration Release --output publish
+
+      - name: Stage plugin into a plugins/ dir the container will mount
+        run: |
+          set -euxo pipefail
+          mkdir -p plugins/MediaDash-smoke
+          # Match the release recipe: copy every DLL + deps.json ffmpeg publish emitted.
+          cp publish/*.dll publish/Jellyfin.Plugin.MediaDash.deps.json plugins/MediaDash-smoke/
+          cat > plugins/MediaDash-smoke/meta.json <<EOF
+          {
+            "guid": "38bdb090-b763-4294-934b-b54ade4d9d6d",
+            "name": "MediaDash",
+            "overview": "smoke",
+            "description": "smoke",
+            "owner": "smoke",
+            "category": "General",
+            "version": "0.0.0.0",
+            "targetAbi": "${{ matrix.abi }}",
+            "changelog": "smoke",
+            "timestamp": "2026-01-01T00:00:00Z"
+          }
+          EOF
+          ls -la plugins/MediaDash-smoke
+
+      - name: Run Jellyfin with the plugin mounted
+        run: |
+          set -euxo pipefail
+          mkdir -p jf-config jf-cache
+          docker run -d --name jf \
+            -p 8096:8096 \
+            -v "${PWD}/jf-config:/config" \
+            -v "${PWD}/jf-cache:/cache" \
+            -v "${PWD}/plugins:/config/plugins" \
+            ${{ matrix.jellyfin-image }}
+
+      - name: Wait for Jellyfin health
+        run: |
+          set -eux
+          # /health returns "Healthy" once boot is done. Poll up to 90s (Jellyfin cold-start
+          # on a fresh /config normally lands around 20-40s under GitHub-hosted runners).
+          for i in $(seq 1 45); do
+            body=$(curl -sf http://127.0.0.1:8096/health || true)
+            if [ "$body" = "Healthy" ]; then
+              echo "Jellyfin healthy after ${i} attempt(s)"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Jellyfin never became healthy" >&2
+          docker logs jf | tail -100
+          exit 1
+
+      - name: Verify the plugin loaded without throwing
+        run: |
+          set -euxo pipefail
+          # External audit P2 #9: previously the positive assertion grepped only for the plugin's
+          # assembly name — a failure diagnostic contains that same name, and the negative regex
+          # covered only four exception types with "MediaDash" required to precede them on the
+          # same line. A generic exception, differently ordered stack trace, or multi-line
+          # diagnostic let the smoke step pass while the plugin was actually broken.
+          #
+          # New shape:
+          # 1. Fail on ANY plugin-load-time exception (not just four named ones) by scoping the
+          #    search to Jellyfin's "Loading assembly" / "Error loading plugin" lines.
+          # 2. Positive assertion checks Jellyfin's own successful-load log line
+          #    ("Loaded assembly ... Jellyfin.Plugin.MediaDash") rather than any mention of the
+          #    plugin name.
+          # 3. Hit Jellyfin's /System/Info/Public endpoint and the plugin listing endpoint so we
+          #    verify the server actually came up and knows about the plugin, not just that a log
+          #    line was written.
+          logs=$(docker logs jf 2>&1)
+          echo "$logs" | tail -200
+
+          # Failure signatures: Jellyfin's PluginManager emits "Error loading plugin"
+          # (Emby.Server.Implementations.Plugins) and "Failed to load" diagnostics with the
+          # plugin DLL path when a load throws. These are unambiguous — their presence means
+          # the load path hit an exception, regardless of which exception type.
+          if grep -Eqi '(Error loading plugin|Failed to load).*(MediaDash|38bdb090-b763-4294-934b-b54ade4d9d6d)' <<< "$logs"; then
+            echo "MediaDash plugin load reported an error under Jellyfin ${{ matrix.abi }}" >&2
+            exit 1
+          fi
+
+          # Positive success record: Jellyfin logs "Loaded assembly" from PluginManager when a
+          # plugin's assembly successfully resolves and its types register. Require that line.
+          if ! grep -Eqi 'Loaded assembly.*Jellyfin\.Plugin\.MediaDash' <<< "$logs"; then
+            echo "Jellyfin never logged a successful MediaDash assembly load; plugin failed to initialise" >&2
+            exit 1
+          fi
+
+          # Check the public server endpoint and the registered plugin settings page.
+          curl -fsS --retry 5 --retry-delay 3 --retry-connrefused http://localhost:8096/System/Info/Public > /tmp/info.json
+          if ! curl -fsS 'http://localhost:8096/web/configurationpage?name=MediaDash' > /tmp/configpage.html; then
+            echo "MediaDash configuration page not served; plugin is not fully loaded" >&2
+            exit 1
+          fi
+          if ! grep -Fq 'id="MediaDashConfigPage"' /tmp/configpage.html; then
+            echo "MediaDash configuration page content is missing" >&2
+            exit 1
+          fi
+
+      - name: Dump full container logs on failure
+        if: failure()
+        run: docker logs jf | tail -400
+
+      - name: Stop container
+        if: always()
+        run: docker rm -f jf || true

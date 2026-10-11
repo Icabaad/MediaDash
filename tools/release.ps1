@@ -5,7 +5,7 @@
 # Usage:
 #   ./tools/release.ps1 -Version 0.5.0 -Changelog "One-line summary of what's new."
 #
-# Requires: dotnet SDK, gh CLI (authenticated), PowerShell 5.1+.
+# Requires: committed clean source, dotnet SDK, gh CLI (authenticated), PowerShell 5.1+.
 
 #requires -Version 5.1
 param(
@@ -25,6 +25,20 @@ $zip   = "mediadash_${Version}.zip"
 $stage = "_stage_v" + ($Version -replace '\.','')
 $sourceUrl = "https://github.com/crackruckles/MediaDash/releases/download/$tag/$zip"
 $timestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+
+function Assert-ReleaseSource {
+    param([string]$ExpectedSha)
+    $sha = & git rev-parse HEAD
+    if ($LASTEXITCODE -ne 0 -or -not $sha) { throw "Could not resolve release HEAD SHA" }
+    $sha = $sha.Trim()
+    $changes = & git status --porcelain --untracked-files=normal
+    if ($LASTEXITCODE -ne 0) { throw "Could not inspect release source status" }
+    if ($changes) { throw "Release source has uncommitted or untracked files. Commit the intended release changes before publishing." }
+    if ($ExpectedSha -and $sha -ne $ExpectedSha) { throw "HEAD changed while building the release. Rebuild from the intended commit." }
+    return $sha
+}
+
+$targetSha = Assert-ReleaseSource
 
 Write-Host "Publishing (Release)..."
 # Stamp the version into the DLL. Without this the compiled AssemblyVersion stays at 0.0.0.0
@@ -81,7 +95,10 @@ if ($missing.Count -gt 0) {
 }
 Write-Host "Sidecar check OK: $($requiredPackages.Count) shippable DLLs present."
 
-if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+$stagePath = [IO.Path]::GetFullPath((Join-Path $PWD $stage))
+if ([IO.Path]::GetDirectoryName($stagePath) -ne $PWD.Path) { throw "Release staging path is outside the repository" }
+if ((Test-Path -LiteralPath $stagePath) -and ((Get-Item -LiteralPath $stagePath -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "Release staging path is a link" }
+if (Test-Path -LiteralPath $stagePath) { Remove-Item -LiteralPath $stagePath -Recurse -Force }
 New-Item -ItemType Directory -Path $stage | Out-Null
 Get-ChildItem $publishDir -File | Where-Object { $_.Extension -notin '.pdb','.xml' } | Copy-Item -Destination $stage
 
@@ -102,8 +119,7 @@ Set-Content -Path $notesPath -Value $Changelog -Encoding utf8
 # yet at release time — v1.0.7's tag landed on the PR#11 merge instead of the release
 # commit for exactly this reason. The pushed-commit assumption is documented in the
 # CONTRIBUTING notes: run this only after git push.
-$targetSha = (& git rev-parse HEAD).Trim()
-if (-not $targetSha) { throw "Could not resolve HEAD SHA" }
+$null = Assert-ReleaseSource -ExpectedSha $targetSha
 & gh release create $tag $zip --title $tag --notes-file $notesPath --target $targetSha
 if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
 Remove-Item $notesPath -ErrorAction SilentlyContinue
@@ -144,8 +160,18 @@ $updated = [regex]::Replace($text, '("versions"\s*:\s*\[\s*\r?\n)', "`$1$newEntr
 if ($updated -eq $text) { throw "Could not locate versions array in manifest.json" }
 Set-Content manifest.json $updated -Encoding utf8
 
+# MD-013: keep build.yaml's version in lockstep with the manifest's top entry so downstream
+# consumers of the build descriptor (packaging tooling, catalog scrapers, `jprm` runs) don't
+# label artifacts with a stale version. Single-source-ish: this script IS the release entry
+# point, so writing both files here means neither can drift as long as releases go through
+# release.ps1 (per the "hand-editing manifest.json is banned" rule).
+$buildYaml = Get-Content build.yaml -Raw
+$buildYamlUpdated = [regex]::Replace($buildYaml, '(?m)^(version:\s*)"[^"]*"', "`$1`"$Version`"", 1)
+if ($buildYamlUpdated -eq $buildYaml) { throw "Could not locate version: line in build.yaml" }
+Set-Content build.yaml $buildYamlUpdated -Encoding utf8
+
 Write-Host ""
-Write-Host "Done. Commit manifest.json + $zip, then push:"
-Write-Host "  git add manifest.json $zip"
+Write-Host "Done. Commit manifest.json + build.yaml + $zip, then push:"
+Write-Host "  git add manifest.json build.yaml $zip"
 Write-Host "  git commit -m 'Release v$Version'"
 Write-Host "  git push"

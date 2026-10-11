@@ -58,6 +58,9 @@ jobs:
       - name: Scheduled task wait self-tests
         shell: pwsh
         run: pwsh -NoProfile -NonInteractive -File tools/comprehensive-test/task-wait-self-tests.ps1
+      - name: Release source guard self-tests
+        shell: pwsh
+        run: pwsh -NoProfile -NonInteractive -File tools/release-self-tests.ps1
 
   validator-self-tests:
     # Windows-only: validate-outputs.ps1 currently uses `cmd /c` to invoke
