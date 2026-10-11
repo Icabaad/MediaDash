@@ -26,3 +26,7 @@ tools/comprehensive-test/test-results/
 # torture-test.ps1 (BBB downloaded from test-videos.co.uk).
 tools/repair-test/fixtures/
 tools/repair-test/torture/
+
+# Local scratch: sqlite experiments + per-run .NET test output. Both regenerated locally.
+_sqlite-scratch/
+**/TestResults/
